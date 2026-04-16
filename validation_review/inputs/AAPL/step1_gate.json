@@ -1,0 +1,13 @@
+{
+  "decision": "FAIL",
+  "checkpoint_verdicts": {
+    "a": "Count mismatch: got 0, expected 5",
+    "b": "0/5 FOUND; NOT_FOUND: ['1. NOT_FOUND', '2. NOT_FOUND', '3. NOT_FOUND', '4. NOT_FOUND', '5. NOT_FOUND']",
+    "c": "NOT_FOUND snippets: ['NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND']"
+  },
+  "csf_status": "reviewed",
+  "blocking_reason": "Checkpoint A failed: Count mismatch: got 0, expected 5",
+  "timestamp": "2026-04-10T01:21:08.896984+00:00",
+  "step": "1",
+  "ticker": "AAPL"
+}

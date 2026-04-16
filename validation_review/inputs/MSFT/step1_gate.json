@@ -1,0 +1,11 @@
+{
+  "decision": "FAIL",
+  "checkpoint_verdicts": {
+    "verify": "35/62 verified | NOT_FOUND: PBP-007, PBP-009, PBP-010, PBP-011, PBP-012, PBP-014, PBP-015, PBP-016, IC-002, IC-007, IC-010, IC-012, IC-014, MPC-002, MPC-012, MPC-013, MPC-014, MPC-015, MPC-016, MPC-017, REV-003, REV-005, EXCL-001, EXCL-002, EXCL-003, EXCL-004, EXCL-005"
+  },
+  "csf_status": "auto",
+  "blocking_reason": "27/62 NOT_FOUND exceeds 25% threshold. Check verification text coverage or generation quality.",
+  "timestamp": "2026-04-10T04:41:57.370910+00:00",
+  "step": "1",
+  "ticker": "MSFT"
+}

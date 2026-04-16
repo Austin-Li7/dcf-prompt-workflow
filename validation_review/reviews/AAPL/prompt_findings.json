@@ -1,0 +1,43 @@
+{
+  "ticker": "AAPL",
+  "status": "review_completed",
+  "prompt_families_in_scope": [
+    "step1_checkpoints",
+    "step1_gate_behavior"
+  ],
+  "coverage_limits": [
+    "step1 gate summary missing",
+    "step1 auto verification output missing",
+    "step2 through step4 materials missing"
+  ],
+  "findings": [
+    {
+      "prompt_family": "step1_checkpoint_a",
+      "assessment": "works_well",
+      "issue": "The checkpoint correctly blocks a serious structural error in the generated Step 1 output.",
+      "evidence": [
+        "AAPL generation claims two operating segments: Products and Services",
+        "AAPL gate blocks on count mismatch from checkpoint A"
+      ],
+      "recommended_change": "Preserve supporting filing excerpt and expected count in the gate artifact for easier debugging."
+    },
+    {
+      "prompt_family": "step1_checkpoint_b",
+      "assessment": "usable_with_fixes",
+      "issue": "Repeated NOT_FOUND outputs are too opaque to diagnose whether the problem is content, synonym handling, or bad substitution.",
+      "evidence": [
+        "step1_checkpoint_b.md contains only five repeated NOT_FOUND lines"
+      ],
+      "recommended_change": "Include tested segment text and a brief failure reason or nearest filing match."
+    },
+    {
+      "prompt_family": "step1_checkpoint_c",
+      "assessment": "usable_with_fixes",
+      "issue": "Snippet-verification outputs are parseable but not reviewer-friendly.",
+      "evidence": [
+        "step1_checkpoint_c.md contains only repeated NOT_FOUND lines"
+      ],
+      "recommended_change": "Include sampled claim IDs and a short reason when a snippet is not found."
+    }
+  ]
+}

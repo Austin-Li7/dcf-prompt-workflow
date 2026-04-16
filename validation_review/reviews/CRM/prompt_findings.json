@@ -1,0 +1,9 @@
+{
+  "ticker": "CRM",
+  "status": "blocked_missing_inputs",
+  "prompt_families_in_scope": [],
+  "coverage_limits": [
+    "no CRM materials found in dcf_pipeline/outputs"
+  ],
+  "findings": []
+}

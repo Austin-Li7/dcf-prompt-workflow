@@ -1,0 +1,45 @@
+{
+  "ticker": "MSFT",
+  "status": "review_completed",
+  "prompt_families_in_scope": [
+    "step1_auto_verification",
+    "step1_gate_summary",
+    "step2_validation_handoff"
+  ],
+  "coverage_limits": [
+    "step2 gate output missing",
+    "step3 and step4 validation materials missing"
+  ],
+  "findings": [
+    {
+      "prompt_family": "step1_auto_verification",
+      "assessment": "usable_with_fixes",
+      "issue": "Too many child-product and descriptive claims are classified as NOT_FOUND even though the prompt instructions allow INFERRED for implied or parent-supported items.",
+      "evidence": [
+        "35/62 verified with 27 NOT_FOUND in MSFT step1_auto_verified.md",
+        "Multiple LinkedIn, Dynamics, Xbox, Nuance, and exclusion-line claims were treated as hard misses"
+      ],
+      "recommended_change": "Separate structural assertion scoring from descriptive overreach and add a softer flag for detail expansion."
+    },
+    {
+      "prompt_family": "step1_gate_summary",
+      "assessment": "works_well",
+      "issue": "Human-readable decisioning is strong, but not aligned with the raw machine gate outcome.",
+      "evidence": [
+        "step1_gate.json says FAIL",
+        "step1_gate_summary.md says CONDITIONAL_PASS and explains likely false negatives"
+      ],
+      "recommended_change": "Choose a single canonical final decision source or explicitly mark the summary as advisory."
+    },
+    {
+      "prompt_family": "step2_validation_handoff",
+      "assessment": "not_enough_evidence_yet",
+      "issue": "Step 2 generation exists, but the validation side is absent in the review snapshot.",
+      "evidence": [
+        "step2_generation.md available",
+        "No step2 gate or step2 auto-verify artifact in validation snapshot"
+      ],
+      "recommended_change": "Require generation plus validation artifact pairings before using Step 2 as a test sample."
+    }
+  ]
+}

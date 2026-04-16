@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# local assistant/tooling
+.claude/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env / secrets
+.env
+.env.*
+*.pem
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.pyc
+
+# Generated outputs / caches
+prompt_test/**/output/
+validation_review/**/output/
+
+# Keep root repo clean: this directory already has its own separate git repo
+dcf_pipeline/
