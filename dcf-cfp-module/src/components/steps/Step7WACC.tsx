@@ -4,13 +4,21 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Loader2, AlertTriangle, AlertCircle, CheckCircle2,
   RefreshCw, Save, Percent, Building2, Plus, Trash2,
-  Download as ImportIcon, BarChart3, TrendingUp,
+  Download as ImportIcon, BarChart3, TrendingUp, Shield, SlidersHorizontal,
 } from "lucide-react";
 import StepShell from "./StepShell";
 import { useCFP } from "@/context/CFPContext";
 import {
   fullWACCCalculation, calcWeightedBeta, detectConglomerate,
 } from "@/lib/wacc-math";
+import { inferTickerFromCompanyName, normalizeTickerInput } from "@/lib/ticker-lookup";
+import { buildWaccSegmentsFromCFP } from "@/lib/wacc-handoff";
+import { buildDcfValuation } from "@/lib/dcf-valuation";
+import {
+  buildStep5AssumptionRows,
+  buildStep5ReviewWarningRows,
+  getStep5StructuredResults,
+} from "@/lib/aggregate-forecast";
 import type {
   WACCDataResponse, WACCSegmentRow, WACCConstants, BusinessType, WACCCalculation,
 } from "@/types/wacc";
@@ -26,15 +34,26 @@ function fmtB(v: number): string {
   if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
   return `$${v.toLocaleString()}`;
 }
+function fmtM(v: number): string { return `$${v.toLocaleString(undefined, { maximumFractionDigits: 1 })}M`; }
+function fmtPct(v: number): string { return `${(v * 100).toFixed(1)}%`; }
+function fmtUpside(v: number | null): string {
+  if (v === null) return "N/A";
+  return `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
+}
 
 // =============================================================================
 // Component
 // =============================================================================
 export default function Step7WACC() {
   const { state, dispatch } = useCFP();
-  const ticker = state.profile.ticker || "";
   const companyName = state.profile.companyName || "";
-  const hasTicker = ticker.trim().length > 0;
+  const initialTicker = useMemo(
+    () => normalizeTickerInput(state.profile.ticker) || inferTickerFromCompanyName(companyName),
+    [companyName, state.profile.ticker],
+  );
+  const [tickerInput, setTickerInput] = useState(initialTicker);
+  const activeTicker = normalizeTickerInput(tickerInput);
+  const hasTicker = activeTicker.length > 0;
 
   // ---- Fetched data ----
   const [fetchedData, setFetchedData] = useState<WACCDataResponse | null>(state.wacc.fetchedData);
@@ -48,6 +67,9 @@ export default function Step7WACC() {
   const [businessType, setBusinessType] = useState<BusinessType>(state.wacc.businessType);
   const [singleBeta, setSingleBeta] = useState(state.wacc.singleBeta);
   const [segments, setSegments] = useState<WACCSegmentRow[]>(state.wacc.segments);
+  const [showValuationDashboard, setShowValuationDashboard] = useState(false);
+  const [fcfMargin, setFcfMargin] = useState(0.25);
+  const [terminalGrowth, setTerminalGrowth] = useState(0.025);
 
   // ---- Conglomerate hint ----
   const conglomerateHint = useMemo(() => {
@@ -60,7 +82,7 @@ export default function Step7WACC() {
   // Fetch data from Yahoo Finance
   // ================================================================
   const fetchData = useCallback(async (tickerOverride?: string) => {
-    const t = (tickerOverride || ticker).trim();
+    const t = normalizeTickerInput(tickerOverride || tickerInput);
     if (!t) return;
 
     setIsFetching(true);
@@ -75,6 +97,10 @@ export default function Step7WACC() {
       }
 
       setFetchedData(data);
+      if (data.ticker) {
+        setTickerInput(data.ticker);
+        dispatch({ type: "UPDATE_PROFILE", payload: { ticker: data.ticker } });
+      }
 
       // Auto-populate risk-free rate from the live fetch
       if (data.riskFreeRate > 0) {
@@ -85,14 +111,21 @@ export default function Step7WACC() {
     } finally {
       setIsFetching(false);
     }
-  }, [ticker]);
+  }, [dispatch, tickerInput]);
 
   // Auto-fetch on mount if ticker exists
   useEffect(() => {
     if (hasTicker && !fetchedData) {
-      fetchData();
+      fetchData(activeTicker);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!tickerInput && initialTicker) {
+      setTickerInput(initialTicker);
+      dispatch({ type: "UPDATE_PROFILE", payload: { ticker: initialTicker } });
+    }
+  }, [dispatch, initialTicker, tickerInput]);
 
   // ================================================================
   // Segment management
@@ -111,35 +144,9 @@ export default function Step7WACC() {
 
   // Import segments from CFP architecture + forecast
   const importFromCFP = () => {
-    const arch = state.profile.architectureJson?.architecture;
-    if (!arch || arch.length === 0) return;
+    if (!state.profile.architectureJson?.architecture.length) return;
 
-    // Try to match forecast data for estimated values
-    const forecastSegments = state.forecast.segments;
-
-    const imported: WACCSegmentRow[] = arch.map((seg) => {
-      // Find matching forecast segment to get FY5 revenue as estimated value
-      const matchingForecast = forecastSegments.find((fs) => fs.segment === seg.segment);
-      let estimatedValue = 0;
-
-      if (matchingForecast) {
-        // Sum up FY5 (year=5) quarterly revenue across all products
-        for (const prod of matchingForecast.products) {
-          for (const q of prod.forecast) {
-            if (q.year === 5) estimatedValue += q.revenueM;
-          }
-        }
-      }
-
-      return {
-        id: uid(),
-        name: seg.segment,
-        unleveredBeta: 1.0,
-        estimatedValue: Math.round(estimatedValue),
-      };
-    });
-
-    setSegments(imported);
+    setSegments(buildWaccSegmentsFromCFP(state.profile.architectureJson, state.forecast, uid));
   };
 
   const hasArchitecture = !!state.profile.architectureJson?.architecture?.length;
@@ -161,11 +168,35 @@ export default function Step7WACC() {
       constants,
     });
   }, [fetchedData, effectiveBeta, constants]);
+  const valuation = useMemo(
+    () =>
+      buildDcfValuation({
+        forecast: state.forecast,
+        wacc: {
+          fetchedData,
+          constants,
+          businessType,
+          singleBeta,
+          segments,
+          calculation,
+          saved: state.wacc.saved,
+        },
+        fcfMargin,
+        terminalGrowth,
+      }),
+    [businessType, calculation, constants, fcfMargin, fetchedData, segments, singleBeta, state.forecast, state.wacc.saved, terminalGrowth],
+  );
+  const step5Artifacts = useMemo(() => getStep5StructuredResults(state.forecast), [state.forecast]);
+  const assumptionRows = useMemo(() => buildStep5AssumptionRows(state.forecast), [state.forecast]);
+  const reviewWarnings = useMemo(() => buildStep5ReviewWarningRows(state.forecast), [state.forecast]);
 
   // ================================================================
   // Save
   // ================================================================
   const handleSave = () => {
+    if (activeTicker) {
+      dispatch({ type: "UPDATE_PROFILE", payload: { ticker: activeTicker } });
+    }
     dispatch({
       type: "SET_WACC",
       payload: {
@@ -179,6 +210,18 @@ export default function Step7WACC() {
       },
     });
   };
+  const handleComplete = () => {
+    if (!calculation) return;
+    if (!state.wacc.saved) {
+      handleSave();
+    }
+    setShowValuationDashboard(true);
+  };
+  const handleNext = () => {
+    if (!calculation) return;
+    handleSave();
+    dispatch({ type: "NEXT_STEP" });
+  };
 
   // ==========================================================================
   // Render
@@ -188,8 +231,160 @@ export default function Step7WACC() {
       stepNumber={7}
       title="Discount Rate (WACC)"
       subtitle="Calculate the Weighted Average Cost of Capital using Damodaran's re-levered beta methodology."
+      onNext={handleNext}
+      nextDisabled={!calculation}
+      onComplete={handleComplete}
+      completeDisabled={!calculation}
+      completeLabel={showValuationDashboard ? "Refresh Dashboard" : "Complete"}
     >
       <div className="space-y-6">
+        {showValuationDashboard && (
+          <section className="space-y-5 rounded-xl border border-emerald-700/40 bg-emerald-950/10 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-emerald-300">
+                  <Shield size={16} /> Final Valuation Dashboard
+                </h3>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Illustrative DCF bridge using Step 5 annual forecast, Step 7 WACC, and editable cash-flow assumptions.
+                </p>
+              </div>
+              <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                valuation.impliedUpsidePct !== null && valuation.impliedUpsidePct >= 0
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : "bg-amber-500/15 text-amber-300"
+              }`}>
+                vs Market Cap {fmtUpside(valuation.impliedUpsidePct)}
+              </span>
+            </div>
+
+            {!valuation.hasInputs ? (
+              <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
+                {valuation.warnings.join(" ")}
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <DashboardCard label="DCF Equity Value" value={fmtM(valuation.equityValueUsdM)} highlight />
+                  <DashboardCard label="Enterprise Value" value={fmtM(valuation.enterpriseValueUsdM)} />
+                  <DashboardCard label="Market Cap" value={valuation.marketCapUsdM ? fmtM(valuation.marketCapUsdM) : "N/A"} />
+                  <DashboardCard label="WACC" value={valuation.wacc ? fmtPct(valuation.wacc) : "N/A"} />
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                  <div className="overflow-x-auto rounded-lg border border-zinc-800">
+                    <table className="w-full text-xs">
+                      <thead className="bg-zinc-800 text-zinc-400">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">Year</th>
+                          <th className="px-3 py-2 text-right font-medium">Revenue</th>
+                          <th className="px-3 py-2 text-right font-medium">FCFF</th>
+                          <th className="px-3 py-2 text-right font-medium">Discount</th>
+                          <th className="px-3 py-2 text-right font-medium">PV</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-800/60">
+                        {valuation.forecastRows.map((row) => (
+                          <tr key={row.year}>
+                            <td className="px-3 py-2 text-zinc-300">FY{row.year}</td>
+                            <td className="px-3 py-2 text-right font-mono text-zinc-300">{fmtM(row.revenueUsdM)}</td>
+                            <td className="px-3 py-2 text-right font-mono text-zinc-300">{fmtM(row.fcffUsdM)}</td>
+                            <td className="px-3 py-2 text-right font-mono text-zinc-400">{row.discountFactor.toFixed(3)}</td>
+                            <td className="px-3 py-2 text-right font-mono text-zinc-100">{fmtM(row.presentValueUsdM)}</td>
+                          </tr>
+                        ))}
+                        <tr className="bg-zinc-900/60">
+                          <td className="px-3 py-2 font-semibold text-zinc-200">Terminal PV</td>
+                          <td className="px-3 py-2" />
+                          <td className="px-3 py-2" />
+                          <td className="px-3 py-2 text-right font-mono text-zinc-400">
+                            TV {fmtM(valuation.terminalValueUsdM)}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono font-semibold text-zinc-100">
+                            {fmtM(valuation.terminalPresentValueUsdM)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                    <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
+                      <SlidersHorizontal size={15} /> Key Assumptions
+                    </h4>
+                    <AssumptionSlider
+                      label="FCF Margin"
+                      value={fcfMargin}
+                      min={0.15}
+                      max={0.35}
+                      step={0.005}
+                      onChange={setFcfMargin}
+                    />
+                    <AssumptionSlider
+                      label="Terminal Growth"
+                      value={terminalGrowth}
+                      min={0.01}
+                      max={0.04}
+                      step={0.001}
+                      onChange={setTerminalGrowth}
+                    />
+                    <div className="rounded-lg bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
+                      Net debt bridge: {fmtM(valuation.netDebtUsdM)}. Positive means debt exceeds fetched cash.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-3">
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Market Sanity Check</h4>
+                    <p className="mt-2 text-sm text-zinc-300">
+                      Current external consensus for AAPL is roughly $299-$303 average target, with high targets around $350.
+                    </p>
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Use this as a market cross-check, not as an input to the DCF.
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Top Model Drivers</h4>
+                    <ul className="mt-2 space-y-1.5 text-xs text-zinc-300">
+                      {assumptionRows.slice(0, 4).map((row) => (
+                        <li key={`${row.segment}-${row.assumption_id}`}>
+                          <span className="font-mono text-blue-300">{row.assumption_id}</span>{" "}
+                          <span className="text-zinc-500">{row.driver_quality}</span> {row.statement}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-amber-300">Audit Flags</h4>
+                    {reviewWarnings.length > 0 ? (
+                      <ul className="mt-2 space-y-1.5 text-xs text-amber-100">
+                        {reviewWarnings.slice(0, 4).map((row, index) => (
+                          <li key={`${row.audit_flag}-${index}`}>
+                            <span className="font-mono text-amber-300">{row.audit_flag}</span> {row.warning}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-xs text-zinc-500">No Step 5 review warnings.</p>
+                    )}
+                  </div>
+                </div>
+
+                {valuation.warnings.length > 0 && (
+                  <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200">
+                    {valuation.warnings.join(" ")}
+                  </div>
+                )}
+                {step5Artifacts.length === 0 && (
+                  <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200">
+                    Step 5 structured artifact is missing; dashboard quality is limited.
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
 
         {/* ===== SECTION A: Data Fetch ===== */}
         <section className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-5 space-y-4">
@@ -205,7 +400,7 @@ export default function Step7WACC() {
           {!hasTicker && (
             <div className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/30 p-3 text-sm text-amber-300">
               <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-              No ticker found. Complete Step 1 (Company Profile) first, or enter a ticker manually below.
+              No ticker is saved yet. Enter one below to continue, then save WACC to persist it.
             </div>
           )}
 
@@ -214,13 +409,14 @@ export default function Step7WACC() {
               <label className="mb-1 block text-xs text-zinc-500">Ticker Symbol</label>
               <input
                 type="text"
-                value={ticker || ""}
-                readOnly
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-300 outline-none"
+                value={tickerInput}
+                onChange={(event) => setTickerInput(event.target.value.toUpperCase())}
+                placeholder={companyName ? `Ticker for ${companyName}` : "AAPL"}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500"
               />
             </div>
             <button
-              onClick={() => fetchData()}
+              onClick={() => fetchData(activeTicker)}
               disabled={isFetching || !hasTicker}
               className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
             >
@@ -492,5 +688,50 @@ function CalcCard({ label, value, highlight }: { label: string; value: string; h
       <p className="text-xs text-zinc-500">{label}</p>
       <p className={`mt-0.5 text-sm font-mono font-semibold ${highlight ? "text-blue-400" : "text-zinc-200"}`}>{value}</p>
     </div>
+  );
+}
+
+function DashboardCard({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className={`rounded-lg px-3 py-2 ${highlight ? "border border-emerald-700/30 bg-emerald-950/30" : "bg-zinc-950"}`}>
+      <p className="text-xs text-zinc-500">{label}</p>
+      <p className={`mt-0.5 text-sm font-mono font-semibold ${highlight ? "text-emerald-300" : "text-zinc-200"}`}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function AssumptionSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="block">
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="text-zinc-500">{label}</span>
+        <span className="font-mono text-zinc-200">{fmtPct(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="w-full accent-blue-500"
+      />
+    </label>
   );
 }

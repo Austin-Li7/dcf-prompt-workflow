@@ -13,13 +13,23 @@ export default function StepShell({
   title,
   subtitle,
   children,
+  onNext,
+  nextDisabled,
+  onComplete,
+  completeDisabled,
+  completeLabel = "Complete",
 }: {
   stepNumber: number;
   title: string;
   subtitle: string;
   children?: ReactNode;
+  onNext?: () => void;
+  nextDisabled?: boolean;
+  onComplete?: () => void;
+  completeDisabled?: boolean;
+  completeLabel?: string;
 }) {
-  const { state, dispatch, totalSteps } = useCFP();
+  const { dispatch, totalSteps } = useCFP();
 
   const isFirst = stepNumber === 1;
   const isLast = stepNumber === totalSteps;
@@ -59,17 +69,25 @@ export default function StepShell({
         </button>
 
         <button
-          disabled={isLast}
-          onClick={() => dispatch({ type: "NEXT_STEP" })}
+          disabled={isLast ? completeDisabled : nextDisabled}
+          onClick={() => {
+            if (isLast) onComplete?.();
+            else if (onNext) onNext();
+            else dispatch({ type: "NEXT_STEP" });
+          }}
           className={`
             rounded-lg px-5 py-2.5 text-sm font-medium transition-colors
             ${isLast
-              ? "cursor-not-allowed bg-zinc-800 text-zinc-600"
-              : "bg-blue-600 text-white hover:bg-blue-500"
+              ? completeDisabled
+                ? "cursor-not-allowed bg-zinc-800 text-zinc-600"
+                : "bg-emerald-600 text-white hover:bg-emerald-500"
+              : nextDisabled
+                ? "cursor-not-allowed bg-zinc-800 text-zinc-600"
+                : "bg-blue-600 text-white hover:bg-blue-500"
             }
           `}
         >
-          {isLast ? "Complete" : "Next \u2192"}
+          {isLast ? completeLabel : "Next \u2192"}
         </button>
       </div>
     </div>

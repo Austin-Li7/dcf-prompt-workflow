@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, resolveApiKey } from "@/lib/llm-service";
+import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import {
+  GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA,
+  parseStep3Category,
+  STEP3_CATEGORY_RESPONSE_SCHEMA,
+} from "@/lib/step3-schema";
 import type { LLMProvider } from "@/types/cfp";
-import type { ReviseCompetitionResponse, CategoryCompetitionEntry } from "@/types/cfp";
+import type {
+  CategoryCompetitionEntry,
+  ReviseCompetitionResponse,
+  Step3StructuredCategory,
+} from "@/types/cfp";
 
 // =============================================================================
 // POST /api/revise-competition
@@ -12,41 +21,71 @@ import type { ReviseCompetitionResponse, CategoryCompetitionEntry } from "@/type
 //   - apiKey         (string, optional)
 // =============================================================================
 
-function parseCategoryObject(raw: string): CategoryCompetitionEntry | null {
-  // Try direct parse
-  try {
-    const parsed = JSON.parse(raw.trim());
-    if (parsed && typeof parsed === "object" && parsed.category) return parsed;
-  } catch { /* not raw JSON */ }
+function projectStructuredCategoryToLegacy(
+  category: Step3StructuredCategory,
+): CategoryCompetitionEntry {
+  return {
+    category: category.category,
+    primaryCompetitor: category.primary_competitor,
+    competitiveStatus: category.competitive_status,
+    basisForPairing: category.basis_for_pairing,
+    forces: {
+      rivalry: {
+        rating: category.forces.rivalry.rating,
+        justification: category.forces.rivalry.justification,
+      },
+      newEntrants: {
+        rating: category.forces.new_entrants.rating,
+        justification: category.forces.new_entrants.justification,
+      },
+      suppliers: {
+        rating: category.forces.suppliers.rating,
+        justification: category.forces.suppliers.justification,
+      },
+      buyers: {
+        rating: category.forces.buyers.rating,
+        justification: category.forces.buyers.justification,
+      },
+      substitutes: {
+        rating: category.forces.substitutes.rating,
+        justification: category.forces.substitutes.justification,
+      },
+    },
+    verificationNote: category.verification_note ?? undefined,
+    sourceQuality: category.source_quality,
+    confidence: category.confidence,
+  };
+}
 
-  // Try fenced block
-  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
-  let match: RegExpExecArray | null;
-  while ((match = fenceRegex.exec(raw)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1].trim());
-      if (parsed && typeof parsed === "object" && parsed.category) return parsed;
-    } catch { /* continue */ }
+function extractStructuredPayload(result: {
+  text: string;
+  structuredData?: unknown;
+  finishReason?: string;
+  finishMessage?: string;
+}, provider: LLMProvider): unknown {
+  if (result.structuredData && typeof result.structuredData === "object") {
+    return result.structuredData;
   }
 
-  // Try finding any JSON object
-  const objMatch = raw.match(/\{[\s\S]*\}/);
-  if (objMatch) {
-    try {
-      const parsed = JSON.parse(objMatch[0]);
-      if (parsed && typeof parsed === "object" && parsed.category) return parsed;
-    } catch { /* give up */ }
-  }
-
-  return null;
+  return parseStructuredJsonText(result.text, {
+    provider,
+    finishReason: result.finishReason,
+    finishMessage: result.finishMessage,
+  });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompetitionResponse>> {
   try {
     const body = await req.json();
-    const { categoryData, userFeedback, apiKey: runtimeKey, llmProvider = "claude" as LLMProvider } = body;
+    const {
+      categoryData,
+      structuredCategory,
+      userFeedback,
+      apiKey: runtimeKey,
+      llmProvider = "claude" as LLMProvider,
+    } = body;
 
-    if (!categoryData || !userFeedback) {
+    if ((!categoryData && !structuredCategory) || !userFeedback) {
       return NextResponse.json(
         { category: categoryData, error: "Category data and user feedback are required." },
         { status: 400 },
@@ -61,15 +100,61 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
       );
     }
 
-    const prompt = `You are refining a Porter's Five Forces analysis based on user feedback.
-Current Analysis: ${JSON.stringify(categoryData)}
-User Feedback/Correction: ${userFeedback}
-Task: Update the analysis to perfectly reflect the user's feedback. Keep the exact same JSON schema as the input. Return ONLY the updated JSON object.`;
+    const categoryForRevision = structuredCategory ?? {
+      category_id: `category:${String(categoryData.category ?? "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      category: categoryData.category,
+      mapped_from_step1_ids: ["legacy:unknown"],
+      materiality: "HIGH",
+      primary_competitor: categoryData.primaryCompetitor,
+      competitive_status: categoryData.competitiveStatus,
+      basis_for_pairing: categoryData.basisForPairing,
+      basis_claim_ids: ["legacy:claim"],
+      source_ids: ["legacy:source"],
+      source_quality: categoryData.sourceQuality ?? "Unverified",
+      confidence: categoryData.confidence ?? "Low",
+      human_review_required: true,
+      verification_note: categoryData.verificationNote ?? "Legacy category revised without full Step 3 source grounding.",
+      forces: {
+        rivalry: { ...categoryData.forces.rivalry, claim_id: "legacy:claim", source_ids: ["legacy:source"] },
+        new_entrants: { ...categoryData.forces.newEntrants, claim_id: "legacy:claim", source_ids: ["legacy:source"] },
+        suppliers: { ...categoryData.forces.suppliers, claim_id: "legacy:claim", source_ids: ["legacy:source"] },
+        buyers: { ...categoryData.forces.buyers, claim_id: "legacy:claim", source_ids: ["legacy:source"] },
+        substitutes: { ...categoryData.forces.substitutes, claim_id: "legacy:claim", source_ids: ["legacy:source"] },
+      },
+    };
 
-    const result = await callLLM({ provider: llmProvider, apiKey, prompt, maxTokens: 4096 });
-    const rawText = result.text;
+    const prompt = [
+      "You are refining one Step 3 v5.5 competitive landscape category based on user feedback.",
+      "Current structured category:",
+      JSON.stringify(categoryForRevision, null, 2),
+      "User feedback/correction:",
+      userFeedback,
+      "Task:",
+      "- Update only fields affected by the user feedback.",
+      "- Preserve category_id, category, mapped_from_step1_ids, existing claim/source identifiers, and the structured shape.",
+      "- Keep Review Prompt V2 honesty: if evidence is weak, lower confidence/source_quality and set human_review_required=true.",
+      "- Competitor pairing must still be judged by direct overlap, revenue scale, and market position.",
+      "- Return only the updated structured category matching the schema.",
+    ].join("\n");
 
-    const category = parseCategoryObject(rawText);
+    const result = await callLLM({
+      provider: llmProvider,
+      apiKey,
+      prompt,
+      maxTokens: 4096,
+      responseSchema:
+        llmProvider === "gemini"
+          ? GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA
+          : STEP3_CATEGORY_RESPONSE_SCHEMA,
+      responseToolName: "submit_step3_category_revision",
+      responseToolDescription:
+        "Submit the revised Step 3 structured category while preserving source grounding fields.",
+    });
+
+    const revisedStructuredCategory = parseStep3Category(
+      extractStructuredPayload(result, llmProvider),
+    );
+    const category = projectStructuredCategoryToLegacy(revisedStructuredCategory);
 
     if (!category) {
       return NextResponse.json(
@@ -78,7 +163,7 @@ Task: Update the analysis to perfectly reflect the user's feedback. Keep the exa
       );
     }
 
-    return NextResponse.json({ category });
+    return NextResponse.json({ category, structuredCategory: revisedStructuredCategory });
   } catch (err: unknown) {
     console.error("[revise-competition] Error:", err);
     const message = err instanceof Error ? err.message : "An unexpected error occurred.";

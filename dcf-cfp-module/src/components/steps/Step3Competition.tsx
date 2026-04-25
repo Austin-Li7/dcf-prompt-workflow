@@ -26,6 +26,9 @@ import type {
   AnalyzeCompetitionResponse,
   ReviseCompetitionResponse,
   ForceDetail,
+  Step3ReviewState,
+  Step3StructuredCategory,
+  Step3StructuredResult,
 } from "@/types/cfp";
 
 // =============================================================================
@@ -102,6 +105,12 @@ export default function Step3Competition() {
   const [categories, setCategories] = useState<CategoryCompetitionEntry[]>(
     isAlreadySaved ? state.competition.categories : [],
   );
+  const [structuredResult, setStructuredResult] = useState<Step3StructuredResult | null>(
+    isAlreadySaved ? state.competition.structuredResult : null,
+  );
+  const [step3Review, setStep3Review] = useState<Step3ReviewState | null>(
+    isAlreadySaved ? state.competition.step3Review : null,
+  );
   const [currentIndex, setCurrentIndex] = useState(0);
   const [approvedFlags, setApprovedFlags] = useState<boolean[]>([]);
 
@@ -141,6 +150,8 @@ export default function Step3Competition() {
       }
 
       setCategories(data.categories);
+      setStructuredResult(data.structuredResult ?? null);
+      setStep3Review(data.step3Review ?? null);
       setApprovedFlags(new Array(data.categories.length).fill(false));
       setCurrentIndex(0);
       setChatHistory([]);
@@ -171,6 +182,7 @@ export default function Step3Competition() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           categoryData: categories[currentIndex],
+          structuredCategory: structuredResult?.categories[currentIndex] ?? null,
           userFeedback: feedback,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
@@ -185,6 +197,45 @@ export default function Step3Competition() {
       }
 
       setCategories((prev) => prev.map((c, i) => (i === currentIndex ? data.category : c)));
+      if (data.structuredCategory) {
+        setStructuredResult((prev) =>
+          prev
+            ? {
+                ...prev,
+                categories: prev.categories.map((category, i) =>
+                  i === currentIndex ? data.structuredCategory as Step3StructuredCategory : category,
+                ),
+              }
+            : prev,
+        );
+        setStep3Review((prev) =>
+          prev
+            ? {
+                ...prev,
+                categories: prev.categories.map((category, i) =>
+                  i === currentIndex
+                    ? {
+                        ...category,
+                        humanReviewRequired: data.structuredCategory?.human_review_required ?? category.humanReviewRequired,
+                        sourceQuality: data.structuredCategory?.source_quality ?? category.sourceQuality,
+                        confidence: data.structuredCategory?.confidence ?? category.confidence,
+                        verificationNote: data.structuredCategory?.verification_note ?? category.verificationNote,
+                        editable: {
+                          primaryCompetitor:
+                            data.structuredCategory?.primary_competitor ?? category.editable.primaryCompetitor,
+                          competitiveStatus:
+                            data.structuredCategory?.competitive_status ?? category.editable.competitiveStatus,
+                          basisForPairing:
+                            data.structuredCategory?.basis_for_pairing ?? category.editable.basisForPairing,
+                        },
+                        forces: data.structuredCategory?.forces ?? category.forces,
+                      }
+                    : category,
+                ),
+              }
+            : prev,
+        );
+      }
       setChatHistory((h) => [...h, { role: "ai", text: "Analysis updated based on your feedback." }]);
 
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
@@ -195,7 +246,73 @@ export default function Step3Competition() {
     } finally {
       setIsLoading(false);
     }
-  }, [chatInput, categories, currentIndex, activeApiKey, settings.llmProvider, isLoading]);
+  }, [chatInput, categories, currentIndex, activeApiKey, settings.llmProvider, isLoading, structuredResult]);
+
+  const updateCurrentCategory = useCallback(
+    <K extends keyof Pick<CategoryCompetitionEntry, "primaryCompetitor" | "competitiveStatus" | "basisForPairing">>(
+      field: K,
+      value: CategoryCompetitionEntry[K],
+    ) => {
+      setCategories((prev) =>
+        prev.map((category, i) =>
+          i === currentIndex ? { ...category, [field]: value } : category,
+        ),
+      );
+
+      setStructuredResult((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          categories: prev.categories.map((category, i) => {
+            if (i !== currentIndex) return category;
+            return {
+              ...category,
+              primary_competitor:
+                field === "primaryCompetitor" ? String(value) : category.primary_competitor,
+              competitive_status:
+                field === "competitiveStatus"
+                  ? (value as Step3StructuredCategory["competitive_status"])
+                  : category.competitive_status,
+              basis_for_pairing:
+                field === "basisForPairing" ? String(value) : category.basis_for_pairing,
+              human_review_required: true,
+            };
+          }),
+        };
+      });
+
+      setStep3Review((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          workflowStatus: "needs_review",
+          categories: prev.categories.map((category, i) => {
+            if (i !== currentIndex) return category;
+            return {
+              ...category,
+              humanReviewRequired: true,
+              editable: {
+                ...category.editable,
+                primaryCompetitor:
+                  field === "primaryCompetitor"
+                    ? String(value)
+                    : category.editable.primaryCompetitor,
+                competitiveStatus:
+                  field === "competitiveStatus"
+                    ? (value as Step3StructuredCategory["competitive_status"])
+                    : category.editable.competitiveStatus,
+                basisForPairing:
+                  field === "basisForPairing"
+                    ? String(value)
+                    : category.editable.basisForPairing,
+              },
+            };
+          }),
+        };
+      });
+    },
+    [currentIndex],
+  );
 
   // ------------------------------------------------------------------
   // Approve current category & advance
@@ -218,9 +335,22 @@ export default function Step3Competition() {
   // Save to global context
   // ------------------------------------------------------------------
   const handleSaveToContext = () => {
+    const approvedReview = step3Review
+      ? {
+          ...step3Review,
+          workflowStatus: "can_continue" as const,
+          approved: true,
+          approvedAt: new Date().toISOString(),
+        }
+      : null;
     dispatch({
       type: "SET_COMPETITION",
-      payload: { categories, approved: true },
+      payload: {
+        categories,
+        structuredResult,
+        step3Review: approvedReview,
+        approved: true,
+      },
     });
   };
 
@@ -249,6 +379,7 @@ export default function Step3Competition() {
 
   // Current category
   const current = categories[currentIndex] ?? null;
+  const currentReview = step3Review?.categories[currentIndex] ?? null;
 
   // ==========================================================================
   // Render
@@ -302,6 +433,38 @@ export default function Step3Competition() {
           {/* ============================================================ */}
           {phase === "review" && current && (
             <div className="space-y-5">
+              {step3Review && (
+                <section className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-zinc-100">Step 3 Review Gate</p>
+                      <p className="mt-1 text-sm text-zinc-400">{step3Review.summary.oneLine}</p>
+                    </div>
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                        step3Review.workflowStatus === "can_continue"
+                          ? "bg-emerald-600/15 text-emerald-300"
+                          : "bg-amber-600/15 text-amber-300"
+                      }`}
+                    >
+                      {step3Review.workflowStatus === "can_continue" ? "Ready for Step 4" : "Review required"}
+                    </span>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {step3Review.summary.highlights.map((highlight) => (
+                      <div key={highlight} className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-300">
+                        {highlight}
+                      </div>
+                    ))}
+                  </div>
+                  {step3Review.summary.warnings.length > 0 && (
+                    <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200/90">
+                      {step3Review.summary.warnings.join(" ")}
+                    </div>
+                  )}
+                </section>
+              )}
+
               {/* Progress indicator */}
               <div className="flex items-center gap-2 text-xs text-zinc-500">
                 <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
@@ -318,11 +481,73 @@ export default function Step3Competition() {
               {/* Category card */}
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-5">
                 <h4 className="text-lg font-semibold text-zinc-100">{current.category}</h4>
-                <div className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
-                  <div><span className="text-zinc-500">Competitor:</span> <span className="text-zinc-200">{current.primaryCompetitor}</span></div>
-                  <div><span className="text-zinc-500">Status:</span> <span className="text-zinc-200">{current.competitiveStatus}</span></div>
-                  <div className="sm:col-span-1"><span className="text-zinc-500">Basis:</span> <span className="text-zinc-300">{current.basisForPairing}</span></div>
+                <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                  <label className="block">
+                    <span className="text-xs text-zinc-500">Primary competitor</span>
+                    <input
+                      type="text"
+                      value={current.primaryCompetitor}
+                      onChange={(event) => updateCurrentCategory("primaryCompetitor", event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-zinc-500">Competitive status</span>
+                    <select
+                      value={current.competitiveStatus}
+                      onChange={(event) => updateCurrentCategory("competitiveStatus", event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="Leader">Leader</option>
+                      <option value="Challenger">Challenger</option>
+                      <option value="Unclear">Unclear</option>
+                    </select>
+                  </label>
+                  <label className="block sm:col-span-1">
+                    <span className="text-xs text-zinc-500">Basis for pairing</span>
+                    <textarea
+                      value={current.basisForPairing}
+                      onChange={(event) => updateCurrentCategory("basisForPairing", event.target.value)}
+                      rows={3}
+                      className="mt-1 w-full resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </label>
                 </div>
+                {(current.verificationNote || current.confidence || current.sourceQuality) && (
+                  <div className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs text-zinc-400">
+                    <div className="flex flex-wrap gap-3">
+                      {current.confidence && (
+                        <span><span className="text-zinc-500">Confidence:</span> {current.confidence}</span>
+                      )}
+                      {current.sourceQuality && (
+                        <span><span className="text-zinc-500">Source quality:</span> {current.sourceQuality}</span>
+                      )}
+                    </div>
+                    {current.verificationNote && (
+                      <p className="mt-1 text-zinc-500">{current.verificationNote}</p>
+                    )}
+                  </div>
+                )}
+                {currentReview && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs text-zinc-400">
+                    <div className="flex flex-wrap gap-3">
+                      <span><span className="text-zinc-500">Materiality:</span> {currentReview.materiality}</span>
+                      <span><span className="text-zinc-500">Step 1 IDs:</span> {currentReview.mappedFromStep1Ids.join(", ")}</span>
+                      <span><span className="text-zinc-500">Claims:</span> {currentReview.basisClaimIds.join(", ")}</span>
+                    </div>
+                    {currentReview.sources.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {currentReview.sources.map((source) => (
+                          <p key={source.source_id} className="text-zinc-500">
+                            <span className="text-zinc-400">{source.name}</span>
+                            {source.locator ? ` · ${source.locator}` : ""}
+                            {source.url ? ` · ${source.url}` : ""}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Five Forces table */}
                 <div className="mt-4 space-y-2">
@@ -413,6 +638,18 @@ export default function Step3Competition() {
                 </span>
               </div>
 
+              {step3Review && (
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                  <p className="text-sm font-semibold text-zinc-100">Review summary</p>
+                  <p className="mt-1 text-sm text-zinc-400">{step3Review.summary.oneLine}</p>
+                  {step3Review.validationWarnings.length > 0 && (
+                    <div className="mt-3 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200/90">
+                      {step3Review.validationWarnings.map((warning) => warning.message).join(" ")}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Summary cards */}
               <div className="space-y-3">
                 {categories.map((cat, i) => (
@@ -427,6 +664,13 @@ export default function Step3Competition() {
                         <span className="text-zinc-400">Status:</span> {cat.competitiveStatus} &middot;{" "}
                         <span className="text-zinc-400">Basis:</span> {cat.basisForPairing}
                       </div>
+                      {(cat.verificationNote || cat.confidence || cat.sourceQuality) && (
+                        <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-500">
+                          {cat.confidence && <span className="mr-3">Confidence: {cat.confidence}</span>}
+                          {cat.sourceQuality && <span>Source: {cat.sourceQuality}</span>}
+                          {cat.verificationNote && <p className="mt-1">{cat.verificationNote}</p>}
+                        </div>
+                      )}
                       <div className="space-y-1.5">
                         {FORCE_LABELS.map(({ key, label }) => {
                           const d: ForceDetail = cat.forces[key];
@@ -466,6 +710,8 @@ export default function Step3Competition() {
                   onClick={() => {
                     dispatch({ type: "CLEAR_COMPETITION" });
                     setCategories([]);
+                    setStructuredResult(null);
+                    setStep3Review(null);
                     setApprovedFlags([]);
                     setCurrentIndex(0);
                     setChatHistory([]);

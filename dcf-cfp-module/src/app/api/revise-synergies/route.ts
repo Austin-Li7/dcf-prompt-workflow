@@ -49,7 +49,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseSynergi
       return NextResponse.json({ path: pathData, error: "No API key found for the selected provider.", requiresApiKey: true }, { status: 401 });
     }
 
-    const prompt = `Refine this capability penetration analysis based on user feedback. Keep the exact same JSON schema. Current Analysis: ${JSON.stringify(pathData)}. Feedback: ${userFeedback}. Return ONLY the updated JSON object. Do not modify the existing impactScore.`;
+    const prompt = `Refine this capability penetration analysis based on user feedback. Keep the exact same JSON schema. Current Analysis: ${JSON.stringify(pathData)}. Feedback: ${userFeedback}.
+Review Prompt V2 logic tests:
+- Preserve or update synergyClassification and reviewRationale using the but-for test and reciprocity test.
+- If the relationship is only adjacent profit with no functional interdependency, classify it as Adjacent Revenue.
+- Do not treat management targets or hypothetical future outcomes as verified proof.
+Return ONLY the updated JSON object. Do not modify the existing impactScore unless the user explicitly asks to change it.`;
 
     const result = await callLLM({ provider: llmProvider, apiKey, prompt, maxTokens: 4096 });
     const rawText = result.text;

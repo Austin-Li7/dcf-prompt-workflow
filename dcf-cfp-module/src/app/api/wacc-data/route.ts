@@ -19,7 +19,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
       return NextResponse.json(
         {
           ticker: "", companyName: "", marketCap: 0, totalDebt: 0,
-          interestExpense: 0, riskFreeRate: FALLBACK_RISK_FREE,
+          currentPrice: 0, sharesOutstanding: 0, totalCash: 0, interestExpense: 0, riskFreeRate: FALLBACK_RISK_FREE,
           companyDescription: "", error: "Ticker is required.",
         },
         { status: 400 },
@@ -30,6 +30,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
 
     // ---- Fetch company data ----
     let marketCap = 0;
+    let currentPrice = 0;
+    let sharesOutstanding = 0;
+    let totalCash = 0;
     let totalDebt = 0;
     let interestExpense = 0;
     let companyName = cleanTicker;
@@ -45,13 +48,17 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
         ],
       });
 
+      currentPrice = summary.financialData?.currentPrice ?? 0;
+      sharesOutstanding = summary.defaultKeyStatistics?.sharesOutstanding ?? 0;
+
       // Market Cap
-      marketCap = summary.financialData?.currentPrice && summary.defaultKeyStatistics?.sharesOutstanding
-        ? summary.financialData.currentPrice * summary.defaultKeyStatistics.sharesOutstanding
+      marketCap = currentPrice && sharesOutstanding
+        ? currentPrice * sharesOutstanding
         : (summary.defaultKeyStatistics?.enterpriseValue ?? 0);
 
       // Total Debt
       totalDebt = summary.financialData?.totalDebt ?? 0;
+      totalCash = summary.financialData?.totalCash ?? 0;
 
       // Company description (for conglomerate detection)
       companyDescription = summary.summaryProfile?.longBusinessSummary ?? "";
@@ -87,6 +94,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
       ticker: cleanTicker,
       companyName,
       marketCap,
+      currentPrice,
+      sharesOutstanding,
+      totalCash,
       totalDebt,
       interestExpense,
       riskFreeRate,
@@ -98,7 +108,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
     return NextResponse.json(
       {
         ticker: "", companyName: "", marketCap: 0, totalDebt: 0,
-        interestExpense: 0, riskFreeRate: FALLBACK_RISK_FREE,
+        currentPrice: 0, sharesOutstanding: 0, totalCash: 0, interestExpense: 0, riskFreeRate: FALLBACK_RISK_FREE,
         companyDescription: "", error: msg,
       },
       { status: 500 },

@@ -33,12 +33,52 @@ next_action=PROCEED_STEP4_5
 ## Required Output
 ```json
 {
-  "machine_artifact": {
-    "synergy_registry": [
+  "schema_version": "v5.5",
+  "company_name": "",
+  "review_summary": {
+    "one_line": "",
+    "highlights": [],
+    "warnings": []
+  },
+  "sources": [
+    {
+      "source_id": "",
+      "source_type": "official_filing / company_release / earnings_transcript / market_research / news / uploaded_file / text_notes / derived / not_available",
+      "name": "",
+      "url": null,
+      "locator": "",
+      "excerpt": ""
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "",
+      "text": "",
+      "source_ids": [],
+      "evidence_level": "DISCLOSED / STRONG_INFERENCE / WEAK_INFERENCE / UNSUPPORTED",
+      "source_snippet": ""
+    }
+  ],
+  "synergy_registry": [
       {
         "synergy_id": "",
         "source_business": "",
+        "core_capability": "",
         "recipient_business": "",
+        "mechanism": "",
+        "product_impact": "",
+        "competitor_constraint": "",
+        "financial_signal": {
+          "type": "Revenue Enablement / Margin Expansion / CAC Reduction / Cost Displacement / product-only",
+          "evidence": "",
+          "status": "financially-material / product-only",
+          "claim_id": "",
+          "source_ids": []
+        },
+        "flywheel": {
+          "is_flywheel": false,
+          "loop_description": "N/A if false"
+        },
         "integration_verdict": "PROVEN / PARTIAL / NOT_PROVEN",
         "differentiation_verdict": "PROVEN / PARTIAL / NOT_PROVEN / SKIPPED_LIGHT_MODE",
         "causality_verdict": "PROVEN / PARTIAL / NOT_PROVEN",
@@ -46,12 +86,28 @@ next_action=PROCEED_STEP4_5
         "driver_eligibility": "FULL / CAPPED_3PP / CAPPED_2PP / CONTEXT_ONLY / NOT_ALLOWED",
         "basis_claim_ids": [],
         "financial_metric_link": "",
+        "impact_score": 0,
+        "review_rationale": "",
         "human_review_required": false
       }
     ],
+  "capital_allocation": {
+    "capital_metrics": [],
+    "feasibility_checkpoints": {
+      "capex_runway": "",
+      "scale_economics": "",
+      "guidance_alignment": ""
+    },
+    "step5_revenue_ceiling": {
+      "applies": false,
+      "reason": "",
+      "ceiling_revenue_usd_m": null
+    },
+    "asset_light_exemption": false,
     "workflow_status": "READY / NEEDS_REVIEW / BLOCKED",
-    "next_action": "PROCEED_STEP4_5 / HUMAN_REVIEW_SYNERGY_DRIVER / REGENERATE"
-  }
+    "next_action": "PROCEED_STEP5 / HUMAN_REVIEW_CAPITAL_CONSTRAINT / REGENERATE"
+  },
+  "validation_warnings": []
 }
 ```
 
@@ -69,6 +125,12 @@ List only:
 - synergies capped
 - synergies disallowed
 - any weak-inference concentration risk
+
+## Source Grounding
+- Every synergy must reference `basis_claim_ids`.
+- Every `financial_signal` must include `claim_id` and `source_ids`.
+- If a source is missing or generic, mark the synergy `human_review_required=true` and downgrade `driver_eligibility`.
+- Review UI must be able to display `review_summary`, sources, claims, verdicts, and editable rationale fields without reading prose outside JSON.
 
 ## UI Handoff
 Show:

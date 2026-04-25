@@ -12,7 +12,7 @@ import type { CFPState, CFPAction } from "@/types/cfp";
 // =============================================================================
 // Initial (empty) state — filled step-by-step as the user progresses
 // =============================================================================
-const TOTAL_STEPS = 7;
+const TOTAL_STEPS = 8;
 
 export const initialCFPState: CFPState = {
   currentStep: 1,
@@ -29,16 +29,21 @@ export const initialCFPState: CFPState = {
     fiscalYearEnd: "",
     lastUpdated: null,
     rawAnalysisMarkdown: "",
+    step1StructuredResult: null,
     architectureJson: null,
+    step1Review: null,
   },
 
   history: {
     rows: [],
     confirmedYears: [],
+    structuredResults: [],
   },
 
   competition: {
     categories: [],
+    structuredResult: null,
+    step3Review: null,
     approved: false,
   },
 
@@ -48,10 +53,13 @@ export const initialCFPState: CFPState = {
     capital: null,
     capitalApproved: false,
     recentNews: "",
+    structuredResult: null,
+    step4Review: null,
   },
 
   forecast: {
     segments: [],
+    structuredResults: [],
     approved: false,
   },
 
@@ -114,8 +122,12 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
         ...state,
         profile: {
           ...state.profile,
+          ticker: action.payload.structuredResult?.ticker ?? state.profile.ticker,
+          companyName: action.payload.structuredResult?.company_name ?? state.profile.companyName,
           rawAnalysisMarkdown: action.payload.rawMarkdown,
+          step1StructuredResult: action.payload.structuredResult,
           architectureJson: action.payload.architectureJson,
+          step1Review: action.payload.step1Review,
           lastUpdated: new Date().toISOString(),
         },
       };
@@ -142,14 +154,17 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
     case "CLEAR_HISTORY":
       return {
         ...state,
-        history: { rows: [], confirmedYears: [] },
+        history: { rows: [], confirmedYears: [], structuredResults: [] },
       };
 
     case "SET_COMPETITION":
       return { ...state, competition: action.payload };
 
     case "CLEAR_COMPETITION":
-      return { ...state, competition: { categories: [], approved: false } };
+      return {
+        ...state,
+        competition: { categories: [], structuredResult: null, step3Review: null, approved: false },
+      };
 
     case "SET_SYNERGIES":
       return { ...state, synergies: action.payload };
@@ -157,7 +172,13 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
     case "SET_SYNERGIES_PATHS":
       return {
         ...state,
-        synergies: { ...state.synergies, paths: action.payload.paths, synergiesApproved: true },
+        synergies: {
+          ...state.synergies,
+          paths: action.payload.paths,
+          synergiesApproved: true,
+          structuredResult: action.payload.structuredResult ?? state.synergies.structuredResult,
+          step4Review: action.payload.step4Review ?? state.synergies.step4Review,
+        },
       };
 
     case "SET_CAPITAL_DATA":
@@ -168,20 +189,30 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
           capital: action.payload.capital,
           capitalApproved: true,
           recentNews: action.payload.recentNews,
+          structuredResult: action.payload.structuredResult ?? state.synergies.structuredResult,
+          step4Review: action.payload.step4Review ?? state.synergies.step4Review,
         },
       };
 
     case "CLEAR_SYNERGIES":
       return {
         ...state,
-        synergies: { paths: [], synergiesApproved: false, capital: null, capitalApproved: false, recentNews: "" },
+        synergies: {
+          paths: [],
+          synergiesApproved: false,
+          capital: null,
+          capitalApproved: false,
+          recentNews: "",
+          structuredResult: null,
+          step4Review: null,
+        },
       };
 
     case "SET_FORECAST":
       return { ...state, forecast: action.payload };
 
     case "CLEAR_FORECAST":
-      return { ...state, forecast: { segments: [], approved: false } };
+      return { ...state, forecast: { segments: [], structuredResults: [], approved: false } };
 
     case "SET_SUMMARY":
       return { ...state, summary: action.payload };

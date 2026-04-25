@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["127.0.0.1"],
   // Keep these as server-external so Next.js/Webpack never tries to bundle
   // packages that include native binaries, vendored WASM, or internal
   // ESM workspaces (documind ships as plain .js ESM with no TS declarations).

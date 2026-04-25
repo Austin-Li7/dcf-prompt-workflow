@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
-import { callLLM, resolveApiKey } from "@/lib/llm-service";
+import {
+  buildStep2StructuredFromFixtureRecords,
+  recordsFromDcfInputPayload,
+} from "@/lib/step2-fixture-ingest";
+import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import {
+  GEMINI_STEP2_RESPONSE_SCHEMA,
+  parseStep2StructuredResult,
+  projectStep2StructuredToRows,
+  STEP2_RESPONSE_SCHEMA,
+} from "@/lib/step2-schema";
 import type { LLMProvider } from "@/types/cfp";
 import type { ExtractHistoryResponse } from "@/types/cfp";
 
@@ -10,7 +20,7 @@ import type { ExtractHistoryResponse } from "@/types/cfp";
 // Accepts multipart/form-data:
 //   - targetYear    (string, required) — e.g. "2023"
 //   - architecture  (string, required) — JSON from Step 1
-//   - dataFiles     (File[], up to 4)  — .xlsx, .csv, or .txt
+//   - dataFiles     (File[], up to 4)  — .xlsx, .csv, .json, or .txt
 //   - textNotes     (string, optional) — free-text pasted by the user
 //   - apiKey        (string, optional) — runtime key override
 //   - llmProvider   ("claude" | "gemini")
@@ -21,107 +31,66 @@ import type { ExtractHistoryResponse } from "@/types/cfp";
 // =============================================================================
 
 // ---------------------------------------------------------------------------
-// Gemini responseSchema — mirrors Omit<HistoricalExtractionRow, "id"|"yoyGrowth">
-// Wrapped in { rows: [] } so the top-level response is always an object,
-// which Gemini structured-output handles most reliably.
-// ---------------------------------------------------------------------------
-const EXTRACTION_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    rows: {
-      type: "array",
-      description:
-        "All historical financial data rows extracted and mapped from the provided source data.",
-      items: {
-        type: "object",
-        properties: {
-          fiscalYear: {
-            type: "integer",
-            description: "Fiscal year as a 4-digit integer (e.g. 2023).",
-          },
-          quarter: {
-            type: "string",
-            description:
-              "Fiscal quarter, normalised to exactly one of: Q1, Q2, Q3, Q4.",
-          },
-          segment: {
-            type: "string",
-            description:
-              "Top-level business segment name (e.g. 'Digital Media', 'Cloud Services').",
-          },
-          productCategory: {
-            type: "string",
-            description:
-              "Product category within the segment (e.g. 'Creative Cloud', 'Advertising Cloud').",
-          },
-          productName: {
-            type: "string",
-            description:
-              "Specific product or sub-category (e.g. 'Photoshop', 'Acrobat Pro'). " +
-              "If the data has no further breakdown, repeat the segment or category name.",
-          },
-          revenue: {
-            type: "number",
-            description: "Revenue for this row in USD Millions. Use 0 if unavailable.",
-          },
-          operatingIncome: {
-            type: "number",
-            description:
-              "Operating income for this row in USD Millions. Use 0 if unavailable.",
-          },
-          notes: {
-            type: "string",
-            description:
-              "Optional: a brief note on what drove revenue this quarter, based on the source data.",
-          },
-        },
-        required: [
-          "fiscalYear",
-          "quarter",
-          "segment",
-          "productCategory",
-          "productName",
-          "revenue",
-          "operatingIncome",
-          "notes",
-        ],
-      },
-    },
-  },
-  required: ["rows"],
-};
-
-// ---------------------------------------------------------------------------
 // Accepted file types
 // ---------------------------------------------------------------------------
 const XLSX_EXTS = new Set([".xlsx", ".xls", ".xlsm"]);
 const CSV_EXTS = new Set([".csv"]);
 const TXT_EXTS = new Set([".txt"]);
+const JSON_EXTS = new Set([".json"]);
+
+type ParsedFile = {
+  name: string;
+  content: string;
+  records: Array<Record<string, unknown>>;
+};
 
 function fileExtension(name: string): string {
   const dot = name.lastIndexOf(".");
   return dot >= 0 ? name.slice(dot).toLowerCase() : "";
 }
 
+function companyNameFromArchitecture(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw);
+    return String(parsed.company_name ?? parsed.companyName ?? "Unknown Company");
+  } catch {
+    return "Unknown Company";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Parse a single uploaded file → plain-text representation
 // ---------------------------------------------------------------------------
-async function parseFile(file: File): Promise<string> {
+async function parseFile(file: File): Promise<ParsedFile> {
   const ext = fileExtension(file.name);
   const buffer = Buffer.from(await file.arrayBuffer());
 
   if (TXT_EXTS.has(ext)) {
-    return buffer.toString("utf-8");
+    return { name: file.name, content: buffer.toString("utf-8"), records: [] };
+  }
+
+  if (JSON_EXTS.has(ext)) {
+    const content = buffer.toString("utf-8");
+    const payload = JSON.parse(content);
+    const records = recordsFromDcfInputPayload(payload);
+    return {
+      name: file.name,
+      content: records.length > 0 ? JSON.stringify(records, null, 2) : content,
+      records,
+    };
   }
 
   if (XLSX_EXTS.has(ext) || CSV_EXTS.has(ext)) {
     const wb = XLSX.read(buffer, { type: "buffer" });
-    const sheetName = wb.SheetNames[0];
-    if (!sheetName) return "(empty workbook)";
-    const ws = wb.Sheets[sheetName];
-    // Convert to JSON for maximum LLM readability
-    const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    return JSON.stringify(json, null, 2);
+    const records: Array<Record<string, unknown>> = [];
+    for (const sheetName of wb.SheetNames) {
+      const ws = wb.Sheets[sheetName];
+      records.push(...XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "" }));
+    }
+    if (records.length === 0) {
+      return { name: file.name, content: "(empty workbook)", records: [] };
+    }
+    return { name: file.name, content: JSON.stringify(records, null, 2), records };
   }
 
   throw new Error(`Unsupported file type: ${file.name} (${ext})`);
@@ -176,24 +145,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<ExtractHistor
     // ── Provider & API key ───────────────────────────────────────────────────
     const llmProvider = (formData.get("llmProvider") as LLMProvider) || "gemini";
     const runtimeKey = formData.get("apiKey") as string | null;
-    const { apiKey, needsKey } = resolveApiKey(llmProvider, runtimeKey ?? undefined);
-
-    if (needsKey) {
-      return NextResponse.json(
-        { rows: [], error: "No API key found for the selected provider.", requiresApiKey: true },
-        { status: 401 },
-      );
-    }
 
     // ── Parse all uploaded files locally ────────────────────────────────────
     const parsedSections: string[] = [];
+    const parsedFiles: ParsedFile[] = [];
 
     for (const file of dataFiles) {
       try {
-        const content = await parseFile(file);
-        parsedSections.push(`--- FILE: ${file.name} ---\n${content}`);
+        const parsedFile = await parseFile(file);
+        parsedFiles.push(parsedFile);
+        parsedSections.push(`--- FILE: ${file.name} ---\n${parsedFile.content}`);
         console.log(
-          `[extract-history] Parsed ${file.name} → ${content.length} chars`,
+          `[extract-history] Parsed ${file.name} → ${parsedFile.content.length} chars`,
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -212,22 +175,55 @@ export async function POST(req: NextRequest): Promise<NextResponse<ExtractHistor
       parsedSections.push(`--- TEXT NOTES ---\n${textNotes}`);
     }
 
+    const targetYearNumber = Number(targetYear.trim());
+    for (const parsedFile of parsedFiles) {
+      const fixtureResult = buildStep2StructuredFromFixtureRecords(
+        parsedFile.records,
+        targetYearNumber,
+        parsedFile.name,
+      );
+      if (fixtureResult) {
+        const rows = projectStep2StructuredToRows(fixtureResult);
+        console.log(
+          `[extract-history] Imported ${rows.length} fixture rows for FY ${targetYear}.`,
+        );
+        return NextResponse.json({ rows, structuredResult: fixtureResult });
+      }
+    }
+
+    const { apiKey, needsKey } = resolveApiKey(llmProvider, runtimeKey ?? undefined);
+
+    if (needsKey) {
+      return NextResponse.json(
+        { rows: [], error: "No API key found for the selected provider.", requiresApiKey: true },
+        { status: 401 },
+      );
+    }
+
     // ── Build prompt ─────────────────────────────────────────────────────────
-    const systemPrompt =
-      "You are an expert financial data architect specialising in SEC filings and corporate earnings data. " +
-      "Your only job is to extract structured financial data and map it precisely to the requested JSON schema. " +
-      "Do not add commentary. Do not skip rows. Fill every required field.";
+    const systemPrompt = [
+      "You are producing the Step 2 historical financials contract for a DCF workflow.",
+      "Return only a compact structured JSON object matching the provided schema.",
+      'The top-level schema_version field must be exactly "v5.5".',
+      "Do not invent financial values. Use null for unavailable revenue or operating income.",
+      "Map rows only to Step 1 canonical analysis segments and offerings.",
+      "Rows must include source_id, mapped_from_step1_ids, evidence_level, validation_status, and review_note.",
+      "Keep review_note and excerpts short. No prose outside the structured response.",
+    ].join(" ");
 
     const userPrompt = [
-      "I am providing you with raw data extracted from Excel/CSV files, along with optional text notes.",
-      "Your job is to locate the historical segment revenue and operating income, and map it strictly to the provided JSON schema.",
-      "Ensure quarters are normalised (Q1, Q2, Q3, Q4). Revenue and Operating Income must be in USD Millions.",
-      "",
+      "Task: Extract historical quarterly financial rows for the target fiscal year.",
+      `Company: ${companyNameFromArchitecture(architectureRaw)}`,
       `Target Fiscal Year: ${targetYear.trim()}`,
-      `Business Architecture (use this to guide segment/category/product mapping):`,
+      "Step 1 architecture input:",
       architectureRaw,
-      "",
-      "=== SOURCE DATA ===",
+      "Rules:",
+      "- Use canonical Step 1 names for segment/product mapping.",
+      "- If a value is present in uploaded data, validation_status is verified_source.",
+      "- If a value is missing or inferred, keep it null and add a validation warning.",
+      "- Put geographic-only lines, subtotals, duplicate rows, and unmapped labels into excluded_items.",
+      "- Units must be USD millions.",
+      "Source data:",
       parsedSections.join("\n\n"),
     ].join("\n");
 
@@ -238,74 +234,46 @@ export async function POST(req: NextRequest): Promise<NextResponse<ExtractHistor
       prompt: userPrompt,
       systemPrompt,
       maxTokens: 16384,
-      // Gemini will enforce the schema; Claude falls back to prompt-only JSON
-      responseSchema: llmProvider === "gemini" ? EXTRACTION_RESPONSE_SCHEMA : undefined,
+      responseSchema:
+        llmProvider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA,
     });
 
     // ── Parse the response ───────────────────────────────────────────────────
-    // Gemini with responseSchema returns guaranteed JSON.
-    // Claude returns a JSON string if the prompt worked correctly.
-    let rows: ExtractHistoryResponse["rows"] = [];
+    let structuredResult;
 
     try {
-      const parsed = JSON.parse(result.text.trim());
+      const structuredPayload =
+        result.structuredData && typeof result.structuredData === "object"
+          ? result.structuredData
+          : parseStructuredJsonText(result.text, {
+              provider: llmProvider,
+              finishReason: result.finishReason,
+              finishMessage: result.finishMessage,
+            });
 
-      // Unwrap { rows: [...] } wrapper
-      const rawArr: unknown[] = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed?.rows)
-          ? parsed.rows
-          : [];
-
-      rows = rawArr.map((r) => {
-        const row = r as Record<string, unknown>;
-        return {
-          fiscalYear: Number(row.fiscalYear) || Number(targetYear),
-          quarter: normalizeQuarter(String(row.quarter ?? "")),
-          segment: String(row.segment ?? ""),
-          productCategory: String(row.productCategory ?? ""),
-          productName: String(row.productName ?? ""),
-          revenue: Number(row.revenue) || 0,
-          operatingIncome: Number(row.operatingIncome) || 0,
-          notes: String(row.notes ?? ""),
-        };
-      });
-    } catch {
-      console.error("[extract-history] Failed to parse LLM response:", result.text.slice(0, 500));
-      return NextResponse.json(
-        { rows: [], error: "The model did not return a valid JSON response. Please try again." },
-        { status: 422 },
-      );
-    }
-
-    if (rows.length === 0) {
+      structuredResult = parseStep2StructuredResult(structuredPayload);
+    } catch (err) {
+      console.error("[extract-history] Failed to parse structured Step 2 response:", err);
       return NextResponse.json(
         {
           rows: [],
+          structuredResult: null,
           error:
-            "No data rows could be extracted from the provided files. " +
-            "Make sure your file contains segment revenue data.",
+            err instanceof Error
+              ? err.message
+              : "The model did not return valid Step 2 structured JSON.",
         },
         { status: 422 },
       );
     }
 
+    const rows = projectStep2StructuredToRows(structuredResult);
+
     console.log(`[extract-history] Extracted ${rows.length} rows for FY ${targetYear}.`);
-    return NextResponse.json({ rows });
+    return NextResponse.json({ rows, structuredResult });
   } catch (err: unknown) {
     console.error("[extract-history] Unhandled error:", err);
     const message = err instanceof Error ? err.message : "An unexpected error occurred.";
     return NextResponse.json({ rows: [], error: message }, { status: 500 });
   }
-}
-
-// ---------------------------------------------------------------------------
-// Quarter string normaliser — handles "Q1", "Quarter 1", "1", "q2", etc.
-// ---------------------------------------------------------------------------
-function normalizeQuarter(raw: string): string {
-  if (!raw) return "Q1";
-  const upper = raw.toUpperCase().trim();
-  if (/^Q[1-4]$/.test(upper)) return upper;
-  const match = upper.match(/[1-4]/);
-  return match ? `Q${match[0]}` : "Q1";
 }

@@ -22,14 +22,40 @@ export interface CallLLMOptions {
    * Optional Gemini-native responseSchema (JSON Schema object).
    * When provided the Gemini branch enables responseMimeType "application/json"
    * and passes the schema, guaranteeing structured output.
-   * Ignored by the Claude branch (use prompt instructions for Claude).
+   * When provided for Claude, the request is forced through a tool schema.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   responseSchema?: Record<string, any>;
+  responseToolName?: string;
+  responseToolDescription?: string;
 }
 
 export interface CallLLMResult {
   text: string;
+  structuredData?: unknown;
+  finishReason?: string;
+  finishMessage?: string;
+}
+
+export function parseStructuredJsonText(
+  text: string,
+  context: { provider: LLMProvider; finishReason?: string; finishMessage?: string },
+): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    if (
+      context.provider === "gemini" &&
+      context.finishReason === "MAX_TOKENS" &&
+      error instanceof SyntaxError
+    ) {
+      throw new Error(
+        `Structured output was truncated because Gemini hit MAX_TOKENS. ${context.finishMessage ?? "Try retrying with a smaller output or a higher token limit."}`.trim(),
+      );
+    }
+
+    throw error;
+  }
 }
 
 // =============================================================================
@@ -69,7 +95,15 @@ export async function callLLM(options: CallLLMOptions): Promise<CallLLMResult> {
   }
 
   // Default: Claude
-  return callClaude(apiKey, prompt, systemPrompt, maxTokens);
+  return callClaude(
+    apiKey,
+    prompt,
+    systemPrompt,
+    maxTokens,
+    options.responseSchema,
+    options.responseToolName,
+    options.responseToolDescription,
+  );
 }
 
 // =============================================================================
@@ -81,6 +115,10 @@ async function callClaude(
   prompt: string,
   systemPrompt: string | undefined,
   maxTokens: number,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  responseSchema?: Record<string, any>,
+  responseToolName = "submit_step1_structured_result",
+  responseToolDescription = "Return the validated Step 1 structured payload.",
 ): Promise<CallLLMResult> {
   const anthropic = new Anthropic({ apiKey });
 
@@ -88,15 +126,40 @@ async function callClaude(
     model: "claude-sonnet-4-20250514",
     max_tokens: maxTokens,
     ...(systemPrompt ? { system: systemPrompt } : {}),
+    ...(responseSchema
+      ? {
+          tools: [
+            {
+              name: responseToolName,
+              description: responseToolDescription,
+              input_schema: responseSchema as any,
+            },
+          ],
+          tool_choice: {
+            type: "tool",
+            name: responseToolName,
+          },
+        }
+      : {}),
     messages: [{ role: "user", content: prompt }],
-  });
+  } as any);
 
+  const toolUseBlock = message.content.find(
+    (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
+  );
   const text = message.content
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("\n\n");
 
-  return { text };
+  return {
+    text:
+      toolUseBlock && typeof toolUseBlock.input === "object"
+        ? JSON.stringify(toolUseBlock.input, null, 2)
+        : text,
+    structuredData: toolUseBlock?.input,
+    finishReason: message.stop_reason ?? undefined,
+  };
 }
 
 // =============================================================================
@@ -131,6 +194,25 @@ async function callGemini(
 
   const result = await model.generateContent(prompt);
   const text = result.response.text();
+  const firstCandidate = result.response.candidates?.[0];
+  let structuredData: unknown;
 
-  return { text };
+  if (responseSchema) {
+    try {
+      structuredData = parseStructuredJsonText(text, {
+        provider: "gemini",
+        finishReason: firstCandidate?.finishReason,
+        finishMessage: firstCandidate?.finishMessage,
+      });
+    } catch {
+      structuredData = undefined;
+    }
+  }
+
+  return {
+    text,
+    structuredData,
+    finishReason: firstCandidate?.finishReason,
+    finishMessage: firstCandidate?.finishMessage,
+  };
 }

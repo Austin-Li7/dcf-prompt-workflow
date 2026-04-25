@@ -12,6 +12,7 @@ import Step4Synergies from "@/components/steps/Step4Synergies";
 import Step5Forecast from "@/components/steps/Step5Forecast";
 import Step6Summary from "@/components/steps/Step6Summary";
 import Step7WACC from "@/components/steps/Step7WACC";
+import Step8Valuation from "@/components/steps/Step8Valuation";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -44,12 +45,10 @@ const STEP_GROUPS: StepGroup[] = [
     title: "Module 2 — Discount Rate",
     steps: [
       { number: 7, label: "WACC Calculator", shortLabel: "WACC" },
+      { number: 8, label: "DCF Valuation", shortLabel: "Valuation" },
     ],
   },
 ];
-
-// Flat list for backward compat
-const STEPS: StepMeta[] = STEP_GROUPS.flatMap((g) => g.steps);
 
 // ---------------------------------------------------------------------------
 // Step renderer
@@ -63,6 +62,7 @@ function ActiveStep({ step }: { step: number }): ReactNode {
     case 5: return <Step5Forecast />;
     case 6: return <Step6Summary />;
     case 7: return <Step7WACC />;
+    case 8: return <Step8Valuation />;
     default: return null;
   }
 }
@@ -184,7 +184,7 @@ export default function WizardLayout() {
 
         <div className="mt-8 rounded-lg border border-zinc-800 bg-zinc-900 p-3 text-xs text-zinc-500">
           <p className="font-medium text-zinc-400">DCF Valuation Tool</p>
-          <p className="mt-1">Complete the CFP module (Steps 1-6) then calculate WACC (Step 7) for the full DCF model.</p>
+          <p className="mt-1">Complete the CFP module, calculate WACC, then review the final DCF valuation dashboard.</p>
         </div>
       </aside>
 

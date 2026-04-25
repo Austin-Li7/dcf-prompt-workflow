@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   Loader2, Download, Trash2, AlertTriangle, AlertCircle,
   CheckCircle2, ArrowRight, Save, BarChart3, RotateCcw, SlidersHorizontal,
@@ -11,7 +11,7 @@ import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
 import type {
   ProductForecast, ForecastQuarterPoint, SegmentForecastBundle,
-  GenerateForecastResponse,
+  GenerateForecastResponse, Step5ReviewSummary, Step5StructuredResult, Step5WorkflowStatus,
 } from "@/types/cfp";
 
 // =============================================================================
@@ -75,6 +75,19 @@ function hasDiverged(active: number, baseline: number): boolean {
   return Math.abs(active - baseline) > 0.05;
 }
 
+function shortDriver(driver: string): string {
+  const first = driver.split("|")[0]?.trim() ?? driver;
+  const match = first.match(/^(A\d+):/i);
+  if (match) return `${match[1]} estimated baseline`;
+  return first.length > 42 ? `${first.slice(0, 42)}...` : first;
+}
+
+function annualRevenue(prod: ProductForecast, year: number): number {
+  return prod.forecast
+    .filter((point) => point.year === year)
+    .reduce((sum, point) => sum + point.revenueM, 0);
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -101,10 +114,22 @@ export default function Step5Forecast() {
   const [userActive, setUserActive] = useState<ProductForecast[]>([]);
   const [sensitivity, setSensitivity] = useState(0);
   const [overrides, setOverrides] = useState<Map<string, number>>(new Map());
+  const [reviewSummary, setReviewSummary] = useState<Step5ReviewSummary | null>(null);
+  const [structuredResult, setStructuredResult] = useState<Step5StructuredResult | null>(null);
+  const [workflowStatus, setWorkflowStatus] = useState<Step5WorkflowStatus | null>(null);
+  const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
 
   // ---- Approved segments accumulator ----
   const [approvedSegments, setApprovedSegments] = useState<SegmentForecastBundle[]>(
     isAlreadySaved ? state.forecast.segments : [],
+  );
+  const [approvedStructuredResults, setApprovedStructuredResults] = useState<Step5StructuredResult[]>(
+    isAlreadySaved
+      ? state.forecast.structuredResults ??
+        state.forecast.segments
+          .map((segment) => segment.structuredResult)
+          .filter((result): result is Step5StructuredResult => !!result)
+      : [],
   );
 
   // ---- Loading / error ----
@@ -112,6 +137,20 @@ export default function Step5Forecast() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const currentSegment = segments[segIdx] ?? "";
+  const forecastMode = structuredResult?.machine_artifact.forecast_mode ?? null;
+  const annualRows = useMemo(() => {
+    if (!structuredResult || forecastMode !== "SEGMENT_ANNUAL") return [];
+    return structuredResult.machine_artifact.forecast_table.filter((row) => row.segment === currentSegment);
+  }, [currentSegment, forecastMode, structuredResult]);
+  const canApproveForecast =
+    workflowStatus !== "BLOCKED" &&
+    (workflowStatus !== "NEEDS_REVIEW" || reviewAcknowledged);
+
+  useEffect(() => {
+    if (phase === "setup" && approvedSegments.length === 0 && segIdx !== 0) {
+      setSegIdx(0);
+    }
+  }, [approvedSegments.length, phase, segIdx]);
 
   // ================================================================
   // Generate forecast for current segment
@@ -136,6 +175,10 @@ export default function Step5Forecast() {
 
       setAiBaseline(d.products);
       setUserActive(cloneProducts(d.products));
+      setReviewSummary(d.reviewSummary ?? null);
+      setStructuredResult(d.structuredResult ?? null);
+      setWorkflowStatus(d.workflowStatus ?? null);
+      setReviewAcknowledged(false);
       setSensitivity(0);
       setOverrides(new Map());
       setPhase("forecast");
@@ -175,9 +218,17 @@ export default function Step5Forecast() {
   // Approve & advance
   // ================================================================
   const handleApprove = () => {
-    const bundle: SegmentForecastBundle = { segment: currentSegment, products: cloneProducts(userActive) };
+    const bundle: SegmentForecastBundle = {
+      segment: currentSegment,
+      products: cloneProducts(userActive),
+      structuredResult: structuredResult ?? undefined,
+    };
     const updated = [...approvedSegments, bundle];
+    const updatedStructuredResults = structuredResult
+      ? [...approvedStructuredResults, structuredResult]
+      : approvedStructuredResults;
     setApprovedSegments(updated);
+    setApprovedStructuredResults(updatedStructuredResults);
 
     if (segIdx < segments.length - 1) {
       setSegIdx(segIdx + 1);
@@ -185,8 +236,20 @@ export default function Step5Forecast() {
       setUserActive([]);
       setSensitivity(0);
       setOverrides(new Map());
+      setReviewSummary(null);
+      setStructuredResult(null);
+      setWorkflowStatus(null);
+      setReviewAcknowledged(false);
       setPhase("setup");
     } else {
+      dispatch({
+        type: "SET_FORECAST",
+        payload: {
+          segments: updated,
+          structuredResults: updatedStructuredResults,
+          approved: true,
+        },
+      });
       setPhase("dashboard");
     }
   };
@@ -195,7 +258,14 @@ export default function Step5Forecast() {
   // Save & Export
   // ================================================================
   const handleSave = () => {
-    dispatch({ type: "SET_FORECAST", payload: { segments: approvedSegments, approved: true } });
+    dispatch({
+      type: "SET_FORECAST",
+      payload: {
+        segments: approvedSegments,
+        structuredResults: approvedStructuredResults,
+        approved: true,
+      },
+    });
   };
 
   const dlXlsx = () => {
@@ -223,8 +293,10 @@ export default function Step5Forecast() {
 
   const startOver = () => {
     dispatch({ type: "CLEAR_FORECAST" });
-    setApprovedSegments([]); setSegIdx(0);
+    setSegIdx(0); setApprovedSegments([]);
+    setApprovedStructuredResults([]);
     setAiBaseline([]); setUserActive([]);
+    setReviewSummary(null); setStructuredResult(null); setWorkflowStatus(null); setReviewAcknowledged(false);
     setSensitivity(0); setOverrides(new Map());
     setPhase("setup"); setErrorMsg(null);
   };
@@ -273,6 +345,88 @@ export default function Step5Forecast() {
           {phase === "forecast" && userActive.length > 0 && (
             <div className="space-y-5">
               <h3 className="text-lg font-semibold text-zinc-200">Segment: {currentSegment}</h3>
+              {reviewSummary && (
+                <div className={`rounded-lg border p-4 text-sm ${
+                  workflowStatus === "READY"
+                    ? "border-emerald-700/40 bg-emerald-950/20 text-emerald-200"
+                    : workflowStatus === "BLOCKED"
+                      ? "border-red-700/40 bg-red-950/30 text-red-200"
+                      : "border-amber-700/40 bg-amber-950/30 text-amber-200"
+                }`}>
+                  <div className="flex items-center gap-2 font-semibold">
+                    {workflowStatus === "READY" ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                    <span>{workflowStatus === "READY" ? "v5.5 forecast ready" : "v5.5 review required"}</span>
+                  </div>
+                  <p className="mt-2 text-xs opacity-90">{reviewSummary.one_line}</p>
+                  {(reviewSummary.highlights.length > 0 || reviewSummary.warnings.length > 0) && (
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      {reviewSummary.highlights.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wide opacity-70">Highlights</p>
+                          <ul className="mt-1 list-disc space-y-1 pl-4 text-xs opacity-90">
+                            {reviewSummary.highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                      {reviewSummary.warnings.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wide opacity-70">Warnings</p>
+                          <ul className="mt-1 list-disc space-y-1 pl-4 text-xs opacity-90">
+                            {reviewSummary.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {forecastMode === "SEGMENT_ANNUAL" && annualRows.length > 0 && (
+                <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
+                  <div className="border-b border-zinc-800 bg-zinc-900 px-4 py-2.5">
+                    <p className="text-sm font-medium text-zinc-200">Segment annual forecast</p>
+                    <p className="mt-1 text-xs text-zinc-500">v5.5 selected annual mode because product or quarterly disclosure was not strong enough.</p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-zinc-900/50 text-zinc-500">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">Fiscal Year</th>
+                          <th className="px-3 py-2 text-right font-medium">Low ($M)</th>
+                          <th className="px-3 py-2 text-right font-medium">Base ($M)</th>
+                          <th className="px-3 py-2 text-right font-medium">High ($M)</th>
+                          <th className="px-3 py-2 text-right font-medium">YoY %</th>
+                          <th className="px-3 py-2 text-left font-medium">Assumptions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-800/50">
+                        {annualRows.map((row) => (
+                          <tr key={`${row.segment}-${row.category}-${row.fiscal_year}`} className="hover:bg-zinc-900/30">
+                            <td className="px-3 py-2 text-zinc-300">{row.fiscal_year}</td>
+                            <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.revenue_low_usd_m.toLocaleString()}</td>
+                            <td className="px-3 py-2 text-right font-mono font-semibold text-zinc-100">{row.revenue_base_usd_m.toLocaleString()}</td>
+                            <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.revenue_high_usd_m.toLocaleString()}</td>
+                            <td className={`px-3 py-2 text-right font-mono ${row.yoy_growth_pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                              {row.yoy_growth_pct > 0 ? "+" : ""}{row.yoy_growth_pct.toFixed(1)}%
+                            </td>
+                            <td className="px-3 py-2 text-zinc-500">{row.assumption_ids.join(", ")}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {forecastMode === "SEGMENT_ANNUAL" && (
+                <div className="rounded-lg border border-blue-700/30 bg-blue-950/20 px-4 py-3 text-xs text-blue-200">
+                  <p className="font-semibold text-blue-100">Quarterly Working Projection</p>
+                  <p className="mt-1">
+                    Derived from the annual v5.5 forecast for editing and export continuity.
+                    The annual table remains the source of truth unless you manually override cells.
+                  </p>
+                </div>
+              )}
 
               {/* Sensitivity slider */}
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-4 space-y-3">
@@ -296,18 +450,43 @@ export default function Step5Forecast() {
                 <RotateCcw size={12} /> Reset to AI Baseline
               </button>
 
+              {workflowStatus === "NEEDS_REVIEW" && (
+                <label className="flex items-start gap-3 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
+                  <input
+                    type="checkbox"
+                    checked={reviewAcknowledged}
+                    onChange={(e) => setReviewAcknowledged(e.target.checked)}
+                    className="mt-0.5 accent-amber-500"
+                  />
+                  <span>I reviewed the v5.5 warnings and accept this forecast as an estimated baseline for downstream modeling.</span>
+                </label>
+              )}
+
+              {workflowStatus === "BLOCKED" && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
+                  <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                  This forecast is blocked. Regenerate or resolve the highlighted assumptions before approving.
+                </div>
+              )}
+
               {/* Product grids */}
               {userActive.map((prod, pIdx) => (
                 <div key={prod.productName} className="rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden">
-                  <div className="bg-zinc-900 px-4 py-2.5 text-sm font-medium text-zinc-200">
-                    {prod.productName} <span className="text-zinc-500 font-normal">({prod.categoryName})</span>
+                  <div className="flex flex-wrap items-center gap-2 bg-zinc-900 px-4 py-2.5 text-sm font-medium text-zinc-200">
+                    <span>{prod.productName}</span>
+                    <span className="text-zinc-500 font-normal">({prod.categoryName})</span>
+                    {forecastMode === "SEGMENT_ANNUAL" && (
+                      <span className="rounded border border-blue-700/40 bg-blue-950/40 px-2 py-0.5 text-[11px] font-medium text-blue-300">
+                        Derived quarterly view
+                      </span>
+                    )}
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead className="bg-zinc-900/50 text-zinc-500">
                         <tr>
                           <th className="px-2 py-1.5 text-left font-medium">Qtr</th>
-                          <th className="px-2 py-1.5 text-right font-medium">Revenue ($M)</th>
+                          <th className="px-2 py-1.5 text-right font-medium">Revenue ($M) editable</th>
                           <th className="px-2 py-1.5 text-right font-medium">YoY %</th>
                           <th className="px-2 py-1.5 text-left font-medium">Driver</th>
                         </tr>
@@ -328,7 +507,7 @@ export default function Step5Forecast() {
                               <td className={`px-2 py-1 text-right tabular-nums ${q.yoyGrowth >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                 {q.yoyGrowth > 0 ? "+" : ""}{q.yoyGrowth.toFixed(1)}%
                               </td>
-                              <td className="px-2 py-1 text-zinc-500 max-w-[180px] truncate" title={q.strategicDriver}>{q.strategicDriver}</td>
+                              <td className="px-2 py-1 text-zinc-500 max-w-[180px] truncate" title={q.strategicDriver}>{shortDriver(q.strategicDriver)}</td>
                             </tr>
                           );
                         })}
@@ -340,8 +519,8 @@ export default function Step5Forecast() {
 
               {errorMsg && <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300"><AlertCircle size={16} className="mt-0.5 shrink-0" /> {errorMsg}</div>}
 
-              <button onClick={handleApprove}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500">
+              <button onClick={handleApprove} disabled={!canApproveForecast}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500">
                 <CheckCircle2 size={16} />
                 Approve {currentSegment} Forecast {segIdx < segments.length - 1 ? "& Next" : "& Finalize"}
                 {segIdx < segments.length - 1 && <ArrowRight size={14} />}
@@ -354,8 +533,16 @@ export default function Step5Forecast() {
             <div className="space-y-6">
               <div className="flex items-center gap-2 text-emerald-400">
                 <CheckCircle2 size={20} />
-                <span className="text-sm font-medium">Master Forecast Complete — {approvedSegments.length} segment(s)</span>
+                <span className="text-sm font-medium">
+                  Master Forecast Complete & Saved — {approvedSegments.length} segment(s)
+                </span>
               </div>
+              {approvedStructuredResults.length > 0 && (
+                <div className="rounded-lg border border-emerald-700/30 bg-emerald-950/20 px-4 py-3 text-xs text-emerald-200">
+                  Step 6 will use the saved v5.5 annual machine artifact as the source of truth.
+                  The quarterly projection remains available for continuity and audit export.
+                </div>
+              )}
 
               {/* Summary stats */}
               <div className="grid gap-3 sm:grid-cols-3">
@@ -383,13 +570,13 @@ export default function Step5Forecast() {
                   </summary>
                   <div className="border-t border-zinc-800 px-4 py-3 space-y-2">
                     {seg.products.map((prod, j) => {
-                      const last = prod.forecast[prod.forecast.length - 1];
-                      const first = prod.forecast[0];
+                      const fy1 = annualRevenue(prod, 1);
+                      const fy5 = annualRevenue(prod, 5);
                       return (
                         <div key={j} className="flex items-center justify-between text-xs">
                           <span className="text-zinc-300">{prod.productName}</span>
                           <span className="text-zinc-500">
-                            ${first?.revenueM?.toFixed(0)}M → ${last?.revenueM?.toFixed(0)}M
+                            FY1 ${fy1.toFixed(0)}M → FY5 ${fy5.toFixed(0)}M
                           </span>
                         </div>
                       );
@@ -401,7 +588,10 @@ export default function Step5Forecast() {
               {/* Actions */}
               <div className="flex flex-wrap items-center gap-3">
                 <button onClick={handleSave} className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-500">
-                  <Save size={16} /> Save to Master Framework
+                  <Save size={16} /> Save Again
+                </button>
+                <button onClick={() => dispatch({ type: "SET_STEP", payload: 6 })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-emerald-500">
+                  Continue to Step 6 <ArrowRight size={16} />
                 </button>
                 <button onClick={dlXlsx} className="flex items-center gap-2 rounded-lg border border-blue-600/50 bg-blue-600/10 px-5 py-2.5 text-sm font-medium text-blue-400 hover:bg-blue-600/20">
                   <Download size={16} /> Download Master Financial Model (Excel)
