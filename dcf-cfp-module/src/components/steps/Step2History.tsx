@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useRef, useCallback, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   Upload,
   FileText,
   FileSpreadsheet,
+  Braces,
   Loader2,
   Download,
   Trash2,
@@ -12,6 +13,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
+  Database,
   Plus,
   X,
 } from "lucide-react";
@@ -19,6 +21,17 @@ import * as XLSX from "xlsx";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
+import {
+  detectFiscalYearsFromRecords,
+  detectFiscalYearsFromText,
+  mergeHistoryYears,
+  normalizeFiscalYearSelection,
+} from "@/lib/step2-baseline";
+import {
+  recordsFromDcfInputPayload,
+  summarizeDcfInputPayload,
+  type DcfInputSummary,
+} from "@/lib/step2-fixture-ingest";
 import type { HistoricalExtractionRow, ExtractHistoryResponse } from "@/types/cfp";
 
 // =============================================================================
@@ -26,10 +39,11 @@ import type { HistoricalExtractionRow, ExtractHistoryResponse } from "@/types/cf
 // =============================================================================
 const MAX_YEARS = 5;
 const MAX_FILES = 4;
-const ACCEPTED_EXTS = [".xlsx", ".xls", ".xlsm", ".csv", ".txt"];
 const ACCEPTED_MIME = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
+  "application/json",
+  ".json",
   "text/csv",
   "text/plain",
 ].join(",");
@@ -43,7 +57,74 @@ function fileIcon(name: string) {
   if (ext === "xlsx" || ext === "xls" || ext === "xlsm" || ext === "csv") {
     return <FileSpreadsheet size={14} className="shrink-0 text-emerald-400" />;
   }
+  if (ext === "json") {
+    return <Braces size={14} className="shrink-0 text-violet-400" />;
+  }
   return <FileText size={14} className="shrink-0 text-blue-400" />;
+}
+
+function formatNullableMetric(value: number | null): string {
+  if (value === null) return "—";
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+}
+
+function parseNullableMetric(value: string): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+type Step2StructuredResultForReview = NonNullable<ExtractHistoryResponse["structuredResult"]>;
+
+async function detectFiscalYearsFromFile(file: File): Promise<number[]> {
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+
+  if (ext === "txt") {
+    return detectFiscalYearsFromText(await file.text());
+  }
+
+  if (ext === "json") {
+    const text = await file.text();
+    try {
+      const records = recordsFromDcfInputPayload(JSON.parse(text));
+      if (records.length > 0) {
+        return detectFiscalYearsFromRecords(records, Number.MAX_SAFE_INTEGER);
+      }
+    } catch {
+      // Fall back to text scanning for loosely structured JSON-like notes.
+    }
+    return detectFiscalYearsFromText(text);
+  }
+
+  if (ext === "csv" || ext === "xlsx" || ext === "xls" || ext === "xlsm") {
+    const buffer = await file.arrayBuffer();
+    const wb = XLSX.read(buffer, { type: "array" });
+    const years: number[] = [];
+
+    for (const sheetName of wb.SheetNames) {
+      const ws = wb.Sheets[sheetName];
+      const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "" });
+      years.push(...detectFiscalYearsFromRecords(records, Number.MAX_SAFE_INTEGER));
+    }
+
+    return normalizeFiscalYearSelection(years);
+  }
+
+  return [];
+}
+
+async function summarizeDcfInputFromFile(file: File): Promise<DcfInputSummary | null> {
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  if (ext !== "json") return null;
+
+  try {
+    return summarizeDcfInputPayload(JSON.parse(await file.text()));
+  } catch {
+    return null;
+  }
 }
 
 // =============================================================================
@@ -53,20 +134,26 @@ export default function Step2History() {
   const { state, dispatch } = useCFP();
   const { settings, activeApiKey } = useSettings();
 
-  const hasArchitecture = !!state.profile.architectureJson;
+  const step1Input = state.profile.step1StructuredResult ?? state.profile.architectureJson;
+  const hasArchitecture = !!step1Input;
 
   // ── Form inputs ─────────────────────────────────────────────────────────────
   const [targetYear, setTargetYear] = useState("");
+  const [detectedYears, setDetectedYears] = useState<number[]>([]);
+  const [dcfInputSummary, setDcfInputSummary] = useState<DcfInputSummary | null>(null);
   const [dataFiles, setDataFiles] = useState<File[]>([]);
   const [textNotes, setTextNotes] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Extraction state ─────────────────────────────────────────────────────────
   const [isExtracting, setIsExtracting] = useState(false);
+  const [extractingYear, setExtractingYear] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // ── Staging rows (editable before confirming to master) ──────────────────────
   const [stagingRows, setStagingRows] = useState<HistoricalExtractionRow[]>([]);
+  const [stagingYears, setStagingYears] = useState<number[]>([]);
+  const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
 
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
@@ -74,6 +161,45 @@ export default function Step2History() {
   const canAddMoreYears = confirmedYears.length < MAX_YEARS;
 
   const hasStagingData = stagingRows.length > 0;
+  const yearsToExtract = useMemo(() => {
+    const manualYear = Number(targetYear.trim());
+    if (targetYear.trim() && Number.isInteger(manualYear)) {
+      return normalizeFiscalYearSelection([manualYear], 1);
+    }
+    return detectedYears.filter((year) => !confirmedYears.includes(year));
+  }, [confirmedYears, detectedYears, targetYear]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function detectYears() {
+      const years: number[] = [];
+      let nextDcfInputSummary: DcfInputSummary | null = null;
+      years.push(...detectFiscalYearsFromText(textNotes));
+
+      for (const file of dataFiles) {
+        years.push(...(await detectFiscalYearsFromFile(file)));
+        nextDcfInputSummary ??= await summarizeDcfInputFromFile(file);
+      }
+
+      if (!cancelled) {
+        setDetectedYears(normalizeFiscalYearSelection(years));
+        setDcfInputSummary(nextDcfInputSummary);
+      }
+    }
+
+    void detectYears().catch((error) => {
+      console.warn("[Step2History] Failed to detect fiscal years:", error);
+      if (!cancelled) {
+        setDetectedYears([]);
+        setDcfInputSummary(null);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dataFiles, textNotes]);
 
   // Group master rows by segment for the read-only accordion
   const groupedMaster = useMemo(() => {
@@ -95,17 +221,22 @@ export default function Step2History() {
   // Extract handler — POST to /api/extract-history
   // ============================================================================
   const handleExtract = useCallback(async () => {
-    const year = targetYear.trim();
+    const selectedYears = yearsToExtract;
 
-    if (!year || isNaN(Number(year))) {
-      setErrorMsg("Please enter a valid fiscal year (e.g. 2023).");
+    if (selectedYears.length === 0) {
+      setErrorMsg(
+        targetYear.trim()
+          ? "Please enter a valid fiscal year (e.g. 2025)."
+          : "Upload a file or paste notes containing fiscal years, such as 2021-2025.",
+      );
       return;
     }
-    if (confirmedYears.includes(Number(year))) {
-      setErrorMsg(`Year ${year} has already been confirmed in the Master History.`);
+    const duplicateYears = selectedYears.filter((year) => confirmedYears.includes(year));
+    if (duplicateYears.length > 0) {
+      setErrorMsg(`Year ${duplicateYears.join(", ")} already exists in the historical baseline.`);
       return;
     }
-    if (!canAddMoreYears) {
+    if (confirmedYears.length + selectedYears.length > MAX_YEARS) {
       setErrorMsg(`Maximum of ${MAX_YEARS} distinct years reached. Remove history to add more.`);
       return;
     }
@@ -117,62 +248,76 @@ export default function Step2History() {
     setErrorMsg(null);
     setIsExtracting(true);
     setStagingRows([]);
+    setStagingYears([]);
+    setStructuredResults([]);
 
     try {
-      const formData = new FormData();
-      formData.append("targetYear", year);
-      formData.append("architecture", JSON.stringify(state.profile.architectureJson));
-      for (const f of dataFiles) {
-        formData.append("dataFiles", f);
-      }
-      if (textNotes.trim()) {
-        formData.append("textNotes", textNotes.trim());
-      }
-      formData.append("apiKey", activeApiKey);
-      formData.append("llmProvider", settings.llmProvider);
+      const nextRows: HistoricalExtractionRow[] = [];
+      const nextStructuredResults: Step2StructuredResultForReview[] = [];
 
-      const res = await fetch("/api/extract-history", {
-        method: "POST",
-        body: formData,
-      });
-
-      const data: ExtractHistoryResponse = await res.json();
-
-      if (!res.ok) {
-        if (data.requiresApiKey) {
-          throw new Error("No API key configured. Open Settings (⚙) to add your key.");
+      for (const year of selectedYears) {
+        setExtractingYear(year);
+        const formData = new FormData();
+        formData.append("targetYear", String(year));
+        formData.append("architecture", JSON.stringify(step1Input));
+        for (const f of dataFiles) {
+          formData.append("dataFiles", f);
         }
-        throw new Error(data.error ?? `Server error (${res.status})`);
+        if (textNotes.trim()) {
+          formData.append("textNotes", textNotes.trim());
+        }
+        formData.append("apiKey", activeApiKey);
+        formData.append("llmProvider", settings.llmProvider);
+
+        const res = await fetch("/api/extract-history", {
+          method: "POST",
+          body: formData,
+        });
+
+        const data: ExtractHistoryResponse = await res.json();
+
+        if (!res.ok) {
+          if (data.requiresApiKey) {
+            throw new Error("No API key configured. Open Settings (⚙) to add your key.");
+          }
+          throw new Error(`FY ${year}: ${data.error ?? `Server error (${res.status})`}`);
+        }
+
+        if (data.rows.length === 0) {
+          throw new Error(`FY ${year}: No rows were extracted.`);
+        }
+
+        nextRows.push(...data.rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
+        if (data.structuredResult) {
+          nextStructuredResults.push(data.structuredResult);
+        }
       }
 
-      if (data.rows.length === 0) {
-        throw new Error("No rows were extracted. Check your file contains segment revenue data.");
-      }
-
-      setStagingRows(
-        data.rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })),
-      );
+      setStagingRows(nextRows);
+      setStagingYears(selectedYears);
+      setStructuredResults(nextStructuredResults);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : "Extraction failed.");
     } finally {
       setIsExtracting(false);
+      setExtractingYear(null);
     }
   }, [
     targetYear,
+    yearsToExtract,
     dataFiles,
     textNotes,
     activeApiKey,
     settings.llmProvider,
-    state.profile.architectureJson,
+    step1Input,
     confirmedYears,
-    canAddMoreYears,
   ]);
 
   // ── Staging: edit a cell ─────────────────────────────────────────────────────
   const updateStagingCell = (
     id: string,
     field: keyof HistoricalExtractionRow,
-    value: string | number,
+    value: string | number | null,
   ) => {
     setStagingRows((prev) =>
       prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)),
@@ -183,10 +328,19 @@ export default function Step2History() {
   const handleConfirm = () => {
     if (stagingRows.length === 0) return;
     dispatch({
-      type: "APPEND_HISTORY_ROWS",
-      payload: { year: Number(targetYear.trim()), rows: stagingRows },
+      type: "SET_HISTORY",
+      payload: {
+        rows: [...masterRows, ...stagingRows],
+        confirmedYears: mergeHistoryYears(confirmedYears, stagingYears),
+        structuredResults: [
+          ...(state.history.structuredResults ?? []),
+          ...structuredResults,
+        ],
+      },
     });
     setStagingRows([]);
+    setStagingYears([]);
+    setStructuredResults([]);
     setTargetYear("");
     setDataFiles([]);
     setTextNotes("");
@@ -196,7 +350,23 @@ export default function Step2History() {
   // ── Excel download ───────────────────────────────────────────────────────────
   const handleExcelDownload = () => {
     if (masterRows.length === 0) return;
-    const exportData = masterRows.map(({ id: _id, ...rest }) => rest);
+    const exportData = masterRows.map((row) => ({
+      fiscalYear: row.fiscalYear,
+      quarter: row.quarter,
+      segment: row.segment,
+      productCategory: row.productCategory,
+      productName: row.productName,
+      revenue: row.revenue,
+      yoyGrowth: row.yoyGrowth,
+      operatingIncome: row.operatingIncome,
+      notes: row.notes,
+      reviewStatus: row.reviewStatus,
+      internalVerify: row.internalVerify,
+      sourceType: row.sourceType,
+      sourceName: row.sourceName,
+      sourceLink: row.sourceLink,
+      reviewNote: row.reviewNote,
+    }));
     const ws = XLSX.utils.json_to_sheet(exportData);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Master History");
@@ -256,7 +426,7 @@ export default function Step2History() {
           <section className="space-y-5">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-                Extract Year Data
+                Build Historical Baseline
               </h3>
               <span className="flex items-center gap-2 text-xs text-zinc-500">
                 <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
@@ -269,29 +439,63 @@ export default function Step2History() {
               </span>
             </div>
 
-            {/* Year input */}
-            <div className="max-w-xs">
+            {/* Year detection */}
+            <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
+              <div>
+                <p className="text-sm font-medium text-zinc-200">Detected fiscal years</p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Upload a full history file or complete DCF JSON and Step 2 will extract the
+                  latest five fiscal years into one DCF baseline.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {detectedYears.length > 0 ? (
+                    detectedYears.map((year) => (
+                      <span
+                        key={year}
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          confirmedYears.includes(year)
+                            ? "bg-emerald-600/15 text-emerald-300"
+                            : "bg-blue-600/15 text-blue-300"
+                        }`}
+                      >
+                        FY {year}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-500">
+                      No years detected yet
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div>
               <label htmlFor="target-year" className="mb-1.5 block text-sm font-medium text-zinc-300">
-                Target Fiscal Year
+                Optional single-year override
               </label>
               <input
                 id="target-year"
                 type="text"
                 inputMode="numeric"
-                placeholder="e.g. 2023"
+                placeholder="Leave blank for full baseline"
                 value={targetYear}
                 onChange={(e) => setTargetYear(e.target.value.replace(/\D/g, "").slice(0, 4))}
                 disabled={isExtracting || !canAddMoreYears}
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
               />
+              <p className="mt-1.5 text-xs text-zinc-600">
+                Use only when you want to re-run one fiscal year.
+              </p>
+              </div>
             </div>
+
+            <DcfInputPackageSummary summary={dcfInputSummary} compact />
 
             {/* File upload area */}
             <div>
               <label className="mb-1.5 block text-sm font-medium text-zinc-300">
                 Data Files
                 <span className="ml-2 text-xs font-normal text-zinc-500">
-                  .xlsx · .csv · .txt (max {MAX_FILES})
+                  .json · .xlsx · .csv · .txt (max {MAX_FILES})
                 </span>
               </label>
 
@@ -309,7 +513,7 @@ export default function Step2History() {
                     </span>
                   </span>
                   <span className="text-xs text-zinc-600">
-                    Excel exports, quarterly CSV, or pasted-as-txt
+                    Complete DCF JSON, Excel exports, quarterly CSV, or pasted-as-txt
                   </span>
                   <input
                     ref={fileInputRef}
@@ -394,12 +598,12 @@ export default function Step2History() {
               {isExtracting ? (
                 <>
                   <Loader2 size={18} className="animate-spin" />
-                  Extracting &amp; mapping data…
+                  {extractingYear ? `Extracting FY ${extractingYear}…` : "Extracting baseline…"}
                 </>
               ) : (
                 <>
                   <Plus size={16} />
-                  Extract &amp; Map Data
+                  Extract Full Historical Baseline
                 </>
               )}
             </button>
@@ -412,12 +616,16 @@ export default function Step2History() {
             <section className="space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-amber-400">
-                  Staging Area — FY {targetYear}
+                  Historical Baseline Staging {stagingYears.length > 0 ? `— FY ${stagingYears.join(", ")}` : ""}
                 </h3>
                 <span className="rounded bg-amber-900/30 px-2 py-0.5 text-xs text-amber-300">
-                  {stagingRows.length} rows — review &amp; edit before confirming
+                  {stagingRows.length} rows · {stagingYears.length} year(s) — review before confirming
                 </span>
               </div>
+
+              <Step2ReviewSummary results={structuredResults} />
+
+              <DcfInputPackageSummary summary={dcfInputSummary} />
 
               <div className="overflow-x-auto rounded-lg border border-zinc-700">
                 <table className="w-full text-left text-xs">
@@ -429,6 +637,9 @@ export default function Step2History() {
                       <th className="px-3 py-2 font-medium">Product</th>
                       <th className="px-3 py-2 font-medium text-right">Revenue ($M)</th>
                       <th className="px-3 py-2 font-medium text-right">Op. Income ($M)</th>
+                      <th className="px-3 py-2 font-medium">Internal?</th>
+                      <th className="px-3 py-2 font-medium">Source</th>
+                      <th className="px-3 py-2 font-medium">Review Note</th>
                       <th className="px-3 py-2 font-medium">Notes</th>
                     </tr>
                   </thead>
@@ -443,10 +654,11 @@ export default function Step2History() {
                           <input
                             type="number"
                             step="any"
-                            value={row.revenue}
+                            value={row.revenue ?? ""}
                             onChange={(e) =>
-                              updateStagingCell(row.id, "revenue", Number(e.target.value))
+                              updateStagingCell(row.id, "revenue", parseNullableMetric(e.target.value))
                             }
+                            placeholder="—"
                             className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
                           />
                         </td>
@@ -454,12 +666,34 @@ export default function Step2History() {
                           <input
                             type="number"
                             step="any"
-                            value={row.operatingIncome}
+                            value={row.operatingIncome ?? ""}
                             onChange={(e) =>
-                              updateStagingCell(row.id, "operatingIncome", Number(e.target.value))
+                              updateStagingCell(
+                                row.id,
+                                "operatingIncome",
+                                parseNullableMetric(e.target.value),
+                              )
                             }
+                            placeholder="—"
                             className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
                           />
+                        </td>
+                        <td className="px-3 py-1.5 text-zinc-400">
+                          {row.internalVerify ?? "No"}
+                        </td>
+                        <td
+                          className="max-w-[140px] truncate px-3 py-1.5 text-zinc-400"
+                          title={row.sourceLink && row.sourceLink !== "Not available"
+                            ? `${row.sourceName ?? "Not available"} — ${row.sourceLink}`
+                            : row.sourceName ?? "Not available"}
+                        >
+                          {row.sourceName ?? "Not available"}
+                        </td>
+                        <td
+                          className="max-w-[180px] truncate px-3 py-1.5 text-amber-300/80"
+                          title={row.reviewNote ?? row.reviewStatus ?? ""}
+                        >
+                          {row.reviewNote ?? row.reviewStatus ?? "External Verification Required"}
                         </td>
                         <td
                           className="max-w-[140px] truncate px-3 py-1.5 text-zinc-500"
@@ -478,7 +712,7 @@ export default function Step2History() {
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500"
               >
                 <CheckCircle2 size={16} />
-                Confirm &amp; Append to Master History
+                Confirm Historical Baseline
               </button>
             </section>
           )}
@@ -531,6 +765,223 @@ export default function Step2History() {
 // =============================================================================
 // SegmentGroup — collapsible accordion for Master History
 // =============================================================================
+function DcfInputPackageSummary({
+  summary,
+  compact = false,
+}: {
+  summary: DcfInputSummary | null;
+  compact?: boolean;
+}) {
+  if (!summary) return null;
+
+  const baseYearLabel = summary.baseYearFiscalYear ? `FY ${summary.baseYearFiscalYear}` : "Base year";
+  const packageName = [summary.ticker, summary.companyName].filter(Boolean).join(" · ");
+  const readinessLabel = summary.readinessComplete ? "Complete DCF package" : "Partial DCF package";
+  const moduleLabels = summary.availableModules.length
+    ? summary.availableModules.join(" · ")
+    : "No DCF modules detected";
+
+  if (compact) {
+    return (
+      <section className="rounded-lg border border-violet-800/50 bg-violet-950/15 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <Database size={18} className="shrink-0 text-violet-300" />
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-violet-100">
+                {readinessLabel}
+                {packageName ? ` — ${packageName}` : ""}
+              </p>
+              <p className="mt-0.5 truncate text-xs text-violet-200/60">{moduleLabels}</p>
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2 text-xs">
+            <span className="rounded-full bg-violet-500/15 px-2.5 py-1 text-violet-200">
+              {summary.quarterlyRows} quarterly rows
+            </span>
+            <span className="rounded-full bg-violet-500/15 px-2.5 py-1 text-violet-200">
+              {summary.annualDriverYears} annual driver years
+            </span>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-violet-800/50 bg-violet-950/15">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-violet-900/40 px-4 py-3">
+        <div className="flex min-w-0 gap-3">
+          <Database size={18} className="mt-0.5 shrink-0 text-violet-300" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-violet-100">
+              Complete DCF Input Package
+              {packageName ? ` — ${packageName}` : ""}
+            </p>
+            <p className="mt-1 text-xs text-violet-200/60">
+              Shows the data modules available beyond the Step 2 quarterly table.
+            </p>
+          </div>
+        </div>
+        <span
+          className={`rounded-full px-3 py-1 text-xs font-semibold ${
+            summary.readinessComplete
+              ? "bg-emerald-600/15 text-emerald-300"
+              : "bg-amber-600/15 text-amber-300"
+          }`}
+        >
+          {readinessLabel}
+        </span>
+      </div>
+
+      <div className="grid gap-0 divide-y divide-violet-900/30 text-sm sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+        <div className="space-y-2 px-4 py-3">
+          <DataLine label="Quarterly baseline" value={`${summary.quarterlyRows} rows`} />
+          <DataLine label="Annual DCF drivers" value={`${summary.annualDriverYears} years`} />
+          <DataLine label="Normalized base year" value={baseYearLabel} />
+          <DataLine
+            label="Forecast assumptions"
+            value={summary.hasForecastAssumptions ? "Included" : "Missing"}
+          />
+          <DataLine
+            label="WACC / terminal assumptions"
+            value={summary.hasValuationAssumptions ? "Included" : "Missing"}
+          />
+        </div>
+        <div className="space-y-2 px-4 py-3">
+          <DataLine
+            label="Base revenue"
+            value={
+              summary.baseYearRevenueUsdM === null
+                ? "—"
+                : `$${formatNullableMetric(summary.baseYearRevenueUsdM)}M`
+            }
+          />
+          <DataLine
+            label="Base EBIT"
+            value={
+              summary.baseYearEbitUsdM === null
+                ? "—"
+                : `$${formatNullableMetric(summary.baseYearEbitUsdM)}M`
+            }
+          />
+          <DataLine
+            label="Base free cash flow"
+            value={
+              summary.baseYearFreeCashFlowUsdM === null
+                ? "—"
+                : `$${formatNullableMetric(summary.baseYearFreeCashFlowUsdM)}M`
+            }
+          />
+          <DataLine
+            label="Cash + marketable securities"
+            value={
+              summary.cashAndMarketableSecuritiesUsdM === null
+                ? "—"
+                : `$${formatNullableMetric(summary.cashAndMarketableSecuritiesUsdM)}M`
+            }
+          />
+          <DataLine
+            label="Debt / shares"
+            value={
+              summary.totalDebtUsdM === null || summary.commonSharesOutstandingM === null
+                ? "—"
+                : `$${formatNullableMetric(summary.totalDebtUsdM)}M debt · ${formatNullableMetric(summary.commonSharesOutstandingM)}M shares`
+            }
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DataLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-xs text-zinc-500">{label}</span>
+      <span className="text-right text-xs font-medium text-zinc-200">{value}</span>
+    </div>
+  );
+}
+
+function Step2ReviewSummary({
+  results,
+}: {
+  results: Step2StructuredResultForReview[];
+}) {
+  if (results.length === 0) return null;
+
+  const rowCount = results.reduce((total, result) => total + result.rows.length, 0);
+  const sourceMap = new Map<string, Step2StructuredResultForReview["sources"][number]>();
+  for (const result of results) {
+    for (const source of result.sources) sourceMap.set(source.source_id, source);
+  }
+  const sources = Array.from(sourceMap.values());
+  const warningCount = results.reduce(
+    (total, result) => total + result.validation_warnings.length,
+    0,
+  );
+  const excludedItems = results.flatMap((result) => result.excluded_items);
+  const years = results.map((result) => result.target_year).sort((a, b) => a - b);
+  const summaryLine =
+    results.length === 1
+      ? results[0].review_summary.one_line
+      : `${rowCount} verified historical rows across FY ${years[0]}-${years[years.length - 1]}; ready to anchor the DCF forecast baseline.`;
+  const warnings = results.flatMap((result) => result.review_summary.warnings);
+
+  return (
+    <section className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-zinc-100">DCF Historical Baseline Review</p>
+          <p className="mt-1 text-sm text-zinc-400">{summaryLine}</p>
+        </div>
+        <span className="rounded-full bg-amber-600/15 px-3 py-1 text-xs font-semibold text-amber-300">
+          Review baseline
+        </span>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-300">
+          {rowCount} extracted row(s)
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-300">
+          {sources.length} source(s)
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-300">
+          {warningCount} warning(s)
+        </div>
+      </div>
+
+      {warnings.length > 0 && (
+        <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
+          {Array.from(new Set(warnings)).slice(0, 3).map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+        </div>
+      )}
+
+      <details className="rounded-lg border border-zinc-800 bg-zinc-950">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-zinc-300 hover:text-zinc-100">
+          Source and excluded item audit
+        </summary>
+        <div className="space-y-3 border-t border-zinc-800 p-4 text-xs text-zinc-400">
+          {sources.slice(0, 8).map((source) => (
+            <p key={source.source_id}>
+              {source.name}: {source.locator ?? "No locator"}
+            </p>
+          ))}
+          {excludedItems.slice(0, 8).map((item) => (
+            <p key={`${item.label}-${item.reason}`} className="text-amber-300/80">
+              Excluded: {item.label} - {item.reason}
+            </p>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
 function SegmentGroup({
   segment,
   rows,
@@ -569,6 +1020,8 @@ function SegmentGroup({
                 <th className="px-3 py-1.5 font-medium">Product</th>
                 <th className="px-3 py-1.5 font-medium text-right">Revenue ($M)</th>
                 <th className="px-3 py-1.5 font-medium text-right">Op. Income ($M)</th>
+                <th className="px-3 py-1.5 font-medium">Review</th>
+                <th className="px-3 py-1.5 font-medium">Source</th>
                 <th className="px-3 py-1.5 font-medium">Notes</th>
               </tr>
             </thead>
@@ -580,16 +1033,24 @@ function SegmentGroup({
                   <td className="px-3 py-1.5 text-zinc-400">{row.productCategory}</td>
                   <td className="px-3 py-1.5 text-zinc-400">{row.productName}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-zinc-200">
-                    {row.revenue.toLocaleString(undefined, {
-                      minimumFractionDigits: 1,
-                      maximumFractionDigits: 1,
-                    })}
+                    {formatNullableMetric(row.revenue)}
                   </td>
                   <td className="px-3 py-1.5 text-right font-mono text-zinc-200">
-                    {row.operatingIncome.toLocaleString(undefined, {
-                      minimumFractionDigits: 1,
-                      maximumFractionDigits: 1,
-                    })}
+                    {formatNullableMetric(row.operatingIncome)}
+                  </td>
+                  <td
+                    className="max-w-[160px] truncate px-3 py-1.5 text-amber-300/80"
+                    title={row.reviewNote ?? row.reviewStatus ?? ""}
+                  >
+                    {row.reviewStatus ?? "External Verification Required"}
+                  </td>
+                  <td
+                    className="max-w-[140px] truncate px-3 py-1.5 text-zinc-500"
+                    title={row.sourceLink && row.sourceLink !== "Not available"
+                      ? `${row.sourceName ?? "Not available"} — ${row.sourceLink}`
+                      : row.sourceName ?? "Not available"}
+                  >
+                    {row.sourceName ?? "Not available"}
                   </td>
                   <td
                     className="max-w-[140px] truncate px-3 py-1.5 text-zinc-500"

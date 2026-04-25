@@ -12,8 +12,10 @@ import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
 import type {
   CapabilityPenetrationPath, AnalyzeSynergiesResponse, ReviseSynergiesResponse,
-  InvestmentMatrixEntry, CapitalAllocationData, CapitalCheckpoints,
+  CapitalAllocationData, CapitalCheckpoints,
   AnalyzeCapitalResponse, ReviseCapitalResponse,
+  Step4ReviewState,
+  Step4StructuredResult,
 } from "@/types/cfp";
 
 // =============================================================================
@@ -60,6 +62,8 @@ function buildTextReport(
     l.push(`     Constraint:  ${p.competitorConstraint}`);
     l.push(`     Financial:   ${p.financialSignal.type} (${p.financialSignal.status})`);
     l.push(`     Evidence:    ${p.financialSignal.evidence}`);
+    l.push(`     Review:      ${p.synergyClassification ?? "Not classified"}`);
+    if (p.reviewRationale) l.push(`     Rationale:   ${p.reviewRationale}`);
     l.push(`     Flywheel:    ${p.flywheel.isFlywheel ? `Yes — ${p.flywheel.loopDescription}` : "No"}`);
     l.push(`     SCORE:       ${p.impactScore > 0 ? "+" : ""}${p.impactScore}/5`);
     l.push("");
@@ -152,6 +156,65 @@ function ProgressDots({ total, current, approved }: { total: number; current: nu
   );
 }
 
+function SourceGrounding({ sources }: { sources: Step4ReviewState["synergies"][number]["sources"] }) {
+  if (sources.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs text-zinc-500">
+      <p className="font-medium text-zinc-400">Source grounding</p>
+      <div className="mt-1 space-y-1">
+        {sources.map((source) => (
+          <p key={source.source_id}>
+            <span className="text-zinc-300">{source.name}</span>
+            {source.locator ? ` · ${source.locator}` : ""}
+            {source.url ? ` · ${source.url}` : ""}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReviewSummaryPanel({ review }: { review: Step4ReviewState }) {
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm font-semibold text-zinc-100">Step 4 Review Gate</p>
+        <span
+          className={`rounded-full border px-2 py-0.5 text-xs ${
+            review.workflowStatus === "can_continue"
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+              : "border-amber-500/30 bg-amber-500/10 text-amber-300"
+          }`}
+        >
+          {review.workflowStatus === "can_continue" ? "Ready for Step 5" : "Review required"}
+        </span>
+      </div>
+      <p className="mt-1 text-sm text-zinc-400">{review.summary.oneLine}</p>
+      {review.summary.highlights.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {review.summary.highlights.map((highlight) => (
+            <span key={highlight} className="rounded-full bg-blue-500/10 px-2 py-1 text-xs text-blue-300">
+              {highlight}
+            </span>
+          ))}
+        </div>
+      )}
+      {review.summary.warnings.length > 0 && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/30 p-3 text-xs text-amber-300">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <span>{review.summary.warnings.join(" ")}</span>
+        </div>
+      )}
+      {review.validationWarnings.length > 0 && (
+        <p className="mt-2 text-xs text-zinc-500">
+          {review.validationWarnings.map((warning) => warning.message).join(" ")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // =============================================================================
 // Main Component
 // =============================================================================
@@ -168,6 +231,12 @@ export default function Step4Synergies() {
 
   // ---- Synergies (4A) ----
   const [paths, setPaths] = useState<CapabilityPenetrationPath[]>(isFullySaved ? state.synergies.paths : []);
+  const [step4Structured, setStep4Structured] = useState<Step4StructuredResult | null>(
+    state.synergies.structuredResult,
+  );
+  const [step4Review, setStep4Review] = useState<Step4ReviewState | null>(
+    state.synergies.step4Review,
+  );
   const [synIdx, setSynIdx] = useState(0);
   const [synApproved, setSynApproved] = useState<boolean[]>([]);
 
@@ -197,7 +266,10 @@ export default function Step4Synergies() {
         body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step3Competition: state.competition, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeSynergiesResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
-      setPaths(d.paths); setSynApproved(new Array(d.paths.length).fill(false)); setSynIdx(0); resetChat(); setPhase("synergies-review");
+      setPaths(d.paths);
+      setStep4Structured(d.structuredResult ?? null);
+      setStep4Review(d.step4Review ?? null);
+      setSynApproved(new Array(d.paths.length).fill(false)); setSynIdx(0); resetChat(); setPhase("synergies-review");
     } catch (e: unknown) { setErrorMsg(e instanceof Error ? e.message : "Failed."); } finally { setIsLoading(false); }
   }, [state.profile.architectureJson, state.history, state.competition, activeApiKey, settings.llmProvider]);
 
@@ -235,9 +307,13 @@ export default function Step4Synergies() {
         body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: paths, recentNews: newsText, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeCapitalResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
-      setCapitalData(d.data); setCapApproved(new Array(d.data.investmentMatrix.length).fill(false)); setCapIdx(0); setCheckpointsApproved(false); resetChat(); setPhase("capital-review");
+      if (d.paths?.length) setPaths(d.paths);
+      setCapitalData(d.data);
+      setStep4Structured(d.structuredResult ?? step4Structured);
+      setStep4Review(d.step4Review ?? step4Review);
+      setCapApproved(new Array(d.data.investmentMatrix.length).fill(false)); setCapIdx(0); setCheckpointsApproved(false); resetChat(); setPhase("capital-review");
     } catch (e: unknown) { setErrorMsg(e instanceof Error ? e.message : "Failed."); } finally { setIsLoading(false); }
-  }, [state.profile.architectureJson, state.history, paths, newsText, activeApiKey, settings.llmProvider]);
+  }, [state.profile.architectureJson, state.history, paths, newsText, activeApiKey, settings.llmProvider, step4Structured, step4Review]);
 
   // ================================================================
   // PHASE 4 — Review capital entries
@@ -272,8 +348,24 @@ export default function Step4Synergies() {
   // Save & Export
   // ================================================================
   const handleSave = () => {
-    dispatch({ type: "SET_SYNERGIES_PATHS", payload: { paths } });
-    if (capitalData) dispatch({ type: "SET_CAPITAL_DATA", payload: { capital: capitalData, recentNews: newsText } });
+    const approvedReview = step4Review
+      ? { ...step4Review, approved: true, approvedAt: new Date().toISOString(), workflowStatus: "can_continue" as const }
+      : null;
+    dispatch({
+      type: "SET_SYNERGIES_PATHS",
+      payload: { paths, structuredResult: step4Structured, step4Review: approvedReview },
+    });
+    if (capitalData) {
+      dispatch({
+        type: "SET_CAPITAL_DATA",
+        payload: {
+          capital: capitalData,
+          recentNews: newsText,
+          structuredResult: step4Structured,
+          step4Review: approvedReview,
+        },
+      });
+    }
   };
 
   const dlTxt = () => {
@@ -290,6 +382,7 @@ export default function Step4Synergies() {
       "Source": p.sourceBusiness, "Core Capability": p.coreCapability, "Recipient": p.recipientBusiness,
       "Mechanism": p.mechanism, "Product Impact": p.productImpact, "Constraint": p.competitorConstraint,
       "Signal Type": p.financialSignal.type, "Signal Status": p.financialSignal.status,
+      "Classification": p.synergyClassification ?? "Not classified", "Review Rationale": p.reviewRationale ?? "",
       "Flywheel": p.flywheel.isFlywheel ? "Yes" : "No", "Impact Score": p.impactScore,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(synRows), "Synergies");
@@ -307,12 +400,15 @@ export default function Step4Synergies() {
   const startOver = () => {
     dispatch({ type: "CLEAR_SYNERGIES" }); setPaths([]); setSynApproved([]); setSynIdx(0);
     setCapitalData(null); setCapApproved([]); setCapIdx(0); setCheckpointsApproved(false);
+    setStep4Structured(null); setStep4Review(null);
     setNewsText(""); resetChat(); setPhase("synergies-gen");
   };
 
   // Current items
   const curPath = paths[synIdx] ?? null;
   const curEntry = capitalData?.investmentMatrix[capIdx] ?? null;
+  const curSynergyReview = step4Review?.synergies[synIdx] ?? null;
+  const curCapitalReview = step4Review?.capitalMetrics[capIdx] ?? null;
 
   // ==========================================================================
   return (
@@ -356,6 +452,7 @@ export default function Step4Synergies() {
           {/* ===== PHASE 2: Synergies Review ===== */}
           {phase === "synergies-review" && curPath && (
             <div className="space-y-5">
+              {step4Review && <ReviewSummaryPanel review={step4Review} />}
               <ProgressDots total={paths.length} current={synIdx} approved={synApproved} />
               {/* Path card */}
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-5 space-y-4">
@@ -376,6 +473,29 @@ export default function Step4Synergies() {
                   </div>
                   <p className="mt-1 text-xs text-zinc-500">Type: {curPath.financialSignal.type} | Evidence: {curPath.financialSignal.evidence}</p>
                 </div>
+                {(curPath.synergyClassification || curPath.reviewRationale) && (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm">
+                    <div className="flex flex-wrap items-center gap-2 text-zinc-400">
+                      <span className="font-medium">Review Classification</span>
+                      {curPath.synergyClassification && (
+                        <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300">
+                          {curPath.synergyClassification}
+                        </span>
+                      )}
+                    </div>
+                    {curPath.reviewRationale && (
+                      <p className="mt-1 text-xs text-zinc-500">{curPath.reviewRationale}</p>
+                    )}
+                  </div>
+                )}
+                {curSynergyReview && (
+                  <div className="grid gap-2 text-xs text-zinc-500 sm:grid-cols-3">
+                    <span><span className="text-zinc-400">Integration:</span> {curSynergyReview.integrationVerdict}</span>
+                    <span><span className="text-zinc-400">Causality:</span> {curSynergyReview.causalityVerdict}</span>
+                    <span><span className="text-zinc-400">Driver:</span> {curSynergyReview.driverEligibility}</span>
+                  </div>
+                )}
+                {curSynergyReview && <SourceGrounding sources={curSynergyReview.sources} />}
                 <div className="flex items-center gap-2 rounded-lg bg-zinc-950 px-3 py-2 text-sm">
                   <RefreshCw size={14} className={curPath.flywheel.isFlywheel ? "text-emerald-400" : "text-zinc-600"} />
                   <span className="text-zinc-400">Flywheel:</span>
@@ -416,6 +536,7 @@ export default function Step4Synergies() {
           {/* ===== PHASE 4: Capital Review ===== */}
           {phase === "capital-review" && capitalData && (
             <div className="space-y-5">
+              {step4Review && <ReviewSummaryPanel review={step4Review} />}
               {/* Matrix entry review */}
               {!allMatrixApproved && curEntry && (
                 <>
@@ -429,6 +550,17 @@ export default function Step4Synergies() {
                       <div><span className="text-zinc-500">Synergy Link:</span> <span className="text-zinc-300">{curEntry.synergyLink}</span></div>
                     </div>
                     <ScoreSlider label="Efficiency Score" value={curEntry.efficiencyScore} onChange={(v) => setCapitalData(p => p ? { ...p, investmentMatrix: p.investmentMatrix.map((x,i) => i===capIdx ? {...x, efficiencyScore: v} : x) } : p)} />
+                    {curCapitalReview && (
+                      <>
+                        <div className="grid gap-2 text-xs text-zinc-500 sm:grid-cols-3">
+                          <span><span className="text-zinc-400">Intensity:</span> {curCapitalReview.capitalIntensity}</span>
+                          <span><span className="text-zinc-400">Claim:</span> {curCapitalReview.claimId}</span>
+                          <span><span className="text-zinc-400">Link:</span> {curCapitalReview.synergyLink}</span>
+                        </div>
+                        <p className="rounded-lg bg-zinc-950 px-3 py-2 text-xs text-zinc-500">{curCapitalReview.reviewNote}</p>
+                        <SourceGrounding sources={curCapitalReview.sources} />
+                      </>
+                    )}
                   </div>
                   <ChatBox history={chatHistory} input={chatInput} setInput={setChatInput} onSend={reviseCapitalEntry} isLoading={isLoading} endRef={chatEndRef} />
                   {errorMsg && <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300"><AlertCircle size={16} className="mt-0.5 shrink-0" /> {errorMsg}</div>}
@@ -463,6 +595,7 @@ export default function Step4Synergies() {
           {phase === "dashboard" && (
             <div className="space-y-6">
               <div className="flex items-center gap-2 text-emerald-400"><CheckCircle2 size={20} /><span className="text-sm font-medium">Step 4 Complete — Synergies &amp; Capital</span></div>
+              {step4Review && <ReviewSummaryPanel review={step4Review} />}
 
               {/* Summary stats */}
               <div className="grid gap-3 sm:grid-cols-4">
@@ -499,6 +632,8 @@ export default function Step4Synergies() {
                     </summary>
                     <div className="border-t border-zinc-800 px-4 py-3 text-xs text-zinc-400 space-y-1">
                       <p><span className="text-zinc-500">Capability:</span> {p.coreCapability}</p>
+                      <p><span className="text-zinc-500">Review:</span> {p.synergyClassification ?? "Not classified"}</p>
+                      {p.reviewRationale && <p><span className="text-zinc-500">Rationale:</span> {p.reviewRationale}</p>}
                       <p><span className="text-zinc-500">Financial:</span> {p.financialSignal.type} — {p.financialSignal.status}</p>
                       <p><span className="text-zinc-500">Flywheel:</span> {p.flywheel.isFlywheel ? `Yes — ${p.flywheel.loopDescription}` : "No"}</p>
                     </div>

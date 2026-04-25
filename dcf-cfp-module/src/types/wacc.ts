@@ -7,6 +7,9 @@ export interface WACCDataResponse {
   ticker: string;
   companyName: string;
   marketCap: number;          // USD
+  currentPrice?: number;      // USD per share
+  sharesOutstanding?: number; // shares
+  totalCash?: number;         // USD
   totalDebt: number;          // USD
   interestExpense: number;    // USD (annual)
   riskFreeRate: number;       // decimal (e.g., 0.0428 for 4.28%)

@@ -20,24 +20,53 @@ Determine whether Step 5 growth assumptions are financially supportable.
 ## Required Output
 ```json
 {
-  "machine_artifact": {
-    "capital_metrics": [],
+  "schema_version": "v5.5",
+  "company_name": "",
+  "review_summary": {
+    "one_line": "",
+    "highlights": [],
+    "warnings": []
+  },
+  "sources": [],
+  "claims": [],
+  "synergy_registry": [],
+  "capital_allocation": {
+    "capital_metrics": [
+      {
+        "metric_id": "",
+        "pillar": "",
+        "objective": "",
+        "capital_intensity": "Low / Medium / High / Unknown",
+        "strategic_leverage": "",
+        "synergy_link": "",
+        "efficiency_score": 0,
+        "claim_id": "",
+        "source_ids": [],
+        "review_note": ""
+      }
+    ],
     "feasibility_checkpoints": {
       "capex_runway": "",
       "scale_economics": "",
       "guidance_alignment": ""
     },
-    "step5_revenue_ceiling": {},
+    "step5_revenue_ceiling": {
+      "applies": false,
+      "reason": "",
+      "ceiling_revenue_usd_m": null
+    },
     "asset_light_exemption": false,
     "workflow_status": "READY / NEEDS_REVIEW / BLOCKED",
     "next_action": "PROCEED_STEP5 / HUMAN_REVIEW_CAPITAL_CONSTRAINT / REGENERATE"
-  }
+  },
+  "validation_warnings": []
 }
 ```
 
 ## Rules
 - Use PP&E purchase line, not total investing cash flow
 - Every source number must be claim-backed
+- Every capital metric must cite `claim_id` and `source_ids`, and `synergy_link` must point to a Step 4 `synergy_id`
 - If CapEx/Revenue < 8% for all five years:
   asset_light_exemption=true
   ceiling can be skipped
