@@ -5,7 +5,7 @@ import {
   Loader2, Download, Trash2, AlertTriangle, AlertCircle,
   CheckCircle2, ArrowRight, Save, BarChart3, RotateCcw, SlidersHorizontal,
 } from "lucide-react";
-import * as XLSX from "xlsx";
+import { downloadXlsx } from "@/lib/excel-utils";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
@@ -268,9 +268,8 @@ export default function Step5Forecast() {
     });
   };
 
-  const dlXlsx = () => {
-    const wb = XLSX.utils.book_new();
-    for (const seg of approvedSegments) {
+  const dlXlsx = async () => {
+    const sheets = approvedSegments.map((seg) => {
       const rows: Record<string, unknown>[] = [];
       for (const prod of seg.products) {
         for (const q of prod.forecast) {
@@ -285,10 +284,9 @@ export default function Step5Forecast() {
           });
         }
       }
-      const name = seg.segment.slice(0, 31); // Excel sheet name limit
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name);
-    }
-    XLSX.writeFile(wb, `${sName(state.profile.companyName)}-step5-forecast-${dateSuffix()}.xlsx`);
+      return { name: seg.segment.slice(0, 31), rows };
+    });
+    await downloadXlsx(sheets, `${sName(state.profile.companyName)}-step5-forecast-${dateSuffix()}.xlsx`);
   };
 
   const startOver = () => {

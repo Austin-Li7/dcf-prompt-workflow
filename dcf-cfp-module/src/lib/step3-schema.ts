@@ -16,6 +16,28 @@ const ForceRatingSchema = z.enum(["Low", "Medium", "High"]);
 
 const SourceQualitySchema = z.enum(["Official", "External", "Mixed", "Unverified"]);
 
+/**
+ * Auto-truncates to maxLen instead of hard-rejecting.
+ * Empty / whitespace-only strings fall back to the fallback value.
+ */
+const boundedStr = (maxLen: number, fallback = "—") =>
+  z.preprocess((v) => {
+    if (typeof v !== "string") return v;
+    if (v.trim() === "") return fallback;
+    if (v.length > maxLen) return v.slice(0, maxLen);
+    return v;
+  }, z.string().min(1).max(maxLen));
+
+/** Same as boundedStr but the result is nullable (empty string → null). */
+const nullableBoundedStr = (maxLen: number) =>
+  z.preprocess((v) => {
+    if (v == null) return null;
+    if (typeof v !== "string") return v;
+    if (v.trim() === "") return null;
+    if (v.length > maxLen) return v.slice(0, maxLen);
+    return v;
+  }, z.string().min(1).max(maxLen).nullable());
+
 const SourceSchema = z.object({
   source_id: z.string().min(1),
   source_type: z.enum([
@@ -34,7 +56,7 @@ const SourceSchema = z.object({
 
 const ClaimSchema = z.object({
   claim_id: z.string().min(1),
-  text: z.string().min(1).max(260),
+  text: boundedStr(260),
   source_ids: z.array(z.string().min(1)).min(1),
   evidence_level: EvidenceLevelSchema,
   source_snippet: z.string().min(1).transform((value) => value.slice(0, 220)).nullable(),
@@ -42,7 +64,7 @@ const ClaimSchema = z.object({
 
 const ForceDetailStructuredSchema = z.object({
   rating: ForceRatingSchema,
-  justification: z.string().min(1).max(260),
+  justification: boundedStr(260),
   claim_id: z.string().min(1),
   source_ids: z.array(z.string().min(1)).min(1),
 });
@@ -54,13 +76,13 @@ export const Step3CategorySchema = z.object({
   materiality: z.enum(["HIGH", "MEDIUM", "LOW"]),
   primary_competitor: z.string().min(1),
   competitive_status: z.enum(["Leader", "Challenger", "Unclear"]),
-  basis_for_pairing: z.string().min(1).max(320),
+  basis_for_pairing: boundedStr(320),
   basis_claim_ids: z.array(z.string().min(1)).min(1),
   source_ids: z.array(z.string().min(1)).min(1),
   source_quality: SourceQualitySchema,
   confidence: z.enum(["High", "Medium", "Low"]),
   human_review_required: z.boolean(),
-  verification_note: z.string().min(1).max(320).nullable(),
+  verification_note: nullableBoundedStr(320),
   forces: z.object({
     rivalry: ForceDetailStructuredSchema,
     new_entrants: ForceDetailStructuredSchema,
@@ -73,7 +95,7 @@ export const Step3CategorySchema = z.object({
 const ValidationWarningSchema = z.object({
   code: z.string().min(1),
   severity: z.enum(["info", "warn", "high"]),
-  message: z.string().min(1).max(260),
+  message: boundedStr(260),
   category_ids: z.array(z.string().min(1)).default([]),
 });
 
@@ -82,9 +104,9 @@ export const Step3StructuredSchema = z
     schema_version: z.literal("v5.5"),
     company_name: z.string().min(1),
     review_summary: z.object({
-      one_line: z.string().min(1).max(260),
-      highlights: z.array(z.string().min(1).max(200)).default([]),
-      warnings: z.array(z.string().min(1).max(200)).default([]),
+      one_line: boundedStr(260),
+      highlights: z.array(boundedStr(200)).default([]),
+      warnings: z.array(boundedStr(200)).default([]),
     }),
     sources: z.array(SourceSchema),
     categories: z.array(Step3CategorySchema),

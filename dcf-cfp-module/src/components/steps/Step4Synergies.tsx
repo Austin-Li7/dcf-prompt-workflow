@@ -6,7 +6,7 @@ import {
   CheckCircle2, ChevronRight, Send, Zap, ArrowRight,
   Save, RefreshCw, TrendingUp, Newspaper, Building2,
 } from "lucide-react";
-import * as XLSX from "xlsx";
+import { downloadXlsx, type SheetData } from "@/lib/excel-utils";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
@@ -307,7 +307,17 @@ export default function Step4Synergies() {
         body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: paths, recentNews: newsText, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeCapitalResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
-      if (d.paths?.length) setPaths(d.paths);
+      if (d.paths?.length) {
+        // Preserve the impactScore the user manually set during 4A review —
+        // the capital LLM re-runs the synergy logic and would overwrite it.
+        const incomingPaths = d.paths;
+        setPaths(prev =>
+          incomingPaths.map((newPath: CapabilityPenetrationPath, i: number) => ({
+            ...newPath,
+            impactScore: prev[i]?.impactScore ?? newPath.impactScore,
+          })),
+        );
+      }
       setCapitalData(d.data);
       setStep4Structured(d.structuredResult ?? step4Structured);
       setStep4Review(d.step4Review ?? step4Review);
@@ -375,9 +385,7 @@ export default function Step4Synergies() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   };
 
-  const dlXlsx = () => {
-    const wb = XLSX.utils.book_new();
-    // Sheet 1: Synergies
+  const dlXlsx = async () => {
     const synRows = paths.map(p => ({
       "Source": p.sourceBusiness, "Core Capability": p.coreCapability, "Recipient": p.recipientBusiness,
       "Mechanism": p.mechanism, "Product Impact": p.productImpact, "Constraint": p.competitorConstraint,
@@ -385,16 +393,15 @@ export default function Step4Synergies() {
       "Classification": p.synergyClassification ?? "Not classified", "Review Rationale": p.reviewRationale ?? "",
       "Flywheel": p.flywheel.isFlywheel ? "Yes" : "No", "Impact Score": p.impactScore,
     }));
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(synRows), "Synergies");
-    // Sheet 2: Capital
+    const sheets: SheetData[] = [{ name: "Synergies", rows: synRows as Record<string, unknown>[] }];
     if (capitalData) {
       const capRows = capitalData.investmentMatrix.map(e => ({
         "Pillar": e.pillar, "Objective": e.objective, "Capital Intensity": e.capitalIntensity,
         "Strategic Leverage": e.strategicLeverage, "Synergy Link": e.synergyLink, "Efficiency Score": e.efficiencyScore,
       }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(capRows), "Capital Allocation");
+      sheets.push({ name: "Capital Allocation", rows: capRows as Record<string, unknown>[] });
     }
-    XLSX.writeFile(wb, `${sName(state.profile.companyName)}-step4-complete-${dateSuffix()}.xlsx`);
+    await downloadXlsx(sheets, `${sName(state.profile.companyName)}-step4-complete-${dateSuffix()}.xlsx`);
   };
 
   const startOver = () => {

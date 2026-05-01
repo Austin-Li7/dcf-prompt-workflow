@@ -1,8 +1,13 @@
 const MIN_FISCAL_YEAR = 2000;
-const MAX_FISCAL_YEAR = 2100;
 
+/**
+ * Cap detection at the current calendar year so that forward-looking tables
+ * in filings (lease obligations, debt maturities, contractual commitments, etc.)
+ * don't get mistaken for historical fiscal years.
+ */
 function isFiscalYear(value: number): boolean {
-  return Number.isInteger(value) && value >= MIN_FISCAL_YEAR && value <= MAX_FISCAL_YEAR;
+  const currentYear = new Date().getFullYear();
+  return Number.isInteger(value) && value >= MIN_FISCAL_YEAR && value <= currentYear;
 }
 
 export function normalizeFiscalYearSelection(years: Iterable<number>, maxYears = 5): number[] {

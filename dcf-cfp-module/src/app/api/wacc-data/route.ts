@@ -28,6 +28,18 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
 
     const cleanTicker = ticker.trim().toUpperCase();
 
+    // Validate ticker format — alphanumeric plus dot/hyphen, max 10 chars
+    if (!/^[A-Z0-9][A-Z0-9.-]{0,9}$/.test(cleanTicker)) {
+      return NextResponse.json(
+        {
+          ticker: "", companyName: "", marketCap: 0, totalDebt: 0,
+          currentPrice: 0, sharesOutstanding: 0, totalCash: 0, interestExpense: 0, riskFreeRate: FALLBACK_RISK_FREE,
+          companyDescription: "", error: "Invalid ticker format.",
+        },
+        { status: 400 },
+      );
+    }
+
     // ---- Fetch company data ----
     let marketCap = 0;
     let currentPrice = 0;
@@ -104,12 +116,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
     });
   } catch (err: unknown) {
     console.error("[wacc-data] Error:", err);
-    const msg = err instanceof Error ? err.message : "An unexpected error occurred.";
     return NextResponse.json(
       {
         ticker: "", companyName: "", marketCap: 0, totalDebt: 0,
         currentPrice: 0, sharesOutstanding: 0, totalCash: 0, interestExpense: 0, riskFreeRate: FALLBACK_RISK_FREE,
-        companyDescription: "", error: msg,
+        companyDescription: "", error: "Market data fetch failed. Check server logs for details.",
       },
       { status: 500 },
     );

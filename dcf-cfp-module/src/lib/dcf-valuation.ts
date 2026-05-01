@@ -25,11 +25,21 @@ export interface DcfValuationResult {
   terminalGrowth: number;
   revenueScaleFactor: number;
   wacc: number | null;
+  /** Sum of PV(FCFF) for projection years only — used in the equity bridge display. */
+  sumPvFcffUsdM: number;
   terminalValueUsdM: number;
   terminalPresentValueUsdM: number;
-  enterpriseValueUsdM: number;
+  // ── Equity bridge components (all in USD millions) ──────────────────
+  enterpriseValueUsdM: number;     // = sumPvFcff + terminalPV
+  totalDebtUsdM: number;           // (−) from EV
+  preferredStockUsdM: number;      // (−) from EV
+  minorityInterestUsdM: number;    // (−) from EV
+  totalCashUsdM: number;           // (+) from EV
+  /** netDebt = totalDebt + preferredStock + minorityInterest − totalCash */
   netDebtUsdM: number;
-  equityValueUsdM: number;
+  equityValueUsdM: number;         // = EV − netDebt
+  // ── Per-share & market data ──────────────────────────────────────────
+  sharesOutstandingM: number | null;
   marketCapUsdM: number | null;
   currentPrice: number | null;
   intrinsicValuePerShare: number | null;
@@ -43,11 +53,17 @@ export function buildDcfValuation({
   wacc,
   fcfMargin,
   terminalGrowth,
+  preferredStockUsdM = 0,
+  minorityInterestUsdM = 0,
 }: {
   forecast: ForecastState;
   wacc: WACCState;
   fcfMargin: number;
   terminalGrowth: number;
+  /** Preferred stock outstanding (USD millions). Deducted in the equity bridge. Default 0. */
+  preferredStockUsdM?: number;
+  /** Minority interest / non-controlling interest (USD millions). Deducted in the equity bridge. Default 0. */
+  minorityInterestUsdM?: number;
 }): DcfValuationResult {
   const discountRate = wacc.calculation?.wacc ?? null;
   const totalRow = forecast.approved ? aggregateMasterForecast(forecast).find((row) => row.isTotal) : null;
@@ -94,12 +110,17 @@ export function buildDcfValuation({
   const terminalFcff = forecastRows[4].fcffUsdM * (1 + terminalGrowth);
   const terminalValueUsdM = terminalFcff / (discountRate - terminalGrowth);
   const terminalPresentValueUsdM = terminalValueUsdM / Math.pow(1 + discountRate, 5);
-  const enterpriseValueUsdM =
-    forecastRows.reduce((sum, row) => sum + row.presentValueUsdM, 0) + terminalPresentValueUsdM;
+  const sumPvFcffUsdM = forecastRows.reduce((sum, row) => sum + row.presentValueUsdM, 0);
+  const enterpriseValueUsdM = sumPvFcffUsdM + terminalPresentValueUsdM;
+
+  // ── Equity bridge ────────────────────────────────────────────────────────
+  // Equity Value = EV − Total Debt − Preferred Stock − Minority Interest + Cash
   const totalDebtUsdM = (wacc.fetchedData?.totalDebt ?? 0) / 1_000_000;
   const totalCashUsdM = (wacc.fetchedData?.totalCash ?? 0) / 1_000_000;
-  const netDebtUsdM = totalDebtUsdM - totalCashUsdM;
+  // netDebt aggregates all deductions/additions in one number for backward compat
+  const netDebtUsdM = totalDebtUsdM + preferredStockUsdM + minorityInterestUsdM - totalCashUsdM;
   const equityValueUsdM = enterpriseValueUsdM - netDebtUsdM;
+
   const impliedUpsidePct =
     marketCapUsdM && marketCapUsdM > 0 ? (equityValueUsdM / marketCapUsdM - 1) * 100 : null;
   const roundedUpside = impliedUpsidePct === null ? null : round(impliedUpsidePct);
@@ -107,7 +128,7 @@ export function buildDcfValuation({
     sharesOutstandingM && sharesOutstandingM > 0 ? equityValueUsdM / sharesOutstandingM : null;
 
   if (!wacc.fetchedData?.totalCash) {
-    warnings.push("Cash was unavailable from market data; equity bridge uses debt only.");
+    warnings.push("Cash & equivalents were unavailable from market data; equity bridge uses debt only.");
   }
 
   return {
@@ -117,11 +138,17 @@ export function buildDcfValuation({
     terminalGrowth,
     revenueScaleFactor: scaleFactor,
     wacc: discountRate,
+    sumPvFcffUsdM: round(sumPvFcffUsdM),
     terminalValueUsdM: round(terminalValueUsdM),
     terminalPresentValueUsdM: round(terminalPresentValueUsdM),
     enterpriseValueUsdM: round(enterpriseValueUsdM),
+    totalDebtUsdM: round(totalDebtUsdM),
+    preferredStockUsdM: round(preferredStockUsdM),
+    minorityInterestUsdM: round(minorityInterestUsdM),
+    totalCashUsdM: round(totalCashUsdM),
     netDebtUsdM: round(netDebtUsdM),
     equityValueUsdM: round(equityValueUsdM),
+    sharesOutstandingM: sharesOutstandingM === null ? null : round(sharesOutstandingM),
     marketCapUsdM: marketCapUsdM === null ? null : round(marketCapUsdM),
     currentPrice: currentPrice === null ? null : round(currentPrice),
     intrinsicValuePerShare: intrinsicValuePerShare === null ? null : round(intrinsicValuePerShare),
@@ -153,11 +180,17 @@ function emptyResult({
     terminalGrowth,
     revenueScaleFactor: 1,
     wacc,
+    sumPvFcffUsdM: 0,
     terminalValueUsdM: 0,
     terminalPresentValueUsdM: 0,
     enterpriseValueUsdM: 0,
+    totalDebtUsdM: 0,
+    preferredStockUsdM: 0,
+    minorityInterestUsdM: 0,
+    totalCashUsdM: 0,
     netDebtUsdM: 0,
     equityValueUsdM: 0,
+    sharesOutstandingM: null,
     marketCapUsdM: null,
     currentPrice: null,
     intrinsicValuePerShare: null,

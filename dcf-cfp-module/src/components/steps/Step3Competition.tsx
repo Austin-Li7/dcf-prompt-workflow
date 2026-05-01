@@ -17,6 +17,8 @@ import {
   RefreshCw,
   ArrowRight,
   Save,
+  Plus,
+  Zap,
 } from "lucide-react";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
@@ -25,6 +27,7 @@ import type {
   CategoryCompetitionEntry,
   AnalyzeCompetitionResponse,
   ReviseCompetitionResponse,
+  AddCompetitorResponse,
   ForceDetail,
   Step3ReviewState,
   Step3StructuredCategory,
@@ -123,6 +126,37 @@ export default function Step3Competition() {
   const [chatHistory, setChatHistory] = useState<{ role: "user" | "ai"; text: string }[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // ---------- Add competitor / category form ----------
+  type AddFormContext =
+    | { mode: "competitor"; targetIndex: number }
+    | { mode: "category" }
+    | null;
+  const [addFormContext, setAddFormContext] = useState<AddFormContext>(null);
+  const [addFormCompetitor, setAddFormCompetitor] = useState("");
+  const [addFormCategory, setAddFormCategory] = useState("");
+  const [isAddLoading, setIsAddLoading] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  // Tracks original competitor name per index — used to detect edits needing re-analysis
+  const originalCompetitorNamesRef = useRef<Record<number, string>>({});
+
+  // ---------- Finalized phase: inline re-analyse per accordion ----------
+  const [finalizedReanalyseIndex, setFinalizedReanalyseIndex] = useState<number | null>(null);
+  const [finalizedReanalyseName, setFinalizedReanalyseName] = useState("");
+  const [isFinalizedReanalysing, setIsFinalizedReanalysing] = useState(false);
+
+  // Tracks newly added entries that still need inline approval in finalized phase
+  const [pendingApprovalIndices, setPendingApprovalIndices] = useState<Set<number>>(new Set());
+
+  // ------------------------------------------------------------------
+  // Helper — seed original competitor names after any bulk category update
+  // ------------------------------------------------------------------
+  const initOriginalNames = useCallback((cats: CategoryCompetitionEntry[]) => {
+    cats.forEach((cat, i) => {
+      originalCompetitorNamesRef.current[i] = cat.primaryCompetitor;
+    });
+  }, []);
+
   // ------------------------------------------------------------------
   // Phase 1 — Generate initial analysis
   // ------------------------------------------------------------------
@@ -156,13 +190,14 @@ export default function Step3Competition() {
       setCurrentIndex(0);
       setChatHistory([]);
       setChatInput("");
+      initOriginalNames(data.categories);
       setPhase("review");
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : "Generation failed.");
     } finally {
       setIsLoading(false);
     }
-  }, [state.profile.companyName, state.profile.architectureJson, activeApiKey, settings.llmProvider]);
+  }, [state.profile.companyName, state.profile.architectureJson, activeApiKey, settings.llmProvider, initOriginalNames]);
 
   // ------------------------------------------------------------------
   // Phase 2 — Send revision
@@ -247,6 +282,194 @@ export default function Step3Competition() {
       setIsLoading(false);
     }
   }, [chatInput, categories, currentIndex, activeApiKey, settings.llmProvider, isLoading, structuredResult]);
+
+  // ------------------------------------------------------------------
+  // Re-analyse current category with the (already-edited) competitor name
+  // ------------------------------------------------------------------
+  const handleReanalyse = useCallback(async () => {
+    if (isLoading || isAddLoading) return;
+    setIsAddLoading(true);
+    setAddError(null);
+
+    try {
+      const res = await fetch("/api/add-competitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyName: state.profile.companyName,
+          architecture: state.profile.architectureJson,
+          competitor: categories[currentIndex].primaryCompetitor,
+          category: categories[currentIndex].category,
+          mode: "reanalyse",
+          existingStructuredCategory: structuredResult?.categories[currentIndex] ?? null,
+          apiKey: activeApiKey,
+          llmProvider: settings.llmProvider,
+        }),
+      });
+
+      const data: AddCompetitorResponse = await res.json();
+      if (!res.ok) {
+        if (data.requiresApiKey) throw new Error("No API key configured. Open Settings to add your key.");
+        throw new Error(data.error || `Server error (${res.status})`);
+      }
+      if (!data.category) throw new Error("Model did not return a valid category.");
+
+      setCategories((prev) => prev.map((c, i) => (i === currentIndex ? data.category! : c)));
+      if (data.structuredCategory) {
+        setStructuredResult((prev) =>
+          prev
+            ? { ...prev, categories: prev.categories.map((c, i) => (i === currentIndex ? data.structuredCategory! : c)) }
+            : prev,
+        );
+      }
+      // Mark as clean — re-analyse button disappears
+      originalCompetitorNamesRef.current[currentIndex] = data.category.primaryCompetitor;
+      setChatHistory((h) => [...h, { role: "ai", text: `Five Forces re-analysed for competitor: ${data.category!.primaryCompetitor}` }]);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Re-analysis failed.";
+      setAddError(msg);
+    } finally {
+      setIsAddLoading(false);
+    }
+  }, [categories, currentIndex, structuredResult, state.profile, activeApiKey, settings.llmProvider, isLoading, isAddLoading]);
+
+  // ------------------------------------------------------------------
+  // Add competitor (to existing category) or add brand-new category
+  // ------------------------------------------------------------------
+  const handleSubmitAddForm = useCallback(async () => {
+    if (isAddLoading) return;
+    const trimmedCompetitor = addFormCompetitor.trim();
+    const trimmedCategory = addFormCategory.trim();
+
+    if (!trimmedCompetitor) { setAddError("Competitor name is required."); return; }
+    if (addFormContext?.mode === "category" && !trimmedCategory) { setAddError("Category name is required."); return; }
+
+    setIsAddLoading(true);
+    setAddError(null);
+
+    const targetCategory =
+      addFormContext?.mode === "category"
+        ? trimmedCategory
+        : categories[addFormContext?.targetIndex ?? currentIndex].category;
+
+    const mode = addFormContext?.mode === "category" ? "add-category" : "add-competitor";
+
+    try {
+      const res = await fetch("/api/add-competitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyName: state.profile.companyName,
+          architecture: state.profile.architectureJson,
+          competitor: trimmedCompetitor,
+          category: targetCategory,
+          mode,
+          apiKey: activeApiKey,
+          llmProvider: settings.llmProvider,
+        }),
+      });
+
+      const data: AddCompetitorResponse = await res.json();
+      if (!res.ok) {
+        if (data.requiresApiKey) throw new Error("No API key configured. Open Settings to add your key.");
+        throw new Error(data.error || `Server error (${res.status})`);
+      }
+      if (!data.category) throw new Error("Model did not return a valid category.");
+
+      const newIndex = categories.length;
+      setCategories((prev) => [...prev, data.category!]);
+      setApprovedFlags((prev) => [...prev, false]);
+      if (data.structuredCategory) {
+        setStructuredResult((prev) =>
+          prev ? { ...prev, categories: [...prev.categories, data.structuredCategory!] } : prev,
+        );
+      }
+      originalCompetitorNamesRef.current[newIndex] = data.category.primaryCompetitor;
+
+      if (phase === "review") {
+        // Jump to the new entry so user can review it
+        setCurrentIndex(newIndex);
+        setChatHistory([]);
+        setChatInput("");
+      } else {
+        // Finalized: show the new entry with a Pending Review badge
+        setPendingApprovalIndices((prev) => new Set([...prev, newIndex]));
+      }
+
+      setAddFormContext(null);
+      setAddFormCompetitor("");
+      setAddFormCategory("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to add competitor.";
+      setAddError(msg);
+    } finally {
+      setIsAddLoading(false);
+    }
+  }, [addFormContext, addFormCompetitor, addFormCategory, categories, currentIndex, phase,
+      state.profile, activeApiKey, settings.llmProvider, isAddLoading]);
+
+  // ------------------------------------------------------------------
+  // Finalized phase — re-analyse an accordion item with a new competitor
+  // ------------------------------------------------------------------
+  const handleFinalizedReanalyse = useCallback(async () => {
+    if (finalizedReanalyseIndex === null || !finalizedReanalyseName.trim() || isFinalizedReanalysing) return;
+    setIsFinalizedReanalysing(true);
+    setAddError(null);
+
+    const idx = finalizedReanalyseIndex;
+    try {
+      const res = await fetch("/api/add-competitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyName: state.profile.companyName,
+          architecture: state.profile.architectureJson,
+          competitor: finalizedReanalyseName.trim(),
+          category: categories[idx].category,
+          mode: "reanalyse",
+          existingStructuredCategory: structuredResult?.categories[idx] ?? null,
+          apiKey: activeApiKey,
+          llmProvider: settings.llmProvider,
+        }),
+      });
+
+      const data: AddCompetitorResponse = await res.json();
+      if (!res.ok) {
+        if (data.requiresApiKey) throw new Error("No API key configured. Open Settings to add your key.");
+        throw new Error(data.error || `Server error (${res.status})`);
+      }
+      if (!data.category) throw new Error("Model did not return a valid category.");
+
+      setCategories((prev) => prev.map((c, i) => (i === idx ? data.category! : c)));
+      if (data.structuredCategory) {
+        setStructuredResult((prev) =>
+          prev ? { ...prev, categories: prev.categories.map((c, i) => (i === idx ? data.structuredCategory! : c)) } : prev,
+        );
+      }
+      originalCompetitorNamesRef.current[idx] = data.category.primaryCompetitor;
+      setFinalizedReanalyseIndex(null);
+      setFinalizedReanalyseName("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Re-analysis failed.";
+      setAddError(msg);
+    } finally {
+      setIsFinalizedReanalysing(false);
+    }
+  }, [finalizedReanalyseIndex, finalizedReanalyseName, categories, structuredResult,
+      state.profile, activeApiKey, settings.llmProvider, isFinalizedReanalysing]);
+
+  // ------------------------------------------------------------------
+  // Finalized phase — approve a pending addition
+  // ------------------------------------------------------------------
+  const handleApprovePending = useCallback((index: number) => {
+    setApprovedFlags((prev) => prev.map((v, i) => (i === index ? true : v)));
+    setPendingApprovalIndices((prev) => {
+      const next = new Set(prev);
+      next.delete(index);
+      return next;
+    });
+  }, []);
 
   const updateCurrentCategory = useCallback(
     <K extends keyof Pick<CategoryCompetitionEntry, "primaryCompetitor" | "competitiveStatus" | "basisForPairing">>(
@@ -381,6 +604,63 @@ export default function Step3Competition() {
   const current = categories[currentIndex] ?? null;
   const currentReview = step3Review?.categories[currentIndex] ?? null;
 
+  // True when user has edited primaryCompetitor but hasn't re-analysed yet
+  const competitorChanged =
+    current !== null &&
+    current.primaryCompetitor !== (originalCompetitorNamesRef.current[currentIndex] ?? current.primaryCompetitor);
+
+  // ------------------------------------------------------------------
+  // Shared "Add Competitor / Add New Category" inline form
+  // ------------------------------------------------------------------
+  const AddForm = (
+    <div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 space-y-3">
+      <p className="text-sm font-medium text-zinc-200">
+        {addFormContext?.mode === "category"
+          ? "Add New Category"
+          : `Add Competitor — ${categories[addFormContext?.mode === "competitor" ? addFormContext.targetIndex : currentIndex]?.category ?? ""}`}
+      </p>
+      {addFormContext?.mode === "category" && (
+        <input
+          type="text"
+          placeholder="Category name (e.g. Video Editing)"
+          value={addFormCategory}
+          onChange={(e) => setAddFormCategory(e.target.value)}
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+        />
+      )}
+      <input
+        type="text"
+        placeholder="Competitor name (e.g. Canva)"
+        value={addFormCompetitor}
+        onChange={(e) => setAddFormCompetitor(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmitAddForm(); } }}
+        autoFocus
+        className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+      />
+      {addError && (
+        <p className="flex items-center gap-1.5 text-xs text-red-400">
+          <AlertCircle size={13} /> {addError}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button
+          onClick={handleSubmitAddForm}
+          disabled={isAddLoading}
+          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+        >
+          {isAddLoading ? <Loader2 size={15} className="animate-spin" /> : <Zap size={15} />}
+          {isAddLoading ? "Analysing…" : "Analyse & Add"}
+        </button>
+        <button
+          onClick={() => { setAddFormContext(null); setAddError(null); setAddFormCompetitor(""); setAddFormCategory(""); }}
+          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+
   // ==========================================================================
   // Render
   // ==========================================================================
@@ -484,12 +764,25 @@ export default function Step3Competition() {
                 <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
                   <label className="block">
                     <span className="text-xs text-zinc-500">Primary competitor</span>
-                    <input
-                      type="text"
-                      value={current.primaryCompetitor}
-                      onChange={(event) => updateCurrentCategory("primaryCompetitor", event.target.value)}
-                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                    />
+                    <div className="mt-1 flex gap-2">
+                      <input
+                        type="text"
+                        value={current.primaryCompetitor}
+                        onChange={(event) => updateCurrentCategory("primaryCompetitor", event.target.value)}
+                        className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      />
+                      {competitorChanged && (
+                        <button
+                          onClick={handleReanalyse}
+                          disabled={isAddLoading || isLoading}
+                          title="Re-generate all five forces for this competitor"
+                          className="shrink-0 flex items-center gap-1.5 rounded-lg bg-violet-700 px-3 py-2 text-xs font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+                        >
+                          {isAddLoading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                          Re-analyse
+                        </button>
+                      )}
+                    </div>
                   </label>
                   <label className="block">
                     <span className="text-xs text-zinc-500">Competitive status</span>
@@ -570,6 +863,27 @@ export default function Step3Competition() {
                   })}
                 </div>
               </div>
+
+              {/* Add competitor / add new category */}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => { setAddFormContext({ mode: "competitor", targetIndex: currentIndex }); setAddFormCompetitor(""); setAddError(null); }}
+                  disabled={isLoading || isAddLoading}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-blue-600/50 hover:text-blue-400 disabled:opacity-40"
+                >
+                  <Plus size={13} /> Add Competitor for This Category
+                </button>
+                <button
+                  onClick={() => { setAddFormContext({ mode: "category" }); setAddFormCompetitor(""); setAddFormCategory(""); setAddError(null); }}
+                  disabled={isLoading || isAddLoading}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-emerald-600/50 hover:text-emerald-400 disabled:opacity-40"
+                >
+                  <Plus size={13} /> Add New Category
+                </button>
+              </div>
+
+              {/* Inline add form (review phase) */}
+              {addFormContext && AddForm}
 
               {/* Chat history */}
               {chatHistory.length > 0 && (
@@ -653,12 +967,87 @@ export default function Step3Competition() {
               {/* Summary cards */}
               <div className="space-y-3">
                 {categories.map((cat, i) => (
-                  <details key={i} className="group rounded-lg border border-zinc-800 bg-zinc-950">
-                    <summary className="flex cursor-pointer items-center gap-3 px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-900">
-                      <ChevronRight size={14} className="text-zinc-500 transition-transform group-open:rotate-90" />
-                      <span className="flex-1">{cat.category}</span>
-                      <span className="text-xs text-zinc-500">vs. {cat.primaryCompetitor}</span>
+                  <details
+                    key={i}
+                    className={`group rounded-lg border bg-zinc-950 ${pendingApprovalIndices.has(i) ? "border-amber-700/50" : "border-zinc-800"}`}
+                  >
+                    <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-900">
+                      <ChevronRight size={14} className="shrink-0 text-zinc-500 transition-transform group-open:rotate-90" />
+                      <span className="flex-1 truncate">{cat.category}</span>
+                      {pendingApprovalIndices.has(i) && (
+                        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
+                          Pending Review
+                        </span>
+                      )}
+                      <span className="shrink-0 text-xs text-zinc-500">vs. {cat.primaryCompetitor}</span>
+                      {/* Add competitor button */}
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setAddFormContext({ mode: "competitor", targetIndex: i });
+                          setAddFormCompetitor("");
+                          setAddError(null);
+                        }}
+                        title="Add another competitor for this category"
+                        className="shrink-0 rounded p-1 text-zinc-500 hover:text-blue-400"
+                      >
+                        <Plus size={14} />
+                      </button>
+                      {/* Re-analyse button */}
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (finalizedReanalyseIndex === i) {
+                            setFinalizedReanalyseIndex(null);
+                          } else {
+                            setFinalizedReanalyseIndex(i);
+                            setFinalizedReanalyseName(cat.primaryCompetitor);
+                            setAddError(null);
+                          }
+                        }}
+                        title="Re-analyse with a different competitor"
+                        className={`shrink-0 rounded p-1 ${finalizedReanalyseIndex === i ? "text-violet-400" : "text-zinc-500 hover:text-violet-400"}`}
+                      >
+                        <RefreshCw size={14} />
+                      </button>
                     </summary>
+
+                    {/* Re-analyse inline form */}
+                    {finalizedReanalyseIndex === i && (
+                      <div className="border-t border-zinc-800 bg-zinc-900/50 px-4 py-3 space-y-2">
+                        <p className="text-xs font-medium text-zinc-400">Re-analyse with a different competitor:</p>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={finalizedReanalyseName}
+                            onChange={(e) => setFinalizedReanalyseName(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") handleFinalizedReanalyse(); }}
+                            placeholder="New competitor name"
+                            className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500"
+                          />
+                          <button
+                            onClick={handleFinalizedReanalyse}
+                            disabled={isFinalizedReanalysing || !finalizedReanalyseName.trim()}
+                            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-700 px-4 py-2 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+                          >
+                            {isFinalizedReanalysing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                            Re-analyse
+                          </button>
+                          <button
+                            onClick={() => setFinalizedReanalyseIndex(null)}
+                            className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        {addError && finalizedReanalyseIndex === i && (
+                          <p className="flex items-center gap-1.5 text-xs text-red-400">
+                            <AlertCircle size={13} /> {addError}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
                     <div className="border-t border-zinc-800 px-4 py-3">
                       <div className="mb-2 text-xs text-zinc-500">
                         <span className="text-zinc-400">Status:</span> {cat.competitiveStatus} &middot;{" "}
@@ -684,9 +1073,37 @@ export default function Step3Competition() {
                         })}
                       </div>
                     </div>
+
+                    {/* Inline approve bar for pending entries */}
+                    {pendingApprovalIndices.has(i) && (
+                      <div className="flex items-center justify-between border-t border-amber-700/30 bg-amber-950/10 px-4 py-2.5">
+                        <span className="text-xs text-amber-300/80">New AI-generated entry — review the analysis above</span>
+                        <button
+                          onClick={() => handleApprovePending(i)}
+                          className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                        >
+                          <CheckCircle2 size={12} /> Approve
+                        </button>
+                      </div>
+                    )}
                   </details>
                 ))}
               </div>
+
+              {/* Add competitor (for specific category) form — finalized phase */}
+              {addFormContext?.mode === "competitor" && phase === "finalized" && AddForm}
+
+              {/* Add new category — button + form */}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => { setAddFormContext({ mode: "category" }); setAddFormCompetitor(""); setAddFormCategory(""); setAddError(null); }}
+                  disabled={isAddLoading || isFinalizedReanalysing}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-emerald-600/50 hover:text-emerald-400 disabled:opacity-40"
+                >
+                  <Plus size={13} /> Add New Category
+                </button>
+              </div>
+              {addFormContext?.mode === "category" && phase === "finalized" && AddForm}
 
               {/* Actions */}
               <div className="flex flex-wrap items-center gap-3">

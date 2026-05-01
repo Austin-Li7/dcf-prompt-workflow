@@ -38,6 +38,7 @@ export const initialCFPState: CFPState = {
     rows: [],
     confirmedYears: [],
     structuredResults: [],
+    continuity_bridges: [],
   },
 
   competition: {
@@ -154,7 +155,7 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
     case "CLEAR_HISTORY":
       return {
         ...state,
-        history: { rows: [], confirmedYears: [], structuredResults: [] },
+        history: { rows: [], confirmedYears: [], structuredResults: [], continuity_bridges: [] },
       };
 
     case "SET_COMPETITION":
@@ -231,6 +232,11 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
 
     case "RESET":
       return initialCFPState;
+
+    case "RESTORE_STATE":
+      // Load a previously-saved full state; always land on step 1 so the
+      // user can review what was loaded before continuing.
+      return { ...action.payload, currentStep: 1 };
 
     default:
       return state;

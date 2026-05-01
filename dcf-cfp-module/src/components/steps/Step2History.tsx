@@ -16,8 +16,14 @@ import {
   Database,
   Plus,
   X,
+  RefreshCw,
+  Pause,
+  RotateCcw,
+  GitBranch,
+  SlidersHorizontal,
+  Check,
 } from "lucide-react";
-import * as XLSX from "xlsx";
+import { readXlsxToRecords, parseCsvToRecords, downloadXlsx } from "@/lib/excel-utils";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
@@ -32,7 +38,17 @@ import {
   summarizeDcfInputPayload,
   type DcfInputSummary,
 } from "@/lib/step2-fixture-ingest";
-import type { HistoricalExtractionRow, ExtractHistoryResponse } from "@/types/cfp";
+import {
+  runExtractionPipeline,
+  type PipelinePhase,
+} from "@/lib/extraction-pipeline";
+import {
+  getIncompleteManifests,
+  clearAllSessions,
+  type PipelineManifest,
+} from "@/lib/extraction-state";
+import { projectStep2StructuredToRows } from "@/lib/step2-schema";
+import type { HistoricalExtractionRow, ExtractHistoryResponse, ContinuityBridge } from "@/types/cfp";
 
 // =============================================================================
 // Constants
@@ -99,18 +115,13 @@ async function detectFiscalYearsFromFile(file: File): Promise<number[]> {
     return detectFiscalYearsFromText(text);
   }
 
-  if (ext === "csv" || ext === "xlsx" || ext === "xls" || ext === "xlsm") {
-    const buffer = await file.arrayBuffer();
-    const wb = XLSX.read(buffer, { type: "array" });
-    const years: number[] = [];
-
-    for (const sheetName of wb.SheetNames) {
-      const ws = wb.Sheets[sheetName];
-      const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "" });
-      years.push(...detectFiscalYearsFromRecords(records, Number.MAX_SAFE_INTEGER));
-    }
-
-    return normalizeFiscalYearSelection(years);
+  if (ext === "csv" || ext === "xlsx" || ext === "xlsm") {
+    const records = ext === "csv"
+      ? parseCsvToRecords(await file.text())
+      : await readXlsxToRecords(file);
+    return normalizeFiscalYearSelection(
+      detectFiscalYearsFromRecords(records, Number.MAX_SAFE_INTEGER),
+    );
   }
 
   return [];
@@ -145,15 +156,29 @@ export default function Step2History() {
   const [textNotes, setTextNotes] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // ── Extraction state ─────────────────────────────────────────────────────────
+  // ── Pipeline state ────────────────────────────────────────────────────────────
   const [isExtracting, setIsExtracting] = useState(false);
-  const [extractingYear, setExtractingYear] = useState<number | null>(null);
+  const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>({ phase: "idle" });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  /** Session that can be resumed (found in IndexedDB on mount). */
+  const [incompleteSession, setIncompleteSession] = useState<PipelineManifest | null>(null);
+  /** Session ID of the currently paused run (usage-exhausted). */
+  const [pausedSessionId, setPausedSessionId] = useState<string | null>(null);
+
+  // Keep extractingYear alias for legacy progress label compatibility
+  const extractingYear: number | null =
+    pipelinePhase.phase === "reducing"
+      ? pipelinePhase.year
+      : pipelinePhase.phase === "reviewing"
+        ? pipelinePhase.year
+        : null;
 
   // ── Staging rows (editable before confirming to master) ──────────────────────
   const [stagingRows, setStagingRows] = useState<HistoricalExtractionRow[]>([]);
   const [stagingYears, setStagingYears] = useState<number[]>([]);
   const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
+  // ── Continuity bridges detected by the pipeline ─────────────────────────────
+  const [localBridges, setLocalBridges] = useState<ContinuityBridge[]>([]);
 
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
@@ -161,6 +186,7 @@ export default function Step2History() {
   const canAddMoreYears = confirmedYears.length < MAX_YEARS;
 
   const hasStagingData = stagingRows.length > 0;
+  const bridgesAllResolved = localBridges.every((b) => b.status !== "pending");
   const yearsToExtract = useMemo(() => {
     const manualYear = Number(targetYear.trim());
     if (targetYear.trim() && Number.isInteger(manualYear)) {
@@ -169,6 +195,20 @@ export default function Step2History() {
     return detectedYears.filter((year) => !confirmedYears.includes(year));
   }, [confirmedYears, detectedYears, targetYear]);
 
+  // ── On mount: check for incomplete sessions in IndexedDB ──────────────────
+  useEffect(() => {
+    getIncompleteManifests()
+      .then((manifests) => {
+        if (manifests.length > 0) {
+          // Show the most recent incomplete session
+          const latest = manifests.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+          setIncompleteSession(latest);
+        }
+      })
+      .catch((err) => console.warn("[Step2History] Could not read IndexedDB:", err));
+  }, []);
+
+  // ── Fiscal year detection from uploaded files ───────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
@@ -218,100 +258,120 @@ export default function Step2History() {
   }, [masterRows]);
 
   // ============================================================================
-  // Extract handler — POST to /api/extract-history
+  // Pipeline extraction handler
   // ============================================================================
-  const handleExtract = useCallback(async () => {
-    const selectedYears = yearsToExtract;
+  const handleExtract = useCallback(
+    async (resumeSessionId?: string) => {
+      const selectedYears = yearsToExtract;
 
-    if (selectedYears.length === 0) {
-      setErrorMsg(
-        targetYear.trim()
-          ? "Please enter a valid fiscal year (e.g. 2025)."
-          : "Upload a file or paste notes containing fiscal years, such as 2021-2025.",
-      );
-      return;
-    }
-    const duplicateYears = selectedYears.filter((year) => confirmedYears.includes(year));
-    if (duplicateYears.length > 0) {
-      setErrorMsg(`Year ${duplicateYears.join(", ")} already exists in the historical baseline.`);
-      return;
-    }
-    if (confirmedYears.length + selectedYears.length > MAX_YEARS) {
-      setErrorMsg(`Maximum of ${MAX_YEARS} distinct years reached. Remove history to add more.`);
-      return;
-    }
-    if (dataFiles.length === 0 && !textNotes.trim()) {
-      setErrorMsg("Please upload a file or paste text notes.");
-      return;
-    }
-
-    setErrorMsg(null);
-    setIsExtracting(true);
-    setStagingRows([]);
-    setStagingYears([]);
-    setStructuredResults([]);
-
-    try {
-      const nextRows: HistoricalExtractionRow[] = [];
-      const nextStructuredResults: Step2StructuredResultForReview[] = [];
-
-      for (const year of selectedYears) {
-        setExtractingYear(year);
-        const formData = new FormData();
-        formData.append("targetYear", String(year));
-        formData.append("architecture", JSON.stringify(step1Input));
-        for (const f of dataFiles) {
-          formData.append("dataFiles", f);
+      if (!resumeSessionId) {
+        if (selectedYears.length === 0) {
+          setErrorMsg(
+            targetYear.trim()
+              ? "Please enter a valid fiscal year (e.g. 2025)."
+              : "Upload a file or paste notes containing fiscal years, such as 2021-2025.",
+          );
+          return;
         }
-        if (textNotes.trim()) {
-          formData.append("textNotes", textNotes.trim());
+        const duplicateYears = selectedYears.filter((year) => confirmedYears.includes(year));
+        if (duplicateYears.length > 0) {
+          setErrorMsg(
+            `Year ${duplicateYears.join(", ")} already exists in the historical baseline.`,
+          );
+          return;
         }
-        formData.append("apiKey", activeApiKey);
-        formData.append("llmProvider", settings.llmProvider);
-
-        const res = await fetch("/api/extract-history", {
-          method: "POST",
-          body: formData,
-        });
-
-        const data: ExtractHistoryResponse = await res.json();
-
-        if (!res.ok) {
-          if (data.requiresApiKey) {
-            throw new Error("No API key configured. Open Settings (⚙) to add your key.");
-          }
-          throw new Error(`FY ${year}: ${data.error ?? `Server error (${res.status})`}`);
+        if (confirmedYears.length + selectedYears.length > MAX_YEARS) {
+          setErrorMsg(
+            `Maximum of ${MAX_YEARS} distinct years reached. Remove history to add more.`,
+          );
+          return;
         }
-
-        if (data.rows.length === 0) {
-          throw new Error(`FY ${year}: No rows were extracted.`);
-        }
-
-        nextRows.push(...data.rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
-        if (data.structuredResult) {
-          nextStructuredResults.push(data.structuredResult);
+        if (dataFiles.length === 0 && !textNotes.trim()) {
+          setErrorMsg("Please upload a file or paste text notes.");
+          return;
         }
       }
 
-      setStagingRows(nextRows);
-      setStagingYears(selectedYears);
-      setStructuredResults(nextStructuredResults);
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : "Extraction failed.");
-    } finally {
-      setIsExtracting(false);
-      setExtractingYear(null);
+      setErrorMsg(null);
+      setIsExtracting(true);
+      setPipelinePhase({ phase: "preparing", step: 1, totalSteps: 1, detail: "Starting…" });
+      setStagingRows([]);
+      setStagingYears([]);
+      setStructuredResults([]);
+      setLocalBridges([]);
+      setPausedSessionId(null);
+
+      try {
+        const result = await runExtractionPipeline({
+          files: dataFiles,
+          textNotes,
+          targetYears: selectedYears,
+          architecture: step1Input,
+          provider: settings.llmProvider,
+          apiKey: activeApiKey,
+          companyName:
+            (step1Input &&
+              typeof step1Input === "object" &&
+              "company_name" in (step1Input as object) &&
+              typeof (step1Input as unknown as Record<string, unknown>).company_name === "string"
+              ? (step1Input as unknown as Record<string, unknown>).company_name as string
+              : null) ?? "Unknown Company",
+          resumeSessionId,
+          onProgress: (phase) => {
+            setPipelinePhase(phase);
+          },
+        });
+
+        // Build staging rows from all year results
+        const nextRows: HistoricalExtractionRow[] = [];
+        const nextStructuredResults: Step2StructuredResultForReview[] = [];
+
+        for (const yearResult of result.years) {
+          const rows = projectStep2StructuredToRows(yearResult.structuredResult);
+          nextRows.push(...rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
+          nextStructuredResults.push(yearResult.structuredResult);
+        }
+
+        if (nextRows.length === 0) {
+          setErrorMsg("No rows were extracted across all target years.");
+          return;
+        }
+
+        setStagingRows(nextRows);
+        setStagingYears(result.years.map((y) => y.year));
+        setStructuredResults(nextStructuredResults);
+        setLocalBridges(result.bridges ?? []);
+        setIncompleteSession(null);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "UsageExhaustedError") {
+          // Session ID is already emitted via onProgress — don't overwrite
+          return;
+        }
+        const msg = err instanceof Error ? err.message : "Extraction failed.";
+        setErrorMsg(msg);
+        setPipelinePhase({ phase: "error", message: msg });
+      } finally {
+        setIsExtracting(false);
+      }
+    },
+    [
+      targetYear,
+      yearsToExtract,
+      dataFiles,
+      textNotes,
+      activeApiKey,
+      settings.llmProvider,
+      step1Input,
+      confirmedYears,
+    ],
+  );
+
+  // Handle usage-exhausted paused session ID from pipeline progress
+  useEffect(() => {
+    if (pipelinePhase.phase === "usage-exhausted") {
+      setPausedSessionId(pipelinePhase.sessionId);
     }
-  }, [
-    targetYear,
-    yearsToExtract,
-    dataFiles,
-    textNotes,
-    activeApiKey,
-    settings.llmProvider,
-    step1Input,
-    confirmedYears,
-  ]);
+  }, [pipelinePhase]);
 
   // ── Staging: edit a cell ─────────────────────────────────────────────────────
   const updateStagingCell = (
@@ -327,6 +387,7 @@ export default function Step2History() {
   // ── Confirm staging → append to master ──────────────────────────────────────
   const handleConfirm = () => {
     if (stagingRows.length === 0) return;
+    const confirmedBridges = localBridges.filter((b) => b.status === "confirmed");
     dispatch({
       type: "SET_HISTORY",
       payload: {
@@ -336,11 +397,16 @@ export default function Step2History() {
           ...(state.history.structuredResults ?? []),
           ...structuredResults,
         ],
+        continuity_bridges: [
+          ...(state.history.continuity_bridges ?? []),
+          ...confirmedBridges,
+        ],
       },
     });
     setStagingRows([]);
     setStagingYears([]);
     setStructuredResults([]);
+    setLocalBridges([]);
     setTargetYear("");
     setDataFiles([]);
     setTextNotes("");
@@ -348,7 +414,7 @@ export default function Step2History() {
   };
 
   // ── Excel download ───────────────────────────────────────────────────────────
-  const handleExcelDownload = () => {
+  const handleExcelDownload = async () => {
     if (masterRows.length === 0) return;
     const exportData = masterRows.map((row) => ({
       fiscalYear: row.fiscalYear,
@@ -367,15 +433,52 @@ export default function Step2History() {
       sourceLink: row.sourceLink,
       reviewNote: row.reviewNote,
     }));
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Master History");
+
+    const savedBridges = state.history.continuity_bridges ?? [];
+    const bridgeRows: Array<Record<string, unknown>> = [];
+    for (const bridge of savedBridges) {
+      const weightEntries = Object.entries(bridge.weights).flatMap(([oldSeg, newMap]) =>
+        Object.entries(newMap).map(([newSeg, pct]) => ({
+          eventType: bridge.eventType,
+          fromYear: bridge.fromYear,
+          toYear: bridge.toYear,
+          oldSegment: oldSeg,
+          newSegment: newSeg,
+          weightPct: pct,
+          confidence: bridge.confidence,
+          filingReference: bridge.filingReference ?? "",
+          status: bridge.status,
+          description: bridge.description,
+        })),
+      );
+      if (weightEntries.length === 0) {
+        bridgeRows.push({
+          eventType: bridge.eventType,
+          fromYear: bridge.fromYear,
+          toYear: bridge.toYear,
+          oldSegment: bridge.oldSegments.join(", "),
+          newSegment: bridge.newSegments.join(", "),
+          weightPct: "",
+          confidence: bridge.confidence,
+          filingReference: bridge.filingReference ?? "",
+          status: bridge.status,
+          description: bridge.description,
+        });
+      } else {
+        bridgeRows.push(...weightEntries);
+      }
+    }
+
     const now = new Date();
     const safeName = (state.profile.companyName || "company")
       .replace(/[^a-zA-Z0-9_-]/g, "_")
       .toLowerCase();
-    XLSX.writeFile(
-      wb,
+    const sheets = [
+      { name: "Master History", rows: exportData as Record<string, unknown>[] },
+      ...(bridgeRows.length > 0 ? [{ name: "Continuity Bridges", rows: bridgeRows }] : []),
+    ];
+    await downloadXlsx(
+      sheets,
       `${safeName}-step2-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}-${now.getFullYear()}.xlsx`,
     );
   };
@@ -581,6 +684,41 @@ export default function Step2History() {
               />
             </div>
 
+            {/* Resume banner — shown when an incomplete session exists in IndexedDB */}
+            {incompleteSession && !isExtracting && (
+              <ResumeBanner
+                manifest={incompleteSession}
+                onResume={() => {
+                  setIncompleteSession(null);
+                  void handleExtract(incompleteSession.sessionId);
+                }}
+                onDiscard={async () => {
+                  const { deleteSession } = await import("@/lib/extraction-state");
+                  await deleteSession(incompleteSession.sessionId);
+                  setIncompleteSession(null);
+                }}
+              />
+            )}
+
+            {/* Pipeline progress */}
+            {isExtracting && pipelinePhase.phase !== "idle" && (
+              <PipelineProgressDisplay phase={pipelinePhase} />
+            )}
+
+            {/* Usage-exhausted banner */}
+            {pipelinePhase.phase === "usage-exhausted" && !isExtracting && (
+              <UsageExhaustedBanner
+                phase={pipelinePhase}
+                onAutoResume={() => {
+                  void handleExtract(pipelinePhase.sessionId);
+                }}
+                onSaveAndClose={() => {
+                  setPausedSessionId(pipelinePhase.sessionId);
+                  setPipelinePhase({ phase: "idle" });
+                }}
+              />
+            )}
+
             {/* Error banner */}
             {errorMsg && (
               <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
@@ -591,14 +729,14 @@ export default function Step2History() {
 
             {/* Submit */}
             <button
-              onClick={handleExtract}
+              onClick={() => void handleExtract()}
               disabled={isExtracting || !canAddMoreYears}
               className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
             >
               {isExtracting ? (
                 <>
                   <Loader2 size={18} className="animate-spin" />
-                  {extractingYear ? `Extracting FY ${extractingYear}…` : "Extracting baseline…"}
+                  {extractingYear ? `Processing FY ${extractingYear}…` : "Running pipeline…"}
                 </>
               ) : (
                 <>
@@ -707,9 +845,22 @@ export default function Step2History() {
                 </table>
               </div>
 
+              {localBridges.length > 0 && (
+                <ContinuityReviewPanel
+                  bridges={localBridges}
+                  onUpdate={(updated) => setLocalBridges(updated)}
+                />
+              )}
+
               <button
                 onClick={handleConfirm}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500"
+                disabled={!bridgesAllResolved}
+                title={
+                  !bridgesAllResolved
+                    ? "Review all continuity bridges above before confirming"
+                    : undefined
+                }
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
               >
                 <CheckCircle2 size={16} />
                 Confirm Historical Baseline
@@ -737,6 +888,10 @@ export default function Step2History() {
                 ))}
               </div>
 
+              {(state.history.continuity_bridges?.length ?? 0) > 0 && (
+                <SavedContinuityRecord bridges={state.history.continuity_bridges!} />
+              )}
+
               <div className="flex flex-wrap items-center gap-3 pt-2">
                 <button
                   onClick={handleExcelDownload}
@@ -752,6 +907,19 @@ export default function Step2History() {
                   <Trash2 size={16} />
                   Clear All History
                 </button>
+                <button
+                  onClick={async () => {
+                    await clearAllSessions();
+                    setIncompleteSession(null);
+                    setPausedSessionId(null);
+                    setPipelinePhase({ phase: "idle" });
+                  }}
+                  className="flex items-center gap-2 rounded-lg border border-zinc-700 px-5 py-2.5 text-sm text-zinc-500 transition-colors hover:border-amber-700/50 hover:text-amber-400"
+                  title="Clear IndexedDB pipeline cache (use for troubleshooting)"
+                >
+                  <RotateCcw size={15} />
+                  Clear Cache
+                </button>
               </div>
             </section>
           )}
@@ -759,6 +927,203 @@ export default function Step2History() {
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// PipelineProgressDisplay
+// =============================================================================
+function PipelineProgressDisplay({ phase }: { phase: PipelinePhase }) {
+  if (phase.phase === "idle" || phase.phase === "complete") return null;
+
+  let label = "";
+  let detail = "";
+  let pct = 0;
+
+  if (phase.phase === "preparing") {
+    label = `Step ${phase.step}/${phase.totalSteps} — Preparing`;
+    detail = phase.detail;
+    pct = Math.round((phase.step / phase.totalSteps) * 30);
+  } else if (phase.phase === "mapping") {
+    const overall = phase.totalAllChunks > 0
+      ? Math.round((phase.completedChunks / phase.totalAllChunks) * 60)
+      : 0;
+    label = `Extracting — ${phase.fileName}`;
+    detail = `Chunk ${phase.chunkIndex}/${phase.totalChunks} · ${phase.completedChunks}/${phase.totalAllChunks} total`;
+    pct = 30 + overall;
+  } else if (phase.phase === "reducing") {
+    label = `Merging FY ${phase.year}`;
+    detail = `Year ${phase.yearIndex}/${phase.totalYears}`;
+    pct = 90 + Math.round((phase.yearIndex / phase.totalYears) * 5);
+  } else if (phase.phase === "reviewing") {
+    label = `Sanity review FY ${phase.year}`;
+    detail = `Year ${phase.yearIndex}/${phase.totalYears}`;
+    pct = 95 + Math.round((phase.yearIndex / phase.totalYears) * 4);
+  } else if (phase.phase === "analyzing-continuity") {
+    label = "Analyzing segment continuity";
+    detail = "Checking for structural changes across fiscal years…";
+    pct = 99;
+  } else if (phase.phase === "rate-limited") {
+    label = `Rate limit hit (attempt ${phase.attempt}/3) — retrying in ${phase.retryIn}s`;
+    detail = `${phase.completedChunks}/${phase.totalChunks} chunks saved`;
+    pct = Math.round((phase.completedChunks / Math.max(phase.totalChunks, 1)) * 80);
+  } else if (phase.phase === "error") {
+    label = "Pipeline error";
+    detail = phase.message;
+    pct = 0;
+  }
+
+  const isError = phase.phase === "error";
+  const isRateLimit = phase.phase === "rate-limited";
+
+  return (
+    <div
+      className={`space-y-2 rounded-lg border p-4 text-sm ${
+        isError
+          ? "border-red-700/40 bg-red-950/20"
+          : isRateLimit
+            ? "border-amber-700/40 bg-amber-950/20"
+            : "border-blue-700/30 bg-blue-950/15"
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        {isError ? (
+          <AlertCircle size={15} className="shrink-0 text-red-400" />
+        ) : isRateLimit ? (
+          <Pause size={15} className="shrink-0 text-amber-400" />
+        ) : (
+          <Loader2 size={15} className="shrink-0 animate-spin text-blue-400" />
+        )}
+        <span
+          className={`font-medium ${isError ? "text-red-300" : isRateLimit ? "text-amber-300" : "text-blue-200"}`}
+        >
+          {label}
+        </span>
+      </div>
+      {detail && (
+        <p className={`ml-5 text-xs ${isError ? "text-red-400/70" : "text-zinc-500"}`}>{detail}</p>
+      )}
+      {!isError && pct > 0 && (
+        <div className="ml-5 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+          <div
+            className={`h-full rounded-full transition-all ${isRateLimit ? "bg-amber-500" : "bg-blue-500"}`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// ResumeBanner
+// =============================================================================
+function ResumeBanner({
+  manifest,
+  onResume,
+  onDiscard,
+}: {
+  manifest: PipelineManifest;
+  onResume: () => void;
+  onDiscard: () => void;
+}) {
+  const ago = Math.round((Date.now() - manifest.updatedAt) / 60_000);
+  const agoLabel = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
+  const pct = manifest.totalChunks > 0
+    ? Math.round((manifest.completedChunks / manifest.totalChunks) * 100)
+    : 0;
+
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-lg border border-blue-700/40 bg-blue-950/20 p-4 text-sm">
+      <div className="flex min-w-0 items-start gap-3">
+        <RefreshCw size={16} className="mt-0.5 shrink-0 text-blue-400" />
+        <div className="min-w-0">
+          <p className="font-medium text-blue-200">Incomplete extraction found</p>
+          <p className="mt-0.5 truncate text-xs text-zinc-500">
+            {agoLabel} · {pct}% complete ({manifest.completedChunks}/{manifest.totalChunks} chunks) ·{" "}
+            FY {manifest.targetYears.join(", ")} · {manifest.files.map((f) => f.fileName).join(", ")}
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        <button
+          onClick={onResume}
+          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+        >
+          Resume
+        </button>
+        <button
+          onClick={onDiscard}
+          className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:text-red-400"
+        >
+          Discard
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// UsageExhaustedBanner
+// =============================================================================
+function UsageExhaustedBanner({
+  phase,
+  onAutoResume,
+  onSaveAndClose,
+}: {
+  phase: Extract<PipelinePhase, { phase: "usage-exhausted" }>;
+  onAutoResume: () => void;
+  onSaveAndClose: () => void;
+}) {
+  const [countdown, setCountdown] = useState(60);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          clearInterval(id);
+          onAutoResume();
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1_000);
+    return () => clearInterval(id);
+  }, [onAutoResume]);
+
+  const pct =
+    phase.totalChunks > 0
+      ? Math.round((phase.completedChunks / phase.totalChunks) * 100)
+      : 0;
+
+  return (
+    <div className="space-y-3 rounded-lg border border-red-700/40 bg-red-950/20 p-4 text-sm">
+      <div className="flex items-start gap-2">
+        <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+        <div>
+          <p className="font-medium text-red-200">Usage limit reached</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {pct}% of data processed and saved to local cache ({phase.completedChunks}/
+            {phase.totalChunks} chunks). Session ID: {phase.sessionId.slice(0, 12)}…
+          </p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={onAutoResume}
+          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500"
+        >
+          <RefreshCw size={13} />
+          [A] Auto-resume now {countdown > 0 && `(${countdown}s)`}
+        </button>
+        <button
+          onClick={onSaveAndClose}
+          className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-400 hover:text-zinc-200"
+        >
+          [B] Save progress &amp; resume later
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -955,8 +1320,8 @@ function Step2ReviewSummary({
 
       {warnings.length > 0 && (
         <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
-          {Array.from(new Set(warnings)).slice(0, 3).map((warning) => (
-            <p key={warning}>{warning}</p>
+          {Array.from(new Set(warnings)).slice(0, 3).map((warning, i) => (
+            <p key={i}>{warning}</p>
           ))}
         </div>
       )}
@@ -971,8 +1336,8 @@ function Step2ReviewSummary({
               {source.name}: {source.locator ?? "No locator"}
             </p>
           ))}
-          {excludedItems.slice(0, 8).map((item) => (
-            <p key={`${item.label}-${item.reason}`} className="text-amber-300/80">
+          {excludedItems.slice(0, 8).map((item, i) => (
+            <p key={i} className="text-amber-300/80">
               Excluded: {item.label} - {item.reason}
             </p>
           ))}
@@ -982,6 +1347,361 @@ function Step2ReviewSummary({
   );
 }
 
+// =============================================================================
+// ContinuityReviewPanel — bridge cards with sliders for estimated splits
+// =============================================================================
+
+function eventTypeLabel(t: ContinuityBridge["eventType"]): string {
+  if (t === "split") return "Split";
+  if (t === "merge") return "Merge";
+  if (t === "rename") return "Rename";
+  return "Discontinuation";
+}
+
+function eventTypeBadgeClass(t: ContinuityBridge["eventType"]): string {
+  if (t === "split") return "bg-orange-600/20 text-orange-300";
+  if (t === "merge") return "bg-blue-600/20 text-blue-300";
+  if (t === "rename") return "bg-violet-600/20 text-violet-300";
+  return "bg-red-600/20 text-red-300";
+}
+
+/** Slider row for one old→new weight within a split. */
+function SplitWeightSlider({
+  oldSeg,
+  newSegments,
+  weights,
+  onChange,
+  readOnly,
+}: {
+  oldSeg: string;
+  newSegments: string[];
+  weights: Record<string, number>;
+  onChange: (newSeg: string, pct: number) => void;
+  readOnly: boolean;
+}) {
+  const editableSegs = newSegments.slice(0, -1);
+  const lastSeg = newSegments[newSegments.length - 1];
+  const editableSum = editableSegs.reduce((s, seg) => s + (weights[seg] ?? 0), 0);
+  const lastPct = Math.max(0, 100 - editableSum);
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-medium text-zinc-400">
+        Allocate <span className="text-zinc-200">{oldSeg}</span> revenue across new segments:
+      </p>
+      {editableSegs.map((seg) => (
+        <div key={seg} className="flex items-center gap-3">
+          <span className="w-40 min-w-0 truncate text-xs text-zinc-300" title={seg}>{seg}</span>
+          {readOnly ? (
+            <span className="text-xs font-mono text-zinc-400">{weights[seg] ?? 0}%</span>
+          ) : (
+            <>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={weights[seg] ?? 0}
+                onChange={(e) => onChange(seg, Number(e.target.value))}
+                className="h-1.5 flex-1 cursor-pointer accent-orange-500"
+              />
+              <span className="w-10 text-right text-xs font-mono text-orange-300">
+                {weights[seg] ?? 0}%
+              </span>
+            </>
+          )}
+        </div>
+      ))}
+      {lastSeg && (
+        <div className="flex items-center gap-3">
+          <span className="w-40 min-w-0 truncate text-xs text-zinc-300" title={lastSeg}>{lastSeg}</span>
+          <div className="flex-1 text-xs text-zinc-500 italic">auto</div>
+          <span className="w-10 text-right text-xs font-mono text-zinc-400">{lastPct}%</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContinuityReviewPanel({
+  bridges,
+  onUpdate,
+}: {
+  bridges: ContinuityBridge[];
+  onUpdate: (updated: ContinuityBridge[]) => void;
+}) {
+  const pendingCount = bridges.filter((b) => b.status === "pending").length;
+
+  const updateBridge = (id: string, patch: Partial<ContinuityBridge>) => {
+    onUpdate(bridges.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  };
+
+  const updateWeight = (
+    bridgeId: string,
+    oldSeg: string,
+    changedNewSeg: string,
+    newValue: number,
+    allNewSegs: string[],
+  ) => {
+    onUpdate(
+      bridges.map((bridge) => {
+        if (bridge.id !== bridgeId) return bridge;
+        const oldWeights = { ...(bridge.weights[oldSeg] ?? {}) };
+        oldWeights[changedNewSeg] = newValue;
+        // Auto-compute last segment as remainder
+        const editableSegs = allNewSegs.slice(0, -1);
+        const lastSeg = allNewSegs[allNewSegs.length - 1];
+        const editableSum = editableSegs.reduce((s, seg) => s + (oldWeights[seg] ?? 0), 0);
+        if (lastSeg) oldWeights[lastSeg] = Math.max(0, 100 - editableSum);
+        return { ...bridge, weights: { ...bridge.weights, [oldSeg]: oldWeights } };
+      }),
+    );
+  };
+
+  return (
+    <section className="space-y-4 rounded-lg border border-orange-700/40 bg-orange-950/15 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <GitBranch size={16} className="shrink-0 text-orange-400" />
+          <h4 className="text-sm font-semibold text-orange-200">Segment Continuity Review</h4>
+        </div>
+        {pendingCount > 0 ? (
+          <span className="rounded-full bg-orange-600/20 px-2.5 py-0.5 text-xs font-semibold text-orange-300">
+            {pendingCount} pending
+          </span>
+        ) : (
+          <span className="rounded-full bg-emerald-600/20 px-2.5 py-0.5 text-xs font-semibold text-emerald-300">
+            All resolved
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-zinc-500">
+        The pipeline detected segment structure changes across the extracted years. Review each
+        event and confirm or dismiss. Confirmed bridges are saved with the historical baseline and
+        used to guide Step 5 forecasting.
+      </p>
+
+      <div className="space-y-3">
+        {bridges.map((bridge) => {
+          const isDismissed = bridge.status === "dismissed";
+          const isConfirmed = bridge.status === "confirmed";
+          const isSplit = bridge.eventType === "split";
+          const showSliders = isSplit && bridge.confidence === "estimated" && !isDismissed;
+
+          return (
+            <div
+              key={bridge.id}
+              className={`rounded-lg border p-4 transition-opacity ${
+                isDismissed
+                  ? "border-zinc-800 bg-zinc-900/40 opacity-50"
+                  : isConfirmed
+                    ? "border-emerald-700/40 bg-emerald-950/20"
+                    : "border-zinc-700 bg-zinc-900/60"
+              }`}
+            >
+              {/* Header row */}
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded px-2 py-0.5 text-xs font-semibold ${eventTypeBadgeClass(bridge.eventType)}`}>
+                    {eventTypeLabel(bridge.eventType)}
+                  </span>
+                  <span className="text-xs font-medium text-zinc-300">
+                    FY {bridge.fromYear} → FY {bridge.toYear}
+                  </span>
+                  {bridge.confidence === "estimated" ? (
+                    <span className="flex items-center gap-1 rounded bg-amber-600/15 px-2 py-0.5 text-xs text-amber-300">
+                      <SlidersHorizontal size={10} />
+                      Estimated
+                    </span>
+                  ) : (
+                    <span className="rounded bg-emerald-600/15 px-2 py-0.5 text-xs text-emerald-300">
+                      Disclosed
+                    </span>
+                  )}
+                </div>
+                {/* Confirm / Dismiss controls */}
+                {!isDismissed && !isConfirmed && (
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={() =>
+                        updateBridge(bridge.id, {
+                          status: "confirmed",
+                          confirmedAt: new Date().toISOString(),
+                        })
+                      }
+                      className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-500"
+                    >
+                      <Check size={11} />
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => updateBridge(bridge.id, { status: "dismissed" })}
+                      className="rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:text-red-400"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+                {isConfirmed && (
+                  <div className="flex shrink-0 items-center gap-1.5 text-xs text-emerald-400">
+                    <CheckCircle2 size={13} />
+                    Confirmed
+                    <button
+                      onClick={() => updateBridge(bridge.id, { status: "pending", confirmedAt: null })}
+                      className="ml-1 text-zinc-600 hover:text-zinc-400"
+                      title="Undo confirmation"
+                    >
+                      <RotateCcw size={11} />
+                    </button>
+                  </div>
+                )}
+                {isDismissed && (
+                  <button
+                    onClick={() => updateBridge(bridge.id, { status: "pending" })}
+                    className="text-xs text-zinc-600 hover:text-zinc-400"
+                  >
+                    Undo dismiss
+                  </button>
+                )}
+              </div>
+
+              {/* Description */}
+              <p className="mt-2 text-xs text-zinc-400">{bridge.description}</p>
+
+              {/* Segment mapping summary */}
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                {bridge.oldSegments.map((s) => (
+                  <span key={s} className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">{s}</span>
+                ))}
+                <span className="text-zinc-600">→</span>
+                {bridge.newSegments.map((s) => (
+                  <span key={s} className="rounded bg-zinc-700 px-2 py-0.5 text-zinc-200">{s}</span>
+                ))}
+              </div>
+
+              {/* Filing reference */}
+              {bridge.filingReference && (
+                <p className="mt-1.5 text-xs text-zinc-600">Source: {bridge.filingReference}</p>
+              )}
+
+              {/* Sliders for estimated splits */}
+              {showSliders && bridge.newSegments.length >= 2 && (
+                <div className="mt-4 space-y-4 rounded border border-orange-700/20 bg-orange-950/20 p-3">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-orange-300">
+                    <SlidersHorizontal size={12} />
+                    No split percentages found in filings — adjust the allocation below
+                  </p>
+                  {bridge.oldSegments.map((oldSeg) => (
+                    <SplitWeightSlider
+                      key={oldSeg}
+                      oldSeg={oldSeg}
+                      newSegments={bridge.newSegments}
+                      weights={bridge.weights[oldSeg] ?? {}}
+                      readOnly={isConfirmed}
+                      onChange={(changedSeg, pct) =>
+                        updateWeight(bridge.id, oldSeg, changedSeg, pct, bridge.newSegments)
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Disclosed weights — read-only display */}
+              {!showSliders && !isDismissed && bridge.eventType === "split" && (
+                <div className="mt-3 space-y-1">
+                  {bridge.oldSegments.map((oldSeg) =>
+                    Object.entries(bridge.weights[oldSeg] ?? {}).map(([newSeg, pct]) => (
+                      <p key={`${oldSeg}-${newSeg}`} className="text-xs text-zinc-500">
+                        {oldSeg} → {newSeg}: <span className="font-mono text-zinc-300">{pct}%</span>
+                      </p>
+                    )),
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// =============================================================================
+// SavedContinuityRecord — read-only audit display in master history
+// =============================================================================
+function SavedContinuityRecord({ bridges }: { bridges: ContinuityBridge[] }) {
+  const [open, setOpen] = useState(false);
+  const confirmed = bridges.filter((b) => b.status === "confirmed");
+  if (confirmed.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-950">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm font-medium text-zinc-200 hover:bg-zinc-900"
+      >
+        <span className="flex items-center gap-2">
+          <GitBranch size={14} className="text-orange-400" />
+          Segment Continuity Record
+          <span className="ml-1 text-xs font-normal text-zinc-500">
+            ({confirmed.length} bridge{confirmed.length !== 1 ? "s" : ""} — read-only audit)
+          </span>
+        </span>
+        <ChevronDown
+          size={16}
+          className={`text-zinc-500 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {open && (
+        <div className="space-y-3 border-t border-zinc-800 p-4">
+          {confirmed.map((bridge) => (
+            <div key={bridge.id} className="rounded border border-zinc-800 bg-zinc-900/60 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`rounded px-2 py-0.5 text-xs font-semibold ${eventTypeBadgeClass(bridge.eventType)}`}>
+                  {eventTypeLabel(bridge.eventType)}
+                </span>
+                <span className="text-xs text-zinc-300">
+                  FY {bridge.fromYear} → FY {bridge.toYear}
+                </span>
+                <span className={`rounded px-2 py-0.5 text-xs ${
+                  bridge.confidence === "disclosed"
+                    ? "bg-emerald-600/15 text-emerald-300"
+                    : "bg-amber-600/15 text-amber-300"
+                }`}>
+                  {bridge.confidence}
+                </span>
+              </div>
+              <p className="mt-1.5 text-xs text-zinc-400">{bridge.description}</p>
+              <div className="mt-2 space-y-0.5">
+                {bridge.oldSegments.map((oldSeg) =>
+                  Object.entries(bridge.weights[oldSeg] ?? {}).map(([newSeg, pct]) => (
+                    <p key={`${oldSeg}-${newSeg}`} className="text-xs text-zinc-500">
+                      {oldSeg} → {newSeg}:{" "}
+                      <span className="font-mono text-zinc-300">{pct}%</span>
+                    </p>
+                  )),
+                )}
+              </div>
+              {bridge.filingReference && (
+                <p className="mt-1 text-xs text-zinc-600">Source: {bridge.filingReference}</p>
+              )}
+              {bridge.confirmedAt && (
+                <p className="mt-1 text-xs text-zinc-700">
+                  Confirmed {new Date(bridge.confirmedAt).toLocaleDateString()}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// SegmentGroup — collapsible accordion for Master History
+// =============================================================================
 function SegmentGroup({
   segment,
   rows,

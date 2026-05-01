@@ -348,6 +348,43 @@ export interface Step2StructuredResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Step 2 – Continuity Bridge (segment restructuring audit record)
+// ---------------------------------------------------------------------------
+
+/** How a segment structure changed between two consecutive fiscal years. */
+export type ContinuityEventType = "split" | "merge" | "rename" | "discontinuation";
+
+/** Whether split percentages were found in filing text or are LLM estimates. */
+export type ContinuityConfidence = "disclosed" | "estimated";
+
+/** User review outcome for a detected continuity event. */
+export type ContinuityStatus = "pending" | "confirmed" | "dismissed";
+
+/**
+ * Records one structural segment change across the 5-year history window.
+ *
+ * weights[oldSegment][newSegment] = percentage (0–100).
+ * For splits the percentages per oldSegment must sum to 100.
+ * For merges/renames the percentage is trivially 100.
+ */
+export interface ContinuityBridge {
+  id: string;
+  eventType: ContinuityEventType;
+  /** Last year using the OLD segment structure. */
+  fromYear: number;
+  /** First year using the NEW segment structure. */
+  toYear: number;
+  oldSegments: string[];
+  newSegments: string[];
+  description: string;
+  confidence: ContinuityConfidence;
+  filingReference: string | null;
+  weights: Record<string, Record<string, number>>;
+  status: ContinuityStatus;
+  confirmedAt: string | null;
+}
+
 /** Shape returned by POST /api/extract-history */
 export interface ExtractHistoryResponse {
   rows: Omit<HistoricalExtractionRow, "id" | "yoyGrowth">[];
@@ -361,6 +398,7 @@ export interface HistoricalData {
   rows: HistoricalExtractionRow[];
   confirmedYears: number[]; // distinct years already appended (max 5)
   structuredResults?: Step2StructuredResult[]; // approved Step 2 v5.5 artifacts
+  continuity_bridges?: ContinuityBridge[]; // segment restructuring audit records
 }
 
 // Kept for backward-compat — used by the export API
@@ -544,6 +582,14 @@ export interface AnalyzeCompetitionResponse {
 export interface ReviseCompetitionResponse {
   category: CategoryCompetitionEntry;
   structuredCategory?: Step3StructuredCategory | null;
+  error?: string;
+  requiresApiKey?: boolean;
+}
+
+/** Shape returned by POST /api/add-competitor */
+export interface AddCompetitorResponse {
+  category: CategoryCompetitionEntry | null;
+  structuredCategory: Step3StructuredCategory | null;
   error?: string;
   requiresApiKey?: boolean;
 }
@@ -1085,7 +1131,56 @@ export type CFPAction =
   | { type: "SET_OUTLOOK"; payload: FiveYearOutlook }
   | { type: "SET_WACC"; payload: WACCState }
   | { type: "CLEAR_WACC" }
-  | { type: "RESET" };
+  | { type: "RESET" }
+  /** Restore a full previously-saved state (load from file or IndexedDB). currentStep is reset to 1. */
+  | { type: "RESTORE_STATE"; payload: CFPState };
+
+// ---------------------------------------------------------------------------
+// Company Save / Load
+// ---------------------------------------------------------------------------
+
+/** Frozen output numbers captured at the moment "Valuation Complete" is clicked. */
+export interface ValuationSnapshot {
+  enterpriseValueUsdM: number;
+  sumPvFcffUsdM: number;
+  terminalPresentValueUsdM: number;
+  totalDebtUsdM: number;
+  preferredStockUsdM: number;
+  minorityInterestUsdM: number;
+  totalCashUsdM: number;
+  netDebtUsdM: number;
+  equityValueUsdM: number;
+  sharesOutstandingM: number | null;
+  marketCapUsdM: number | null;
+  currentPrice: number | null;
+  intrinsicValuePerShare: number | null;
+  impliedUpsidePct: number | null;
+  fcfMargin: number;
+  terminalGrowth: number;
+  wacc: number | null;
+  decisionAction: "BUY" | "WATCH" | "AVOID" | "INSUFFICIENT_DATA";
+  decisionLabel: string;
+  decisionSummary: string;
+}
+
+/** One saved run for a company — stored in IndexedDB and exported as JSON. */
+export interface CompanySave {
+  /** UUID — primary key in IndexedDB. */
+  saveId: string;
+  companyName: string;
+  ticker: string;
+  /** ISO 8601 timestamp of when the save was created. */
+  savedAt: string;
+  /**
+   * Sequential version number per ticker (1, 2, 3 …).
+   * Each run creates a new version; all versions are kept as history.
+   */
+  version: number;
+  /** Full CFP + WACC state — restoring this re-creates the entire session. */
+  cfpState: CFPState;
+  /** Frozen output at the time of saving. */
+  snapshot: ValuationSnapshot;
+}
 
 // ---------------------------------------------------------------------------
 // API Export Contract (consumed by the Core DCF Tool)
