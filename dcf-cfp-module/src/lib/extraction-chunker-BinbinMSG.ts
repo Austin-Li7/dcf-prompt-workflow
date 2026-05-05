@@ -11,7 +11,7 @@
  * Provider safety targets: Gemini 700k tokens, Claude 150k tokens.
  */
 
-import * as XLSX from "xlsx";
+import { readXlsxToRecords, parseCsvToRecords } from "./excel-utils";
 import type { LLMProvider } from "@/types/cfp";
 
 // =============================================================================
@@ -140,18 +140,10 @@ const QUARTER_VALUE_RE = /\bQ[1-4]\b/i;
  */
 const PIVOT_ANNOTATION =
   "// TABLE FORMAT NOTE: This is a PIVOTED financial table.\n" +
-  "// Column headers (FY2021, FY2022, …) are fiscal years; each JSON object is ONE metric row.\n" +
-  "//\n" +
-  "// HOW TO BUILD ChunkRows — for EACH fiscal-year column:\n" +
-  "//   1. Create exactly ONE ChunkRow per fiscal year by combining ALL metric rows for that year:\n" +
-  "//      • Item contains 'revenue' or 'Total revenue'   → revenue_usd_m\n" +
-  "//      • Item contains 'Operating income' or 'EBIT'   → operating_income_usd_m\n" +
-  "//   2. Annual-only source → set quarter = 'Q4' (represents the full-year figure).\n" +
-  "//   3. No segment breakdown in this table → set segment = 'Total',\n" +
-  "//      product_category = 'Total', product_name = 'Total'.\n" +
-  "//   4. DO NOT emit a separate ChunkRow per metric row; all metrics for a year go in ONE row.\n" +
-  "//   5. Values are already in USD millions — do not rescale.\n" +
-  "//\n\n";
+  "// Column headers (e.g. FY2021, FY2022, FY2023...) represent fiscal years.\n" +
+  "// Each JSON object is a financial metric row (e.g. Total revenue, Operating income).\n" +
+  "// Extract data by reading each row's 'Item' key as the metric name, then reading\n" +
+  "// the value under each FY column for that year. Annual data only — use Q4 as the quarter.\n\n";
 
 /**
  * Find the key in the first record that identifies the quarter / period dimension.
@@ -287,68 +279,6 @@ function recordsToChunks(
 }
 
 // =============================================================================
-// Nested-JSON flattener
-// =============================================================================
-
-/**
- * Detect and flatten nested financial JSON structures like:
- *   { "company": "...", "year": 2025, "quarters": [
- *     { "quarter": "Q1", "segments": { "segment_name": { "revenue": ..., "operating_earnings": ... } } }
- *   ]}
- *
- * Returns flat records (one per segment × quarter) so the LLM can extract
- * every segment cleanly, including those with null revenue.
- * Returns null if the object does not match this pattern.
- */
-function flattenNestedFinancials(
-  obj: Record<string, unknown>,
-): Array<Record<string, unknown>> | null {
-  const quarters = obj.quarters ?? obj.periods ?? obj.data;
-  if (!Array.isArray(quarters) || quarters.length === 0) return null;
-
-  const fiscalYear = obj.year ?? obj.fiscal_year ?? obj.fiscalYear;
-  const company = obj.company ?? obj.ticker ?? "";
-  const currency = obj.currency ?? "USD in millions";
-
-  const flattened: Array<Record<string, unknown>> = [];
-
-  for (const q of quarters) {
-    if (!q || typeof q !== "object" || Array.isArray(q)) continue;
-    const qRec = q as Record<string, unknown>;
-    const quarter = qRec.quarter ?? qRec.period ?? qRec.Quarter;
-    const qYear = qRec.year ?? qRec.fiscal_year ?? fiscalYear;
-    const segments = qRec.segments ?? qRec.business_segments ?? qRec.breakdown;
-
-    if (segments && typeof segments === "object" && !Array.isArray(segments)) {
-      for (const [segName, segData] of Object.entries(segments as Record<string, unknown>)) {
-        if (!segData || typeof segData !== "object" || Array.isArray(segData)) continue;
-        const seg = segData as Record<string, unknown>;
-        flattened.push({
-          company,
-          currency,
-          fiscal_year: qYear,
-          quarter,
-          segment: segName,
-          revenue_usd_m:
-            seg.revenue ?? seg.revenue_usd_m ?? seg.total_revenue ?? null,
-          operating_income_usd_m:
-            seg.operating_earnings ?? seg.operating_income ?? seg.operating_income_usd_m ?? null,
-        });
-      }
-    }
-  }
-
-  return flattened.length > 0 ? flattened : null;
-}
-
-const NESTED_JSON_ANNOTATION =
-  "// TABLE FORMAT NOTE: This data was flattened from a nested JSON structure.\n" +
-  "// Each record represents ONE business segment for ONE fiscal quarter.\n" +
-  "// 'revenue_usd_m' is null for segments that only disclose operating income (e.g. investment income).\n" +
-  "// IMPORTANT: Extract ALL segments, even those where revenue_usd_m is null — include them with\n" +
-  "//   revenue_usd_m: null and the disclosed operating_income_usd_m value.\n\n";
-
-// =============================================================================
 // Main entry point
 // =============================================================================
 
@@ -363,70 +293,46 @@ export async function chunkFile(file: File, provider: LLMProvider): Promise<File
   const ext = (file.name.split(".").pop() ?? "").toLowerCase();
   let rawChunks: string[];
 
-  if (ext === "txt" || ext === "json") {
+  if (ext === "txt") {
     const text = await file.text();
-    const trimmed = text.trim();
-    let handledAsJson = false;
+    rawChunks = splitText(text, maxTokens);
+  } else if (ext === "json") {
+    const text = await file.text();
+    try {
+      const parsed: unknown = JSON.parse(text);
+      let records: Array<Record<string, unknown>> = [];
 
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-      try {
-        const parsed: unknown = JSON.parse(trimmed);
-        let records: Array<Record<string, unknown>> = [];
-        let annotation = "";
-
-        if (Array.isArray(parsed)) {
-          records = parsed as Array<Record<string, unknown>>;
-        } else if (parsed && typeof parsed === "object") {
-          const obj = parsed as Record<string, unknown>;
-
-          // Try nested-financial structure first (e.g. BRK quarters+segments)
-          const flattened = flattenNestedFinancials(obj);
-          if (flattened) {
-            records = flattened;
-            annotation = NESTED_JSON_ANNOTATION;
-          } else {
-            // Try common DCF fixture wrapper keys
-            const candidate = obj.rows ?? obj.data ?? obj.records;
-            if (Array.isArray(candidate)) {
-              records = candidate as Array<Record<string, unknown>>;
-            } else {
-              records = [obj];
-            }
-          }
+      if (Array.isArray(parsed)) {
+        records = parsed as Array<Record<string, unknown>>;
+      } else if (parsed && typeof parsed === "object") {
+        const obj = parsed as Record<string, unknown>;
+        // Try common wrapper keys used by DCF fixture payloads
+        const candidate = obj.rows ?? obj.data ?? obj.records;
+        if (Array.isArray(candidate)) {
+          records = candidate as Array<Record<string, unknown>>;
+        } else {
+          records = [obj];
         }
-
-        if (records.length > 0) {
-          const normalizedRecords = normalizeRecords(records);
-          const bodyText = JSON.stringify(normalizedRecords, null, 2);
-          const fullText = annotation + bodyText;
-          rawChunks =
-            estimateTokens(fullText) > maxTokens
-              ? recordsToChunks(normalizedRecords, maxTokens).map((c, i) =>
-                  i === 0 ? annotation + c : c,
-                )
-              : [fullText];
-          handledAsJson = true;
-        }
-      } catch {
-        // Not valid JSON — fall through to text splitting.
       }
-    }
 
-    if (!handledAsJson) {
+      if (records.length > 0) {
+        const normalizedRecords = normalizeRecords(records);
+        const normalizedText = JSON.stringify(normalizedRecords, null, 2);
+        rawChunks =
+          estimateTokens(normalizedText) > maxTokens
+            ? recordsToChunks(normalizedRecords, maxTokens)
+            : [normalizedText];
+      } else {
+        rawChunks = [text];
+      }
+    } catch {
+      // Not valid JSON — treat as plain text.
       rawChunks = splitText(text, maxTokens);
     }
-  } else if (["csv", "xlsx", "xls", "xlsm"].includes(ext)) {
-    const buffer = await file.arrayBuffer();
-    const wb = XLSX.read(buffer, { type: "array" });
-    const rawRecords: Array<Record<string, unknown>> = [];
-
-    for (const sheetName of wb.SheetNames) {
-      rawRecords.push(
-        ...XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName], {
-          defval: "",
-        }),
-      );
-    }
+  } else if (["csv", "xlsx", "xlsm"].includes(ext)) {
+    const rawRecords = ext === "csv"
+      ? parseCsvToRecords(await file.text())
+      : await readXlsxToRecords(file);
 
     if (rawRecords.length === 0) {
       rawChunks = ["(empty workbook)"];

@@ -461,9 +461,18 @@ function normalizeCapitalAllocation(
   };
 }
 
+/** Matches "N/A", "n/a", "none", "null", "undefined", "not applicable", "-", "" */
+const NA_SENTINEL_RE = /^(n\/?a|none|null|undefined|not\s*applicable|-)$/i;
+
 function normalizeSynergyLink(rawLink: unknown, synergyIds: Set<string>): string | unknown {
   if (typeof rawLink !== "string") return rawLink;
   if (synergyIds.has(rawLink)) return rawLink;
+
+  // Sentinel "no-link" values → fall back to the first valid synergy so the schema stays valid.
+  // normalizeCapitalAllocation will push a CAPITAL_SYNERGY_LINK_NORMALIZED warning automatically.
+  if (NA_SENTINEL_RE.test(rawLink.trim()) && synergyIds.size > 0) {
+    return Array.from(synergyIds)[0];
+  }
 
   const candidates = rawLink
     .split(/[,\n;|]+|\s+and\s+/i)

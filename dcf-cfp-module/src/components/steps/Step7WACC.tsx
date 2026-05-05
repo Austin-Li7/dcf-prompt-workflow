@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Loader2, AlertTriangle, AlertCircle, CheckCircle2,
   RefreshCw, Save, Percent, Building2, Plus, Trash2,
-  Download as ImportIcon, BarChart3, TrendingUp, Shield, SlidersHorizontal,
+  Download as ImportIcon, BarChart3, TrendingUp, Shield, SlidersHorizontal, Info,
 } from "lucide-react";
 import StepShell from "./StepShell";
 import { useCFP } from "@/context/CFPContext";
@@ -432,11 +432,19 @@ export default function Step7WACC() {
           )}
 
           {fetchedData && !fetchError && (
-            <div className="grid gap-3 sm:grid-cols-3">
-              <DataCard label="Market Cap" value={fmtB(fetchedData.marketCap)} />
-              <DataCard label="Total Debt" value={fmtB(fetchedData.totalDebt)} />
-              <DataCard label="Interest Expense" value={fmtB(fetchedData.interestExpense)} />
-            </div>
+            <>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <DataCard label="Market Cap" value={fmtB(fetchedData.marketCap)} />
+                <DataCard label="Total Debt" value={fmtB(fetchedData.totalDebt)} />
+                <DataCard label="Interest Expense" value={fmtB(fetchedData.interestExpense)} />
+              </div>
+              {fetchedData.multiClassNote && (
+                <div className="flex items-start gap-2 rounded-lg border border-blue-700/40 bg-blue-950/20 p-3 text-xs text-blue-300">
+                  <Info size={13} className="mt-0.5 shrink-0" />
+                  {fetchedData.multiClassNote}
+                </div>
+              )}
+            </>
           )}
         </section>
 

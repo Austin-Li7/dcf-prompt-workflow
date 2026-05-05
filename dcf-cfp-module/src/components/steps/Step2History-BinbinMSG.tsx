@@ -19,8 +19,11 @@ import {
   RefreshCw,
   Pause,
   RotateCcw,
+  GitBranch,
+  SlidersHorizontal,
+  Check,
 } from "lucide-react";
-import * as XLSX from "xlsx";
+import { readXlsxToRecords, parseCsvToRecords, downloadXlsx } from "@/lib/excel-utils";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
@@ -45,7 +48,7 @@ import {
   type PipelineManifest,
 } from "@/lib/extraction-state";
 import { projectStep2StructuredToRows } from "@/lib/step2-schema";
-import type { HistoricalExtractionRow, ExtractHistoryResponse } from "@/types/cfp";
+import type { HistoricalExtractionRow, ExtractHistoryResponse, ContinuityBridge } from "@/types/cfp";
 
 // =============================================================================
 // Constants
@@ -112,18 +115,13 @@ async function detectFiscalYearsFromFile(file: File): Promise<number[]> {
     return detectFiscalYearsFromText(text);
   }
 
-  if (ext === "csv" || ext === "xlsx" || ext === "xls" || ext === "xlsm") {
-    const buffer = await file.arrayBuffer();
-    const wb = XLSX.read(buffer, { type: "array" });
-    const years: number[] = [];
-
-    for (const sheetName of wb.SheetNames) {
-      const ws = wb.Sheets[sheetName];
-      const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "" });
-      years.push(...detectFiscalYearsFromRecords(records, Number.MAX_SAFE_INTEGER));
-    }
-
-    return normalizeFiscalYearSelection(years);
+  if (ext === "csv" || ext === "xlsx" || ext === "xlsm") {
+    const records = ext === "csv"
+      ? parseCsvToRecords(await file.text())
+      : await readXlsxToRecords(file);
+    return normalizeFiscalYearSelection(
+      detectFiscalYearsFromRecords(records, Number.MAX_SAFE_INTEGER),
+    );
   }
 
   return [];
@@ -179,6 +177,8 @@ export default function Step2History() {
   const [stagingRows, setStagingRows] = useState<HistoricalExtractionRow[]>([]);
   const [stagingYears, setStagingYears] = useState<number[]>([]);
   const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
+  // ── Continuity bridges detected by the pipeline ─────────────────────────────
+  const [localBridges, setLocalBridges] = useState<ContinuityBridge[]>([]);
 
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
@@ -186,6 +186,7 @@ export default function Step2History() {
   const canAddMoreYears = confirmedYears.length < MAX_YEARS;
 
   const hasStagingData = stagingRows.length > 0;
+  const bridgesAllResolved = localBridges.every((b) => b.status !== "pending");
   const yearsToExtract = useMemo(() => {
     const manualYear = Number(targetYear.trim());
     if (targetYear.trim() && Number.isInteger(manualYear)) {
@@ -297,6 +298,7 @@ export default function Step2History() {
       setStagingRows([]);
       setStagingYears([]);
       setStructuredResults([]);
+      setLocalBridges([]);
       setPausedSessionId(null);
 
       try {
@@ -338,6 +340,7 @@ export default function Step2History() {
         setStagingRows(nextRows);
         setStagingYears(result.years.map((y) => y.year));
         setStructuredResults(nextStructuredResults);
+        setLocalBridges(result.bridges ?? []);
         setIncompleteSession(null);
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "UsageExhaustedError") {
@@ -384,6 +387,7 @@ export default function Step2History() {
   // ── Confirm staging → append to master ──────────────────────────────────────
   const handleConfirm = () => {
     if (stagingRows.length === 0) return;
+    const confirmedBridges = localBridges.filter((b) => b.status === "confirmed");
     dispatch({
       type: "SET_HISTORY",
       payload: {
@@ -393,11 +397,16 @@ export default function Step2History() {
           ...(state.history.structuredResults ?? []),
           ...structuredResults,
         ],
+        continuity_bridges: [
+          ...(state.history.continuity_bridges ?? []),
+          ...confirmedBridges,
+        ],
       },
     });
     setStagingRows([]);
     setStagingYears([]);
     setStructuredResults([]);
+    setLocalBridges([]);
     setTargetYear("");
     setDataFiles([]);
     setTextNotes("");
@@ -405,7 +414,7 @@ export default function Step2History() {
   };
 
   // ── Excel download ───────────────────────────────────────────────────────────
-  const handleExcelDownload = () => {
+  const handleExcelDownload = async () => {
     if (masterRows.length === 0) return;
     const exportData = masterRows.map((row) => ({
       fiscalYear: row.fiscalYear,
@@ -424,15 +433,52 @@ export default function Step2History() {
       sourceLink: row.sourceLink,
       reviewNote: row.reviewNote,
     }));
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Master History");
+
+    const savedBridges = state.history.continuity_bridges ?? [];
+    const bridgeRows: Array<Record<string, unknown>> = [];
+    for (const bridge of savedBridges) {
+      const weightEntries = Object.entries(bridge.weights).flatMap(([oldSeg, newMap]) =>
+        Object.entries(newMap).map(([newSeg, pct]) => ({
+          eventType: bridge.eventType,
+          fromYear: bridge.fromYear,
+          toYear: bridge.toYear,
+          oldSegment: oldSeg,
+          newSegment: newSeg,
+          weightPct: pct,
+          confidence: bridge.confidence,
+          filingReference: bridge.filingReference ?? "",
+          status: bridge.status,
+          description: bridge.description,
+        })),
+      );
+      if (weightEntries.length === 0) {
+        bridgeRows.push({
+          eventType: bridge.eventType,
+          fromYear: bridge.fromYear,
+          toYear: bridge.toYear,
+          oldSegment: bridge.oldSegments.join(", "),
+          newSegment: bridge.newSegments.join(", "),
+          weightPct: "",
+          confidence: bridge.confidence,
+          filingReference: bridge.filingReference ?? "",
+          status: bridge.status,
+          description: bridge.description,
+        });
+      } else {
+        bridgeRows.push(...weightEntries);
+      }
+    }
+
     const now = new Date();
     const safeName = (state.profile.companyName || "company")
       .replace(/[^a-zA-Z0-9_-]/g, "_")
       .toLowerCase();
-    XLSX.writeFile(
-      wb,
+    const sheets = [
+      { name: "Master History", rows: exportData as Record<string, unknown>[] },
+      ...(bridgeRows.length > 0 ? [{ name: "Continuity Bridges", rows: bridgeRows }] : []),
+    ];
+    await downloadXlsx(
+      sheets,
       `${safeName}-step2-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}-${now.getFullYear()}.xlsx`,
     );
   };
@@ -799,9 +845,22 @@ export default function Step2History() {
                 </table>
               </div>
 
+              {localBridges.length > 0 && (
+                <ContinuityReviewPanel
+                  bridges={localBridges}
+                  onUpdate={(updated) => setLocalBridges(updated)}
+                />
+              )}
+
               <button
                 onClick={handleConfirm}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500"
+                disabled={!bridgesAllResolved}
+                title={
+                  !bridgesAllResolved
+                    ? "Review all continuity bridges above before confirming"
+                    : undefined
+                }
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
               >
                 <CheckCircle2 size={16} />
                 Confirm Historical Baseline
@@ -828,6 +887,10 @@ export default function Step2History() {
                   <SegmentGroup key={segment} segment={segment} rows={rows} />
                 ))}
               </div>
+
+              {(state.history.continuity_bridges?.length ?? 0) > 0 && (
+                <SavedContinuityRecord bridges={state.history.continuity_bridges!} />
+              )}
 
               <div className="flex flex-wrap items-center gap-3 pt-2">
                 <button
@@ -895,7 +958,11 @@ function PipelineProgressDisplay({ phase }: { phase: PipelinePhase }) {
   } else if (phase.phase === "reviewing") {
     label = `Sanity review FY ${phase.year}`;
     detail = `Year ${phase.yearIndex}/${phase.totalYears}`;
-    pct = 95 + Math.round((phase.yearIndex / phase.totalYears) * 5);
+    pct = 95 + Math.round((phase.yearIndex / phase.totalYears) * 4);
+  } else if (phase.phase === "analyzing-continuity") {
+    label = "Analyzing segment continuity";
+    detail = "Checking for structural changes across fiscal years…";
+    pct = 99;
   } else if (phase.phase === "rate-limited") {
     label = `Rate limit hit (attempt ${phase.attempt}/3) — retrying in ${phase.retryIn}s`;
     detail = `${phase.completedChunks}/${phase.totalChunks} chunks saved`;
@@ -1280,6 +1347,361 @@ function Step2ReviewSummary({
   );
 }
 
+// =============================================================================
+// ContinuityReviewPanel — bridge cards with sliders for estimated splits
+// =============================================================================
+
+function eventTypeLabel(t: ContinuityBridge["eventType"]): string {
+  if (t === "split") return "Split";
+  if (t === "merge") return "Merge";
+  if (t === "rename") return "Rename";
+  return "Discontinuation";
+}
+
+function eventTypeBadgeClass(t: ContinuityBridge["eventType"]): string {
+  if (t === "split") return "bg-orange-600/20 text-orange-300";
+  if (t === "merge") return "bg-blue-600/20 text-blue-300";
+  if (t === "rename") return "bg-violet-600/20 text-violet-300";
+  return "bg-red-600/20 text-red-300";
+}
+
+/** Slider row for one old→new weight within a split. */
+function SplitWeightSlider({
+  oldSeg,
+  newSegments,
+  weights,
+  onChange,
+  readOnly,
+}: {
+  oldSeg: string;
+  newSegments: string[];
+  weights: Record<string, number>;
+  onChange: (newSeg: string, pct: number) => void;
+  readOnly: boolean;
+}) {
+  const editableSegs = newSegments.slice(0, -1);
+  const lastSeg = newSegments[newSegments.length - 1];
+  const editableSum = editableSegs.reduce((s, seg) => s + (weights[seg] ?? 0), 0);
+  const lastPct = Math.max(0, 100 - editableSum);
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-medium text-zinc-400">
+        Allocate <span className="text-zinc-200">{oldSeg}</span> revenue across new segments:
+      </p>
+      {editableSegs.map((seg) => (
+        <div key={seg} className="flex items-center gap-3">
+          <span className="w-40 min-w-0 truncate text-xs text-zinc-300" title={seg}>{seg}</span>
+          {readOnly ? (
+            <span className="text-xs font-mono text-zinc-400">{weights[seg] ?? 0}%</span>
+          ) : (
+            <>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={weights[seg] ?? 0}
+                onChange={(e) => onChange(seg, Number(e.target.value))}
+                className="h-1.5 flex-1 cursor-pointer accent-orange-500"
+              />
+              <span className="w-10 text-right text-xs font-mono text-orange-300">
+                {weights[seg] ?? 0}%
+              </span>
+            </>
+          )}
+        </div>
+      ))}
+      {lastSeg && (
+        <div className="flex items-center gap-3">
+          <span className="w-40 min-w-0 truncate text-xs text-zinc-300" title={lastSeg}>{lastSeg}</span>
+          <div className="flex-1 text-xs text-zinc-500 italic">auto</div>
+          <span className="w-10 text-right text-xs font-mono text-zinc-400">{lastPct}%</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContinuityReviewPanel({
+  bridges,
+  onUpdate,
+}: {
+  bridges: ContinuityBridge[];
+  onUpdate: (updated: ContinuityBridge[]) => void;
+}) {
+  const pendingCount = bridges.filter((b) => b.status === "pending").length;
+
+  const updateBridge = (id: string, patch: Partial<ContinuityBridge>) => {
+    onUpdate(bridges.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  };
+
+  const updateWeight = (
+    bridgeId: string,
+    oldSeg: string,
+    changedNewSeg: string,
+    newValue: number,
+    allNewSegs: string[],
+  ) => {
+    onUpdate(
+      bridges.map((bridge) => {
+        if (bridge.id !== bridgeId) return bridge;
+        const oldWeights = { ...(bridge.weights[oldSeg] ?? {}) };
+        oldWeights[changedNewSeg] = newValue;
+        // Auto-compute last segment as remainder
+        const editableSegs = allNewSegs.slice(0, -1);
+        const lastSeg = allNewSegs[allNewSegs.length - 1];
+        const editableSum = editableSegs.reduce((s, seg) => s + (oldWeights[seg] ?? 0), 0);
+        if (lastSeg) oldWeights[lastSeg] = Math.max(0, 100 - editableSum);
+        return { ...bridge, weights: { ...bridge.weights, [oldSeg]: oldWeights } };
+      }),
+    );
+  };
+
+  return (
+    <section className="space-y-4 rounded-lg border border-orange-700/40 bg-orange-950/15 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <GitBranch size={16} className="shrink-0 text-orange-400" />
+          <h4 className="text-sm font-semibold text-orange-200">Segment Continuity Review</h4>
+        </div>
+        {pendingCount > 0 ? (
+          <span className="rounded-full bg-orange-600/20 px-2.5 py-0.5 text-xs font-semibold text-orange-300">
+            {pendingCount} pending
+          </span>
+        ) : (
+          <span className="rounded-full bg-emerald-600/20 px-2.5 py-0.5 text-xs font-semibold text-emerald-300">
+            All resolved
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-zinc-500">
+        The pipeline detected segment structure changes across the extracted years. Review each
+        event and confirm or dismiss. Confirmed bridges are saved with the historical baseline and
+        used to guide Step 5 forecasting.
+      </p>
+
+      <div className="space-y-3">
+        {bridges.map((bridge) => {
+          const isDismissed = bridge.status === "dismissed";
+          const isConfirmed = bridge.status === "confirmed";
+          const isSplit = bridge.eventType === "split";
+          const showSliders = isSplit && bridge.confidence === "estimated" && !isDismissed;
+
+          return (
+            <div
+              key={bridge.id}
+              className={`rounded-lg border p-4 transition-opacity ${
+                isDismissed
+                  ? "border-zinc-800 bg-zinc-900/40 opacity-50"
+                  : isConfirmed
+                    ? "border-emerald-700/40 bg-emerald-950/20"
+                    : "border-zinc-700 bg-zinc-900/60"
+              }`}
+            >
+              {/* Header row */}
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded px-2 py-0.5 text-xs font-semibold ${eventTypeBadgeClass(bridge.eventType)}`}>
+                    {eventTypeLabel(bridge.eventType)}
+                  </span>
+                  <span className="text-xs font-medium text-zinc-300">
+                    FY {bridge.fromYear} → FY {bridge.toYear}
+                  </span>
+                  {bridge.confidence === "estimated" ? (
+                    <span className="flex items-center gap-1 rounded bg-amber-600/15 px-2 py-0.5 text-xs text-amber-300">
+                      <SlidersHorizontal size={10} />
+                      Estimated
+                    </span>
+                  ) : (
+                    <span className="rounded bg-emerald-600/15 px-2 py-0.5 text-xs text-emerald-300">
+                      Disclosed
+                    </span>
+                  )}
+                </div>
+                {/* Confirm / Dismiss controls */}
+                {!isDismissed && !isConfirmed && (
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={() =>
+                        updateBridge(bridge.id, {
+                          status: "confirmed",
+                          confirmedAt: new Date().toISOString(),
+                        })
+                      }
+                      className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-500"
+                    >
+                      <Check size={11} />
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => updateBridge(bridge.id, { status: "dismissed" })}
+                      className="rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:text-red-400"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+                {isConfirmed && (
+                  <div className="flex shrink-0 items-center gap-1.5 text-xs text-emerald-400">
+                    <CheckCircle2 size={13} />
+                    Confirmed
+                    <button
+                      onClick={() => updateBridge(bridge.id, { status: "pending", confirmedAt: null })}
+                      className="ml-1 text-zinc-600 hover:text-zinc-400"
+                      title="Undo confirmation"
+                    >
+                      <RotateCcw size={11} />
+                    </button>
+                  </div>
+                )}
+                {isDismissed && (
+                  <button
+                    onClick={() => updateBridge(bridge.id, { status: "pending" })}
+                    className="text-xs text-zinc-600 hover:text-zinc-400"
+                  >
+                    Undo dismiss
+                  </button>
+                )}
+              </div>
+
+              {/* Description */}
+              <p className="mt-2 text-xs text-zinc-400">{bridge.description}</p>
+
+              {/* Segment mapping summary */}
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                {bridge.oldSegments.map((s) => (
+                  <span key={s} className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">{s}</span>
+                ))}
+                <span className="text-zinc-600">→</span>
+                {bridge.newSegments.map((s) => (
+                  <span key={s} className="rounded bg-zinc-700 px-2 py-0.5 text-zinc-200">{s}</span>
+                ))}
+              </div>
+
+              {/* Filing reference */}
+              {bridge.filingReference && (
+                <p className="mt-1.5 text-xs text-zinc-600">Source: {bridge.filingReference}</p>
+              )}
+
+              {/* Sliders for estimated splits */}
+              {showSliders && bridge.newSegments.length >= 2 && (
+                <div className="mt-4 space-y-4 rounded border border-orange-700/20 bg-orange-950/20 p-3">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-orange-300">
+                    <SlidersHorizontal size={12} />
+                    No split percentages found in filings — adjust the allocation below
+                  </p>
+                  {bridge.oldSegments.map((oldSeg) => (
+                    <SplitWeightSlider
+                      key={oldSeg}
+                      oldSeg={oldSeg}
+                      newSegments={bridge.newSegments}
+                      weights={bridge.weights[oldSeg] ?? {}}
+                      readOnly={isConfirmed}
+                      onChange={(changedSeg, pct) =>
+                        updateWeight(bridge.id, oldSeg, changedSeg, pct, bridge.newSegments)
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Disclosed weights — read-only display */}
+              {!showSliders && !isDismissed && bridge.eventType === "split" && (
+                <div className="mt-3 space-y-1">
+                  {bridge.oldSegments.map((oldSeg) =>
+                    Object.entries(bridge.weights[oldSeg] ?? {}).map(([newSeg, pct]) => (
+                      <p key={`${oldSeg}-${newSeg}`} className="text-xs text-zinc-500">
+                        {oldSeg} → {newSeg}: <span className="font-mono text-zinc-300">{pct}%</span>
+                      </p>
+                    )),
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// =============================================================================
+// SavedContinuityRecord — read-only audit display in master history
+// =============================================================================
+function SavedContinuityRecord({ bridges }: { bridges: ContinuityBridge[] }) {
+  const [open, setOpen] = useState(false);
+  const confirmed = bridges.filter((b) => b.status === "confirmed");
+  if (confirmed.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-950">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm font-medium text-zinc-200 hover:bg-zinc-900"
+      >
+        <span className="flex items-center gap-2">
+          <GitBranch size={14} className="text-orange-400" />
+          Segment Continuity Record
+          <span className="ml-1 text-xs font-normal text-zinc-500">
+            ({confirmed.length} bridge{confirmed.length !== 1 ? "s" : ""} — read-only audit)
+          </span>
+        </span>
+        <ChevronDown
+          size={16}
+          className={`text-zinc-500 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {open && (
+        <div className="space-y-3 border-t border-zinc-800 p-4">
+          {confirmed.map((bridge) => (
+            <div key={bridge.id} className="rounded border border-zinc-800 bg-zinc-900/60 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`rounded px-2 py-0.5 text-xs font-semibold ${eventTypeBadgeClass(bridge.eventType)}`}>
+                  {eventTypeLabel(bridge.eventType)}
+                </span>
+                <span className="text-xs text-zinc-300">
+                  FY {bridge.fromYear} → FY {bridge.toYear}
+                </span>
+                <span className={`rounded px-2 py-0.5 text-xs ${
+                  bridge.confidence === "disclosed"
+                    ? "bg-emerald-600/15 text-emerald-300"
+                    : "bg-amber-600/15 text-amber-300"
+                }`}>
+                  {bridge.confidence}
+                </span>
+              </div>
+              <p className="mt-1.5 text-xs text-zinc-400">{bridge.description}</p>
+              <div className="mt-2 space-y-0.5">
+                {bridge.oldSegments.map((oldSeg) =>
+                  Object.entries(bridge.weights[oldSeg] ?? {}).map(([newSeg, pct]) => (
+                    <p key={`${oldSeg}-${newSeg}`} className="text-xs text-zinc-500">
+                      {oldSeg} → {newSeg}:{" "}
+                      <span className="font-mono text-zinc-300">{pct}%</span>
+                    </p>
+                  )),
+                )}
+              </div>
+              {bridge.filingReference && (
+                <p className="mt-1 text-xs text-zinc-600">Source: {bridge.filingReference}</p>
+              )}
+              {bridge.confirmedAt && (
+                <p className="mt-1 text-xs text-zinc-700">
+                  Confirmed {new Date(bridge.confirmedAt).toLocaleDateString()}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// SegmentGroup — collapsible accordion for Master History
+// =============================================================================
 function SegmentGroup({
   segment,
   rows,

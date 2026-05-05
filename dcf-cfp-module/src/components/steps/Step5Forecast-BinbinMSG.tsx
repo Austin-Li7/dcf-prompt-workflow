@@ -140,16 +140,11 @@ export default function Step5Forecast() {
   const forecastMode = structuredResult?.machine_artifact.forecast_mode ?? null;
   const annualRows = useMemo(() => {
     if (!structuredResult || forecastMode !== "SEGMENT_ANNUAL") return [];
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const tgt = norm(currentSegment);
-    return structuredResult.machine_artifact.forecast_table.filter((row) => {
-      const src = norm(row.segment);
-      return src === tgt || (tgt.length >= 5 && (src.includes(tgt) || tgt.includes(src)));
-    });
+    return structuredResult.machine_artifact.forecast_table.filter((row) => row.segment === currentSegment);
   }, [currentSegment, forecastMode, structuredResult]);
   const canApproveForecast =
-    workflowStatus === "READY" ||
-    ((workflowStatus === "NEEDS_REVIEW" || workflowStatus === "BLOCKED") && reviewAcknowledged);
+    workflowStatus !== "BLOCKED" &&
+    (workflowStatus !== "NEEDS_REVIEW" || reviewAcknowledged);
 
   useEffect(() => {
     if (phase === "setup" && approvedSegments.length === 0 && segIdx !== 0) {
@@ -466,17 +461,10 @@ export default function Step5Forecast() {
               )}
 
               {workflowStatus === "BLOCKED" && (
-                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-red-700/40 bg-red-950/20 p-3 text-sm text-red-200">
-                  <input
-                    type="checkbox"
-                    checked={reviewAcknowledged}
-                    onChange={(e) => setReviewAcknowledged(e.target.checked)}
-                    className="mt-0.5 accent-red-500"
-                  />
-                  <span>
-                    This segment has insufficient disclosed standalone data. I acknowledge the estimate is a proxy or placeholder and accept it for downstream modeling with manual review required.
-                  </span>
-                </label>
+                <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
+                  <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                  This forecast is blocked. Regenerate or resolve the highlighted assumptions before approving.
+                </div>
               )}
 
               {/* Product grids */}

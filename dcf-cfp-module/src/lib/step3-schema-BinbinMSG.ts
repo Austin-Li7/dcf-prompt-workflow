@@ -581,28 +581,8 @@ export function parseStep3StructuredResult(payload: unknown): Step3StructuredRes
   return Step3StructuredSchema.parse(normalizeStep3StructuredPayload(payload));
 }
 
-function truncateCategoryJustifications(payload: unknown): unknown {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
-  const rec = payload as Record<string, unknown>;
-  if (!rec.forces || typeof rec.forces !== "object" || Array.isArray(rec.forces)) return rec;
-  const forces = rec.forces as Record<string, unknown>;
-  const clipped: Record<string, unknown> = {};
-  for (const [key, force] of Object.entries(forces)) {
-    if (force && typeof force === "object" && !Array.isArray(force)) {
-      const f = force as Record<string, unknown>;
-      clipped[key] =
-        typeof f.justification === "string" && f.justification.length > 255
-          ? { ...f, justification: f.justification.slice(0, 252) + "…" }
-          : f;
-    } else {
-      clipped[key] = force;
-    }
-  }
-  return { ...rec, forces: clipped };
-}
-
 export function parseStep3Category(payload: unknown): Step3CategoryStructured {
-  return Step3CategorySchema.parse(truncateCategoryJustifications(payload));
+  return Step3CategorySchema.parse(payload);
 }
 
 export function projectStep3StructuredToCategories(

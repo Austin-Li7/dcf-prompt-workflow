@@ -6,14 +6,16 @@
 export interface WACCDataResponse {
   ticker: string;
   companyName: string;
-  marketCap: number;          // USD
-  currentPrice?: number;      // USD per share
-  sharesOutstanding?: number; // shares
+  marketCap: number;          // USD — combined across all share classes when multi-class
+  currentPrice?: number;      // USD per share of the queried class
+  sharesOutstanding?: number; // Base-class equivalent shares — combined when multi-class
   totalCash?: number;         // USD
   totalDebt: number;          // USD
   interestExpense: number;    // USD (annual)
   riskFreeRate: number;       // decimal (e.g., 0.0428 for 4.28%)
   companyDescription: string; // For conglomerate detection
+  /** Present when companion share classes were folded in (e.g. BRK-A added to BRK-B). */
+  multiClassNote?: string;
   error?: string;
 }
 

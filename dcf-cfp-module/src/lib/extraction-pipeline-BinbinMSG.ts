@@ -14,7 +14,7 @@
  *   After 3 failed attempts the pipeline pauses and notifies the caller via onProgress.
  */
 
-import type { LLMProvider } from "@/types/cfp";
+import type { LLMProvider, ContinuityBridge } from "@/types/cfp";
 import type { ChunkSummary } from "./chunk-schema";
 import type { Step2StructuredResult } from "./step2-schema";
 import type { FileChunk } from "./extraction-chunker";
@@ -22,6 +22,7 @@ import { chunkFile, chunkTextNotes } from "./extraction-chunker";
 import {
   saveManifest,
   updateManifest,
+  updateChunkStatus,
   getManifest,
   getChunkResult,
   saveChunkResult,
@@ -61,6 +62,7 @@ export type PipelinePhase =
       totalChunks: number;
       sessionId: string;
     }
+  | { phase: "analyzing-continuity" }
   | { phase: "complete" }
   | { phase: "error"; message: string };
 
@@ -72,6 +74,7 @@ export interface PipelineYearResult {
 export interface PipelineResult {
   years: PipelineYearResult[];
   sessionId: string;
+  bridges: ContinuityBridge[];
 }
 
 export interface PipelineOptions {
@@ -185,23 +188,7 @@ async function postJson<T>(
       throw new RateLimitError();
     }
 
-    // Read body as text first — guards against empty or non-JSON responses
-    // (e.g. LLM timeout causing a truncated reply, or a dev-server crash).
-    const text = await res.text();
-    if (!text.trim()) {
-      throw new Error(
-        `Server returned an empty response (HTTP ${res.status}). The LLM call may have timed out — please try again.`,
-      );
-    }
-
-    let data: T & { error?: string };
-    try {
-      data = JSON.parse(text) as T & { error?: string };
-    } catch {
-      throw new Error(
-        `Server returned invalid JSON (HTTP ${res.status}): ${text.slice(0, 200)}`,
-      );
-    }
+    const data: T & { error?: string } = await res.json();
 
     if (isUsageExhausted(data)) throw new UsageExhaustedError();
 
@@ -327,6 +314,40 @@ async function sanityReview(
 }
 
 // =============================================================================
+// Continuity analysis (non-fatal, runs only when ≥2 years extracted)
+// =============================================================================
+
+interface AnalyzeContinuityResponse {
+  bridges?: ContinuityBridge[];
+  error?: string;
+}
+
+async function analyzeContinuity(
+  yearResults: PipelineYearResult[],
+  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture">,
+  onRateLimit: (retryIn: number, attempt: number) => void,
+): Promise<ContinuityBridge[]> {
+  if (yearResults.length < 2) return [];
+  try {
+    const response = await postJson<AnalyzeContinuityResponse>(
+      "/api/extract-history",
+      {
+        action: "analyze-continuity",
+        structuredResults: yearResults.map((y) => y.structuredResult),
+        architecture: options.architecture,
+        provider: options.provider,
+        apiKey: options.apiKey,
+      },
+      onRateLimit,
+    );
+    return response.bridges ?? [];
+  } catch (err) {
+    console.warn("[pipeline] Continuity analysis failed (non-fatal):", err);
+    return [];
+  }
+}
+
+// =============================================================================
 // Main pipeline
 // =============================================================================
 
@@ -449,12 +470,8 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
       totalAllChunks: totalChunks,
     });
 
-    // Mark as processing in manifest
-    await updateManifest(sessionId, {
-      chunks: manifest.chunks.map((c) =>
-        c.chunkKey === chunkKey ? { ...c, status: "processing" as const } : c,
-      ),
-    });
+    // Mark as processing — reads latest IDB state, safe under concurrent access
+    await updateChunkStatus(sessionId, chunkKey, "processing");
 
     const summary = await extractChunk(
       chunk,
@@ -469,19 +486,13 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
     completedKeys.add(chunkKey);
     completedCount++;
 
-    // Update manifest
-    const updated = await updateManifest(sessionId, {
-      chunks: manifest.chunks.map((c) =>
-        c.chunkKey === chunkKey ? { ...c, status: "completed" as const } : c,
-      ),
-      completedChunks: completedCount,
-    });
+    // Mark as completed and increment counter — atomic per-chunk write, race-safe
+    const updated = await updateChunkStatus(sessionId, chunkKey, "completed", true);
     if (updated) manifest = updated;
   });
 
-  let mapResults: Array<void | Error> = [];
   try {
-    mapResults = await runWithConcurrency(mapTasks, 3);
+    const mapResults = await runWithConcurrency(mapTasks, 3);
 
     // Surface first fatal error (rate limit / usage exhausted)
     for (const r of mapResults) {
@@ -508,14 +519,6 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
   // ---------------------------------------------------------------------------
 
   const allSummaries = Array.from(chunkResults.values());
-
-  if (allSummaries.length === 0) {
-    await updateManifest(sessionId, { status: "failed" });
-    const firstChunkError = mapResults.find((r): r is Error => r instanceof Error);
-    throw firstChunkError ?? new Error(
-      "No data could be extracted from the provided files. Check that the files contain readable financial data and try again.",
-    );
-  }
   const yearResults: PipelineYearResult[] = [];
 
   for (let yi = 0; yi < targetYears.length; yi++) {
@@ -565,6 +568,16 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
   }
 
   // ---------------------------------------------------------------------------
+  // Step 6 — Continuity analysis (non-fatal; requires ≥2 years)
+  // ---------------------------------------------------------------------------
+
+  let bridges: ContinuityBridge[] = [];
+  if (yearResults.length >= 2) {
+    onProgress({ phase: "analyzing-continuity" });
+    bridges = await analyzeContinuity(yearResults, options, rateNotify);
+  }
+
+  // ---------------------------------------------------------------------------
   // Cleanup
   // ---------------------------------------------------------------------------
 
@@ -573,7 +586,7 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
 
   onProgress({ phase: "complete" });
 
-  return { years: yearResults, sessionId };
+  return { years: yearResults, sessionId, bridges };
 }
 
 // =============================================================================

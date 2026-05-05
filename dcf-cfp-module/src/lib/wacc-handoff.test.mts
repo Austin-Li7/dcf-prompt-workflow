@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildWaccSegmentsFromCFP } from "./wacc-handoff.ts";
+import { buildWaccSegmentsFromCFP, inferUnleveredBeta } from "./wacc-handoff.ts";
 import type { BusinessArchitecture, ForecastState, Step5StructuredResult } from "../types/cfp.ts";
 
 const architecture: BusinessArchitecture = {
@@ -92,4 +92,28 @@ test("builds WACC import rows from Step 5 structured FY5 artifacts before legacy
   assert.equal(rows[0].estimatedValue, 307003);
   assert.equal(rows[1].name, "Services");
   assert.equal(rows[1].estimatedValue, 109158);
+  // Hardware keyword → 1.05; generic "Services" → fallback 1.0
+  assert.equal(rows[0].unleveredBeta, 1.05);
+  assert.equal(rows[1].unleveredBeta, 1.0);
+});
+
+test("inferUnleveredBeta — exact keyword matches", () => {
+  assert.equal(inferUnleveredBeta("insurance_underwriting"),       0.55);
+  assert.equal(inferUnleveredBeta("insurance_investment_income"),  0.55);
+  assert.equal(inferUnleveredBeta("railroad_bnsf"),                0.80);
+  assert.equal(inferUnleveredBeta("utilities_and_energy_bhe"),     0.35);
+  assert.equal(inferUnleveredBeta("manufacturing_service_retailing"), 0.90); // manufacturing beats retail
+  assert.equal(inferUnleveredBeta("pilot_travel_centers"),         0.85);
+  assert.equal(inferUnleveredBeta("non_controlled_businesses"),    1.0);  // no match → fallback
+  assert.equal(inferUnleveredBeta("corporate_and_other"),          1.0);  // no match → fallback
+});
+
+test("inferUnleveredBeta — broader industry segments", () => {
+  assert.equal(inferUnleveredBeta("Cloud Services"),        1.15);
+  assert.equal(inferUnleveredBeta("Software Platform"),     1.15);
+  assert.equal(inferUnleveredBeta("Semiconductor Devices"), 1.25);
+  assert.equal(inferUnleveredBeta("Electric Utilities"),    0.35);
+  assert.equal(inferUnleveredBeta("Retail Banking"),        0.65); // "banking" before "retail"
+  assert.equal(inferUnleveredBeta("Food Distribution"),     0.60); // "food" before "distribution"
+  assert.equal(inferUnleveredBeta("Digital Advertising"),   1.05); // "digital" before "advertising"
 });

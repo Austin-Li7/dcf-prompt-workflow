@@ -154,6 +154,41 @@ export async function updateManifest(
   return updated;
 }
 
+/**
+ * Atomically update a single chunk's status inside the manifest.
+ * Safe under concurrent access: reads the latest manifest from IDB rather than
+ * relying on the caller's (potentially stale) in-memory copy.
+ * Pass incrementCompleted=true when marking a chunk completed.
+ */
+export async function updateChunkStatus(
+  sessionId: string,
+  chunkKey: string,
+  status: ChunkStatus,
+  incrementCompleted = false,
+): Promise<PipelineManifest | undefined> {
+  const db = await openDB();
+  const tx = db.transaction("manifests", "readwrite");
+  const store = tx.objectStore("manifests");
+  const existing = await idbGet<PipelineManifest>(store, sessionId);
+  if (!existing) {
+    db.close();
+    return undefined;
+  }
+  const updated: PipelineManifest = {
+    ...existing,
+    chunks: existing.chunks.map((c) =>
+      c.chunkKey === chunkKey ? { ...c, status } : c,
+    ),
+    completedChunks: incrementCompleted
+      ? existing.completedChunks + 1
+      : existing.completedChunks,
+    updatedAt: Date.now(),
+  };
+  await idbPut(store, updated);
+  db.close();
+  return updated;
+}
+
 export async function getManifest(sessionId: string): Promise<PipelineManifest | undefined> {
   const db = await openDB();
   const tx = db.transaction("manifests", "readonly");

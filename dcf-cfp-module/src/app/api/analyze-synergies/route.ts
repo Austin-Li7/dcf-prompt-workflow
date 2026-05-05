@@ -118,7 +118,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynerg
     return NextResponse.json({ paths, structuredResult, step4Review, capital });
   } catch (err: unknown) {
     console.error("[analyze-synergies] Error:", err);
-    const message = err instanceof Error ? err.message : "An unexpected error occurred.";
+    let message = err instanceof Error ? err.message : "An unexpected error occurred.";
+    // ZodError messages are raw JSON arrays — surface a friendlier message instead.
+    if (message.startsWith("[") || message.startsWith("{")) {
+      message = "The analysis response didn't match the expected format. Please try again.";
+    }
     return NextResponse.json({ paths: [], error: message }, { status: 500 });
   }
 }

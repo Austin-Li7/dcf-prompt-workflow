@@ -108,6 +108,7 @@ ${JSON.stringify(baselineContext, null, 2)}
 Rules:
 - schema_version must be exactly "v5.5".
 - Default forecast_mode to SEGMENT_ANNUAL.
+- CRITICAL: Every row in forecast_table that covers the requested segment MUST have the segment field set to exactly "${targetSegment}" — do not paraphrase, add a company-name prefix, or append words like "segment" or "revenue".
 - If Authoritative Step 2 baseline anchors are present, FY+1 must start from baselineRevenueUsdM compounded by the selected FY+1 growth rate. Do not estimate baseline share from total company revenue.
 - Upgrade to SEGMENT_QUARTERLY or PRODUCT_QUARTERLY only when Step 2 disclosure supports that granularity and the requested segment needs it.
 - Forecast only the requested targetSegment unless consolidated context is needed for a ceiling check.
@@ -116,6 +117,7 @@ Rules:
 - Do not use unsupported, context-only, or narrative-only synergies as numeric growth drivers.
 - Weak or capped Step 4 drivers must use driver_quality "WEAK", appear in weak_inference_sensitivity, and set workflow_status to NEEDS_REVIEW when material.
 - If Step 4 capital_allocation.step5_revenue_ceiling applies, keep FY5 base revenue below the ceiling or set workflow_status to NEEDS_REVIEW with a warning.
+- NEVER set workflow_status to BLOCKED. If a segment has no standalone disclosed revenue, set workflow_status to NEEDS_REVIEW, generate a best-effort revenue estimate using available proxies (parent-company aggregates, comparable public companies, industry benchmarks), and document the proxy method in review_summary.warnings. A non-zero estimate with stated uncertainty is always preferable to a blocked forecast.
 - Keep review_summary concise for UI display.
 - No prose outside the structured response.`;
 

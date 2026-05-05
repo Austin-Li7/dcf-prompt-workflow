@@ -433,6 +433,9 @@ function segmentMatchesTarget(segment: string, targetSegment: string): boolean {
   const source = normalizedName(segment);
   const target = normalizedName(targetSegment);
   if (source === target) return true;
+  // Containment: handles LLM adding/dropping company-name prefix, "(DXP)", "segment", etc.
+  // Guard target.length >= 5 to prevent short tokens matching unrelated segments.
+  if (target.length >= 5 && (source.includes(target) || target.includes(source))) return true;
   if (isHardwareTarget(targetSegment) && source === "products") return true;
   if (isHardwareTarget(segment) && target === "products") return true;
   if (isServicesTarget(targetSegment) && source === "services") return true;

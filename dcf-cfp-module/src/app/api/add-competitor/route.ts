@@ -37,6 +37,7 @@ const SYSTEM_PROMPT = [
   "You are producing a single Step 3 v5.5 competitive landscape category for a DCF workflow.",
   "Return only a compact structured JSON object matching the provided schema.",
   "Every Porter force must have rating, justification, claim_id, and source_ids.",
+  "CRITICAL: Each force justification must be ≤ 250 characters. Be concise — one tight sentence.",
   "Validate competitor pairing by direct product/category overlap, revenue scale, and market position.",
   "If evidence is weak or overlap is partial, lower confidence and set human_review_required=true.",
   "Use source_quality=Official only when all material support comes from official filings.",
@@ -211,7 +212,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<AddCompetitor
     return NextResponse.json({ category: categoryEntry, structuredCategory });
   } catch (err: unknown) {
     console.error("[add-competitor] Error:", err);
-    const message = err instanceof Error ? err.message : "An unexpected error occurred.";
+    let message = err instanceof Error ? err.message : "An unexpected error occurred.";
+    // ZodError messages are raw JSON arrays — surface a friendlier message instead.
+    if (message.startsWith("[") || message.startsWith("{")) {
+      message = "The analysis response didn't match the expected format. Please try again.";
+    }
     return NextResponse.json(
       { category: null, structuredCategory: null, error: message },
       { status: 500 },
