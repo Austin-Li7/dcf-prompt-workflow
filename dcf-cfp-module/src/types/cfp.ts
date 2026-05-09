@@ -1233,7 +1233,7 @@ export interface AnnualFCFPoint {
 import type { WACCState } from "./wacc";
 
 export interface CFPState {
-  currentStep: number; // 1–8
+  currentStep: number; // 0–8
   isLoading: boolean;
   error: string | null;
 
@@ -1302,6 +1302,7 @@ export type CFPAction =
   | { type: "SET_OUTLOOK"; payload: FiveYearOutlook }
   | { type: "SET_WACC"; payload: WACCState }
   | { type: "CLEAR_WACC" }
+  | { type: "APPLY_CACHED_RUN"; payload: Partial<Omit<CFPState, "currentStep" | "isLoading" | "error">> }
   | { type: "RESET" }
   /** Restore a full previously-saved state (load from file or IndexedDB). currentStep is reset to 1. */
   | { type: "RESTORE_STATE"; payload: CFPState }

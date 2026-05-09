@@ -3,19 +3,22 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useReducer,
   type ReactNode,
   type Dispatch,
 } from "react";
 import type { CFPState, CFPAction } from "@/types/cfp";
+import { buildCachedRunFromState, saveCachedRun } from "@/lib/step0-cache";
 
 // =============================================================================
 // Initial (empty) state — filled step-by-step as the user progresses
 // =============================================================================
 const TOTAL_STEPS = 8;
+const FIRST_STEP = 0;
 
 export const initialCFPState: CFPState = {
-  currentStep: 1,
+  currentStep: 0,
   isLoading: false,
   error: null,
 
@@ -105,13 +108,13 @@ export const initialCFPState: CFPState = {
 function cfpReducer(state: CFPState, action: CFPAction): CFPState {
   switch (action.type) {
     case "SET_STEP":
-      return { ...state, currentStep: Math.min(Math.max(action.payload, 1), TOTAL_STEPS) };
+      return { ...state, currentStep: Math.min(Math.max(action.payload, FIRST_STEP), TOTAL_STEPS) };
 
     case "NEXT_STEP":
       return { ...state, currentStep: Math.min(state.currentStep + 1, TOTAL_STEPS) };
 
     case "PREV_STEP":
-      return { ...state, currentStep: Math.max(state.currentStep - 1, 1) };
+      return { ...state, currentStep: Math.max(state.currentStep - 1, FIRST_STEP) };
 
     case "SET_LOADING":
       return { ...state, isLoading: action.payload };
@@ -240,6 +243,15 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
     case "CLEAR_WACC":
       return { ...state, wacc: initialCFPState.wacc };
 
+    case "APPLY_CACHED_RUN":
+      return {
+        ...state,
+        ...action.payload,
+        currentStep: state.currentStep,
+        isLoading: false,
+        error: null,
+      };
+
     case "RESET":
       return initialCFPState;
 
@@ -300,6 +312,11 @@ const CFPContext = createContext<CFPContextValue | undefined>(undefined);
 
 export function CFPProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(cfpReducer, initialCFPState);
+
+  useEffect(() => {
+    const cachedRun = buildCachedRunFromState(state);
+    if (cachedRun) saveCachedRun(cachedRun);
+  }, [state]);
 
   return (
     <CFPContext.Provider value={{ state, dispatch, totalSteps: TOTAL_STEPS }}>

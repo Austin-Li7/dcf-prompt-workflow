@@ -31,7 +31,7 @@ export default function StepShell({
 }) {
   const { dispatch, totalSteps } = useCFP();
 
-  const isFirst = stepNumber === 1;
+  const isFirst = stepNumber === 0;
   const isLast = stepNumber === totalSteps;
 
   return (
