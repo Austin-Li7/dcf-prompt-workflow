@@ -85,6 +85,10 @@ const wacc: WACCState = {
     weightDebt: 0.025,
     wacc: 0.087,
   },
+  hybridSegments: [],
+  hybridBankBeta: 0.37,
+  bankKeCalculation: null,
+  industrialWaccCalculation: null,
   saved: true,
 };
 

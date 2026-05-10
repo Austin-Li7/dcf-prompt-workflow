@@ -135,6 +135,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
       "- Keep Review Prompt V2 honesty: if evidence is weak, lower confidence/source_quality and set human_review_required=true.",
       "- Competitor pairing must still be judged by direct overlap, revenue scale, and market position.",
       "- Return only the updated structured category matching the schema.",
+      "",
+      "Finance & Regulatory guidance (apply when the category involves lending, banking, deposits, payments, or insurance):",
+      "- THREAT OF NEW ENTRANTS: Weight the regulatory moat heavily. A national bank charter (OCC/FDIC) is a durable barrier — rate Low when the subject holds a charter competitors cannot easily replicate.",
+      "  Rate Medium when BaaS/partner-bank arrangements allow indirect entry. Rate High only when no license is required.",
+      "- BARGAINING POWER OF SUPPLIERS: Depositors are capital suppliers. When crypto assets, stablecoins, or DeFi yield alternatives are accessible, supplier power increases.",
+      "  Rate Medium for nascent DeFi alternatives, High when they are widely accessible with competitive yields. Name specific protocols or assets in the justification.",
+      "- THREAT OF SUBSTITUTES: DeFi protocols, blockchain lending, and stablecoin payment rails are credible substitutes. Rate at least Medium for any lending, payments, or savings category even if current adoption is small.",
+      "- Always note in verification_note: licenses held (bank charter, money transmitter, broker-dealer), and any pending regulation that could shift the competitive dynamic.",
     ].join("\n");
 
     const result = await callLLM({

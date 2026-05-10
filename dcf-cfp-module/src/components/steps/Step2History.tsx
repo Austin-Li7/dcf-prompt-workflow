@@ -38,14 +38,21 @@ import {
 import {
   runExtractionPipeline,
   type PipelinePhase,
+  type PipelineYearResult,
 } from "@/lib/extraction-pipeline";
+import Step2FilingUploader, {
+  type FilingUploaderResult,
+} from "./Step2FilingUploader";
 import {
   getIncompleteManifests,
   clearAllSessions,
   type PipelineManifest,
 } from "@/lib/extraction-state";
 import { projectStep2StructuredToRows } from "@/lib/step2-schema";
-import type { HistoricalExtractionRow, ExtractHistoryResponse } from "@/types/cfp";
+import { projectStep2BankStructuredToRows } from "@/lib/step2-bank-schema";
+import type { Step2BankStructuredResult } from "@/lib/step2-bank-schema";
+import type { Step2StructuredResult } from "@/lib/step2-schema";
+import type { HistoricalExtractionRow, ExtractHistoryResponse, WorkflowMode } from "@/types/cfp";
 
 // =============================================================================
 // Constants
@@ -180,6 +187,21 @@ export default function Step2History() {
   const [stagingYears, setStagingYears] = useState<number[]>([]);
   const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
 
+  // ── Bank/finance mode detection for PDF uploader ────────────────────────────
+  const companyTypeForPdf = state.profile.step1StructuredResult?.company_type;
+  const isBankOrFinancial =
+    companyTypeForPdf === "financial_bank" ||
+    companyTypeForPdf === "financial_insurance" ||
+    companyTypeForPdf === "financial_other" ||
+    companyTypeForPdf === "hybrid";
+  const [showPdfUploader, setShowPdfUploader] = useState(isBankOrFinancial);
+
+  // Auto-enable PDF mode when company_type is resolved to a financial/hybrid type
+  // (handles JSON-restore and any other path where context updates while Step 2 is mounted)
+  useEffect(() => {
+    if (isBankOrFinancial) setShowPdfUploader(true);
+  }, [isBankOrFinancial]);
+
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
   const confirmedYears = state.history.confirmedYears;
@@ -300,34 +322,86 @@ export default function Step2History() {
       setPausedSessionId(null);
 
       try {
-        const result = await runExtractionPipeline({
+        const companyType = state.profile.step1StructuredResult?.company_type;
+        const allSegments = state.profile.step1StructuredResult?.analysis_view.segments ?? [];
+        const bankSegments = allSegments.filter((s) => s.workflow_mode === "bank");
+        const industrialSegments = allSegments.filter((s) => s.workflow_mode !== "bank");
+        const isHybrid =
+          companyType === "hybrid" && bankSegments.length > 0 && industrialSegments.length > 0;
+        const isFinancial =
+          companyType === "financial_bank" ||
+          companyType === "financial_insurance" ||
+          companyType === "financial_other";
+
+        const resolvedCompanyName =
+          (step1Input &&
+            typeof step1Input === "object" &&
+            "company_name" in (step1Input as object) &&
+            typeof (step1Input as unknown as Record<string, unknown>).company_name === "string"
+            ? (step1Input as unknown as Record<string, unknown>).company_name as string
+            : null) ?? "Unknown Company";
+
+        const basePipelineOptions = {
           files: dataFiles,
           textNotes,
           targetYears: selectedYears,
-          architecture: step1Input,
           provider: settings.llmProvider,
           apiKey: activeApiKey,
-          companyName:
-            (step1Input &&
-              typeof step1Input === "object" &&
-              "company_name" in (step1Input as object) &&
-              typeof (step1Input as unknown as Record<string, unknown>).company_name === "string"
-              ? (step1Input as unknown as Record<string, unknown>).company_name as string
-              : null) ?? "Unknown Company",
-          resumeSessionId,
-          onProgress: (phase) => {
+          companyName: resolvedCompanyName,
+          onProgress: (phase: PipelinePhase) => {
             setPipelinePhase(phase);
           },
-        });
+        };
 
-        // Build staging rows from all year results
         const nextRows: HistoricalExtractionRow[] = [];
         const nextStructuredResults: Step2StructuredResultForReview[] = [];
 
-        for (const yearResult of result.years) {
-          const rows = projectStep2StructuredToRows(yearResult.structuredResult);
-          nextRows.push(...rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
-          nextStructuredResults.push(yearResult.structuredResult);
+        const appendYearResults = (
+          years: PipelineYearResult[],
+          mode: WorkflowMode,
+        ) => {
+          for (const yearResult of years) {
+            const rows =
+              mode === "bank"
+                ? projectStep2BankStructuredToRows(
+                    yearResult.structuredResult as Step2BankStructuredResult,
+                  )
+                : projectStep2StructuredToRows(
+                    yearResult.structuredResult as Step2StructuredResult,
+                  );
+            nextRows.push(...rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
+            nextStructuredResults.push(yearResult.structuredResult);
+          }
+        };
+
+        if (isHybrid) {
+          // Run bank and industrial pipelines in parallel
+          const [bankResult, industrialResult] = await Promise.all([
+            runExtractionPipeline({
+              ...basePipelineOptions,
+              architecture: step1Input,
+              workflowMode: "bank",
+              onProgress: (phase) => setPipelinePhase(phase),
+            }),
+            runExtractionPipeline({
+              ...basePipelineOptions,
+              architecture: step1Input,
+              workflowMode: "industrial",
+              onProgress: (phase) => setPipelinePhase(phase),
+            }),
+          ]);
+          appendYearResults(bankResult.years, "bank");
+          appendYearResults(industrialResult.years, "industrial");
+        } else {
+          const workflowMode: WorkflowMode =
+            isFinancial || companyType === "hybrid" ? "bank" : "industrial";
+          const result = await runExtractionPipeline({
+            ...basePipelineOptions,
+            architecture: step1Input,
+            workflowMode,
+            resumeSessionId,
+          });
+          appendYearResults(result.years, workflowMode);
         }
 
         if (nextRows.length === 0) {
@@ -336,7 +410,7 @@ export default function Step2History() {
         }
 
         setStagingRows(nextRows);
-        setStagingYears(result.years.map((y) => y.year));
+        setStagingYears(selectedYears);
         setStructuredResults(nextStructuredResults);
         setIncompleteSession(null);
       } catch (err: unknown) {
@@ -360,6 +434,7 @@ export default function Step2History() {
       settings.llmProvider,
       step1Input,
       confirmedYears,
+      state.profile.step1StructuredResult,
     ],
   );
 
@@ -381,6 +456,25 @@ export default function Step2History() {
     );
   };
 
+  // ── PDF uploader completion handler ─────────────────────────────────────────
+  const handlePdfUploaderComplete = useCallback(
+    (result: FilingUploaderResult) => {
+      // Stage rows for review
+      setStagingRows(result.rows);
+      setStagingYears(result.stagingYears);
+      setStructuredResults(result.fileResults.map((fr) => fr.structuredResult));
+
+      // Persist hints to context so they survive JSON save/reload
+      dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
+
+      // Scroll to staging section
+      setTimeout(() => {
+        document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+    },
+    [dispatch],
+  );
+
   // ── Confirm staging → append to master ──────────────────────────────────────
   const handleConfirm = () => {
     if (stagingRows.length === 0) return;
@@ -393,6 +487,8 @@ export default function Step2History() {
           ...(state.history.structuredResults ?? []),
           ...structuredResults,
         ],
+        // Preserve hints when confirming
+        filingHints: state.history.filingHints,
       },
     });
     setStagingRows([]);
@@ -485,16 +581,100 @@ export default function Step2History() {
               <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
                 Build Historical Baseline
               </h3>
-              <span className="flex items-center gap-2 text-xs text-zinc-500">
-                <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
-                  {confirmedYears.length}/{MAX_YEARS}
-                </span>
-                years confirmed
-                {confirmedYears.length > 0 && (
-                  <span className="text-zinc-600">({confirmedYears.join(", ")})</span>
+              <div className="flex items-center gap-3">
+                {/* Mode toggle: only shown for bank/finance companies */}
+                {isBankOrFinancial && (
+                  <button
+                    type="button"
+                    onClick={() => setShowPdfUploader((v) => !v)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                      showPdfUploader
+                        ? "bg-blue-700/30 text-blue-300 hover:bg-blue-700/50"
+                        : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                    }`}
+                    title={
+                      companyTypeForPdf === "hybrid"
+                        ? showPdfUploader
+                          ? "Switch to Dual Pipeline — runs bank + industrial extraction from uploaded files"
+                          : "Switch to PDF Mode — extracts bank segment metrics from 10-K/10-Q filings"
+                        : showPdfUploader
+                          ? "Switch to manual/spreadsheet upload"
+                          : "Switch to PDF multi-filing upload"
+                    }
+                  >
+                    {showPdfUploader
+                      ? "📄 PDF Mode"
+                      : companyTypeForPdf === "hybrid" ? "📊 Dual Pipeline" : "📊 Standard Mode"}
+                  </button>
                 )}
-              </span>
+                <span className="flex items-center gap-2 text-xs text-zinc-500">
+                  <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
+                    {confirmedYears.length}/{MAX_YEARS}
+                  </span>
+                  years confirmed
+                  {confirmedYears.length > 0 && (
+                    <span className="text-zinc-600">({confirmedYears.join(", ")})</span>
+                  )}
+                </span>
+              </div>
             </div>
+
+            {/* ── PDF Multi-File Uploader (bank/hybrid bank segments) ───────── */}
+            {isBankOrFinancial && showPdfUploader && (
+              <>
+                <Step2FilingUploader
+                  architecture={step1Input}
+                  provider={settings.llmProvider}
+                  apiKey={activeApiKey}
+                  companyName={
+                    (step1Input &&
+                      typeof step1Input === "object" &&
+                      "company_name" in (step1Input as object)
+                      ? String((step1Input as unknown as Record<string, unknown>).company_name ?? "")
+                      : null) ??
+                    state.profile.companyName ??
+                    "Unknown Company"
+                  }
+                  seedHints={state.history.filingHints}
+                  onComplete={handlePdfUploaderComplete}
+                  onCancel={() => setShowPdfUploader(false)}
+                />
+                {/* Hybrid: warn that PDF mode covers bank segments only */}
+                {companyTypeForPdf === "hybrid" && (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-400/80">
+                    <span className="shrink-0">⚡</span>
+                    <span>
+                      Hybrid company detected. PDF mode extracts <strong className="text-amber-300">bank segment</strong> metrics only.{" "}
+                      <button
+                        type="button"
+                        className="underline underline-offset-2 hover:text-amber-300"
+                        onClick={() => setShowPdfUploader(false)}
+                      >
+                        Switch to Dual Pipeline
+                      </button>{" "}
+                      to also run industrial segment extraction from uploaded files.
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* WorkflowModePanel — always visible for non-industrial companies in both modes */}
+            {state.profile.step1StructuredResult?.company_type &&
+              state.profile.step1StructuredResult.company_type !== "industrial" && (
+                <WorkflowModePanel
+                  companyType={state.profile.step1StructuredResult.company_type}
+                  segments={state.profile.step1StructuredResult.analysis_view.segments}
+                  onToggle={(segmentId, workflowMode) =>
+                    dispatch({ type: "UPDATE_SEGMENT_WORKFLOW_MODE", payload: { segmentId, workflowMode } })
+                  }
+                  disabled={isExtracting}
+                />
+              )}
+
+            {/* ── Standard upload form (hidden when PDF mode is active for bank) ── */}
+            {(!isBankOrFinancial || !showPdfUploader) && (
+              <>
 
             {/* Year detection */}
             <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
@@ -699,13 +879,16 @@ export default function Step2History() {
                 </>
               )}
             </button>
+
+            </> /* end standard-upload conditional */
+            )}
           </section>
 
           {/* ================================================================ */}
           {/*  STAGING AREA (editable before confirming to master)             */}
           {/* ================================================================ */}
           {hasStagingData && (
-            <section className="space-y-4">
+            <section id="step2-staging" className="space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-amber-400">
                   Historical Baseline Staging {stagingYears.length > 0 ? `— FY ${stagingYears.join(", ")}` : ""}
@@ -1362,6 +1545,87 @@ function SegmentGroup({
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// =============================================================================
+// WorkflowModePanel — shown in Step 2 when company_type is not industrial
+// Lets the user review and override the workflow_mode tag per segment before
+// the extraction pipeline runs.
+// =============================================================================
+
+import type { CompanyType, Step1AnalysisSegment } from "@/types/cfp";
+
+interface WorkflowModePanelProps {
+  companyType: CompanyType | undefined;
+  segments: Step1AnalysisSegment[];
+  onToggle: (segmentId: string, mode: WorkflowMode) => void;
+  disabled: boolean;
+}
+
+function WorkflowModePanel({
+  companyType,
+  segments,
+  onToggle,
+  disabled,
+}: WorkflowModePanelProps) {
+  if (!companyType || companyType === "industrial" || segments.length === 0) return null;
+
+  const modeLabel: Record<WorkflowMode, string> = {
+    bank: "Bank / Finance",
+    industrial: "Industrial",
+  };
+
+  const modeBadge = (mode: WorkflowMode) =>
+    mode === "bank"
+      ? "bg-blue-600/20 text-blue-300 border border-blue-600/30"
+      : "bg-zinc-700/50 text-zinc-300 border border-zinc-600/40";
+
+  const companyTypeLabel: Record<CompanyType, string> = {
+    financial_bank: "Finance Mode — Bank",
+    financial_insurance: "Finance Mode — Insurance",
+    financial_other: "Finance Mode — Financial",
+    hybrid: "Finance Mode — Hybrid",
+    industrial: "",
+  };
+
+  return (
+    <div className="rounded-lg border border-blue-700/30 bg-blue-950/20 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-blue-600/20 border border-blue-600/30 px-3 py-1 text-xs font-semibold text-blue-300">
+          {companyTypeLabel[companyType] ?? "Finance Mode"}
+        </span>
+        <p className="text-sm text-zinc-400">
+          The LLM tagged each segment below. You can change the tag before extraction.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {segments.map((seg) => {
+          const current: WorkflowMode = seg.workflow_mode ?? "industrial";
+          const next: WorkflowMode = current === "bank" ? "industrial" : "bank";
+          return (
+            <div
+              key={seg.id}
+              className="flex items-center justify-between rounded-lg bg-zinc-900 px-3 py-2 gap-3"
+            >
+              <span className="text-sm text-zinc-200 truncate flex-1">{seg.canonical_name}</span>
+              <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${modeBadge(current)}`}>
+                {modeLabel[current]}
+              </span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onToggle(seg.id, next)}
+                className="shrink-0 text-xs text-zinc-500 hover:text-zinc-200 disabled:opacity-40 underline underline-offset-2"
+              >
+                Switch to {modeLabel[next]}
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -11,38 +11,12 @@ const EvidenceLevelSchema = z.enum([
 
 const QuarterSchema = z.enum(["Q1", "Q2", "Q3", "Q4"]);
 
-/**
- * Preprocess helper for nullable string fields returned by LLMs.
- * - Coerces "" / whitespace-only → null  (prevents min(1) rejection)
- * - Truncates strings that exceed maxLen   (prevents max(N) rejection)
- */
-const nullableStr = (maxLen?: number) =>
-  z.preprocess((v) => {
-    if (typeof v !== "string") return v;
-    if (v.trim() === "") return null;
-    if (maxLen && v.length > maxLen) return v.slice(0, maxLen);
-    return v;
-  }, maxLen ? z.string().min(1).max(maxLen).nullable() : z.string().min(1).nullable());
-
-/**
- * Preprocess helper for non-nullable bounded string fields.
- * - Truncates strings that exceed maxLen   (prevents max(N) rejection)
- * - Replaces "" / whitespace-only with a safe fallback              (prevents min(1) rejection)
- */
-const boundedStr = (maxLen: number, fallback = "—") =>
-  z.preprocess((v) => {
-    if (typeof v !== "string") return v;
-    if (v.trim() === "") return fallback;
-    if (v.length > maxLen) return v.slice(0, maxLen);
-    return v;
-  }, z.string().min(1).max(maxLen));
-
 const SourceSchema = z.object({
   source_id: z.string().min(1),
   source_type: z.enum(["uploaded_file", "text_notes", "derived", "not_available"]),
   name: z.string().min(1),
-  locator: nullableStr(),
-  excerpt: nullableStr(220),
+  locator: z.string().min(1).nullable(),
+  excerpt: z.string().min(1).max(220).nullable(),
 });
 
 const RowSchema = z.object({
@@ -63,16 +37,12 @@ const RowSchema = z.object({
     "external_verification_required",
     "unverified",
   ]),
-  review_note: z.preprocess((v) => {
-    if (typeof v !== "string" || v.trim() === "") return "No review note provided.";
-    if (v.length > 220) return v.slice(0, 220);
-    return v;
-  }, z.string().min(1).max(220)),
+  review_note: z.string().min(1).max(220),
 });
 
 const ExcludedItemSchema = z.object({
   label: z.string().min(1),
-  reason: boundedStr(220),
+  reason: z.string().min(1).max(220),
   source_id: z.string().min(1).nullable(),
   evidence_level: EvidenceLevelSchema,
 });
@@ -80,7 +50,7 @@ const ExcludedItemSchema = z.object({
 const ValidationWarningSchema = z.object({
   code: z.string().min(1),
   severity: z.enum(["info", "warn", "high"]),
-  message: boundedStr(220),
+  message: z.string().min(1).max(220),
   row_ids: z.array(z.string().min(1)).default([]),
 });
 
@@ -94,9 +64,9 @@ export const Step2StructuredSchema = z
     excluded_items: z.array(ExcludedItemSchema).default([]),
     validation_warnings: z.array(ValidationWarningSchema).default([]),
     review_summary: z.object({
-      one_line: boundedStr(240),
-      highlights: z.array(boundedStr(180)).default([]),
-      warnings: z.array(boundedStr(180)).default([]),
+      one_line: z.string().min(1).max(240),
+      highlights: z.array(z.string().min(1).max(180)).default([]),
+      warnings: z.array(z.string().min(1).max(180)).default([]),
     }),
   })
   .superRefine((payload, ctx) => {
@@ -264,10 +234,34 @@ function normalizeStep2StructuredPayload(payload: unknown): unknown {
     return payload;
   }
 
-  return {
-    ...(payload as Record<string, unknown>),
-    schema_version: "v5.5",
-  };
+  const p = { ...(payload as Record<string, unknown>), schema_version: "v5.5" };
+
+  // Recover rows with missing/empty mapped_from_step1_ids instead of hard-failing.
+  if (Array.isArray(p.rows)) {
+    let missingMappingCount = 0;
+    p.rows = (p.rows as Record<string, unknown>[]).map((row) => {
+      if (!Array.isArray(row.mapped_from_step1_ids) || (row.mapped_from_step1_ids as unknown[]).filter(Boolean).length === 0) {
+        missingMappingCount++;
+        return { ...row, mapped_from_step1_ids: ["unmapped"] };
+      }
+      return row;
+    });
+
+    if (missingMappingCount > 0) {
+      const existingWarnings = Array.isArray(p.validation_warnings) ? p.validation_warnings : [];
+      p.validation_warnings = [
+        ...existingWarnings,
+        {
+          code: "rows_missing_step1_mapping",
+          severity: "warn",
+          message: `${missingMappingCount} row(s) had empty mapped_from_step1_ids — defaulted to ["unmapped"].`,
+          row_ids: [],
+        },
+      ];
+    }
+  }
+
+  return p;
 }
 
 export function parseStep2StructuredResult(payload: unknown): Step2StructuredResult {

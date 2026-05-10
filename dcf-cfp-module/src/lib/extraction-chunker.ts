@@ -21,6 +21,7 @@ import type { LLMProvider } from "@/types/cfp";
 const PROVIDER_TOKEN_TARGETS: Record<LLMProvider, number> = {
   gemini: 700_000, // 1M cap, leave headroom for response + system prompt
   claude: 150_000, // 200k cap
+  deepseek: 50_000, // 64k input cap; leave headroom for system prompt + response
 };
 
 /** Rough heuristic: 4 chars ≈ 1 token for English/financial text. */
@@ -361,7 +362,7 @@ const NESTED_JSON_ANNOTATION =
 export async function chunkFile(file: File, provider: LLMProvider): Promise<FileChunk[]> {
   const maxTokens = getChunkTokenLimit(provider);
   const ext = (file.name.split(".").pop() ?? "").toLowerCase();
-  let rawChunks: string[];
+  let rawChunks: string[] = [];
 
   if (ext === "txt" || ext === "json") {
     const text = await file.text();
@@ -458,6 +459,36 @@ export async function chunkFile(file: File, provider: LLMProvider): Promise<File
     totalChunks: rawChunks.length,
     content,
     estimatedTokens: estimateTokens(content),
+  }));
+}
+
+/**
+ * Chunk pre-extracted PDF text (plain string) exactly like a .txt file.
+ * Use this after server-side PDF parsing returns the raw text.
+ *
+ * A PDF-specific annotation header is prepended to every chunk so the LLM
+ * knows it is reading extracted PDF text (not a spreadsheet or JSON file).
+ */
+export function chunkPdfText(
+  text: string,
+  /** Original PDF filename, e.g. "JPM-10K-2024.pdf" */
+  fileName: string,
+  provider: LLMProvider,
+): FileChunk[] {
+  const maxTokens = getChunkTokenLimit(provider);
+  const annotation =
+    `// SOURCE: Extracted text from ${fileName}\n` +
+    `// FORMAT: Plain text extracted from a SEC PDF filing (10-K or 10-Q).\n` +
+    `// Pages are delimited by "--- Page N ---" markers.\n` +
+    `// Extract all financial figures in USD millions (convert if stated in thousands or billions).\n\n`;
+
+  const rawChunks = splitText(text.trim(), maxTokens - estimateTokens(annotation));
+  return rawChunks.map((content, i) => ({
+    sourceFile: fileName,
+    chunkIndex: i,
+    totalChunks: rawChunks.length,
+    content: annotation + content,
+    estimatedTokens: estimateTokens(annotation + content),
   }));
 }
 

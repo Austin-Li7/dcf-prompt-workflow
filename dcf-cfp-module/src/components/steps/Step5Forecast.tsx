@@ -147,6 +147,7 @@ export default function Step5Forecast() {
       return src === tgt || (tgt.length >= 5 && (src.includes(tgt) || tgt.includes(src)));
     });
   }, [currentSegment, forecastMode, structuredResult]);
+  const isBankFcfe = structuredResult?.valuation_method === "FCFE";
   const canApproveForecast =
     workflowStatus === "READY" ||
     ((workflowStatus === "NEEDS_REVIEW" || workflowStatus === "BLOCKED") && reviewAcknowledged);
@@ -275,18 +276,27 @@ export default function Step5Forecast() {
 
   const dlXlsx = async () => {
     const sheets = approvedSegments.map((seg) => {
+      const isBankSeg = seg.structuredResult?.valuation_method === "FCFE";
       const rows: Record<string, unknown>[] = [];
       for (const prod of seg.products) {
         for (const q of prod.forecast) {
-          rows.push({
+          const base: Record<string, unknown> = {
             Product: prod.productName,
             Category: prod.categoryName,
             Year: q.year,
             Quarter: q.quarter,
-            "Revenue ($M)": q.revenueM,
+            [isBankSeg ? "NII ($M)" : "Revenue ($M)"]: q.revenueM,
             "YoY Growth (%)": q.yoyGrowth,
             "Strategic Driver": q.strategicDriver,
-          });
+          };
+          if (isBankSeg) {
+            base["NIM (%)"] = q.nimPct ?? "";
+            base["Net Income ($M)"] = q.netIncomeM ?? "";
+            base["PCL ($M)"] = q.provisionForCreditLossesM ?? "";
+            base["Reg. Capital Increase ($M)"] = q.regulatoryCapitalIncreaseM ?? "";
+            base["FCFE ($M)"] = q.fcfeM ?? "";
+          }
+          rows.push(base);
         }
       }
       return { name: seg.segment.slice(0, 31), rows };
@@ -395,10 +405,15 @@ export default function Step5Forecast() {
                       <thead className="bg-zinc-900/50 text-zinc-500">
                         <tr>
                           <th className="px-3 py-2 text-left font-medium">Fiscal Year</th>
-                          <th className="px-3 py-2 text-right font-medium">Low ($M)</th>
-                          <th className="px-3 py-2 text-right font-medium">Base ($M)</th>
-                          <th className="px-3 py-2 text-right font-medium">High ($M)</th>
+                          <th className="px-3 py-2 text-right font-medium">{isBankFcfe ? "NII Low" : "Low ($M)"}</th>
+                          <th className="px-3 py-2 text-right font-medium">{isBankFcfe ? "NII Base" : "Base ($M)"}</th>
+                          <th className="px-3 py-2 text-right font-medium">{isBankFcfe ? "NII High" : "High ($M)"}</th>
                           <th className="px-3 py-2 text-right font-medium">YoY %</th>
+                          {isBankFcfe && <th className="px-3 py-2 text-right font-medium text-sky-400">NIM %</th>}
+                          {isBankFcfe && <th className="px-3 py-2 text-right font-medium text-sky-400">Net Income</th>}
+                          {isBankFcfe && <th className="px-3 py-2 text-right font-medium text-amber-400">PCL ($M)</th>}
+                          {isBankFcfe && <th className="px-3 py-2 text-right font-medium text-amber-400">Reg. Cap ↑</th>}
+                          {isBankFcfe && <th className="px-3 py-2 text-right font-medium text-emerald-400">FCFE ($M)</th>}
                           <th className="px-3 py-2 text-left font-medium">Assumptions</th>
                         </tr>
                       </thead>
@@ -412,6 +427,31 @@ export default function Step5Forecast() {
                             <td className={`px-3 py-2 text-right font-mono ${row.yoy_growth_pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                               {row.yoy_growth_pct > 0 ? "+" : ""}{row.yoy_growth_pct.toFixed(1)}%
                             </td>
+                            {isBankFcfe && (
+                              <td className="px-3 py-2 text-right font-mono text-sky-300">
+                                {row.nim_pct != null ? `${row.nim_pct.toFixed(2)}%` : "—"}
+                              </td>
+                            )}
+                            {isBankFcfe && (
+                              <td className="px-3 py-2 text-right font-mono text-sky-300">
+                                {row.net_income_usd_m != null ? row.net_income_usd_m.toLocaleString() : "—"}
+                              </td>
+                            )}
+                            {isBankFcfe && (
+                              <td className="px-3 py-2 text-right font-mono text-amber-300">
+                                {row.provision_for_credit_losses_usd_m != null ? row.provision_for_credit_losses_usd_m.toLocaleString() : "—"}
+                              </td>
+                            )}
+                            {isBankFcfe && (
+                              <td className="px-3 py-2 text-right font-mono text-amber-300">
+                                {row.regulatory_capital_increase_usd_m != null ? row.regulatory_capital_increase_usd_m.toLocaleString() : "—"}
+                              </td>
+                            )}
+                            {isBankFcfe && (
+                              <td className={`px-3 py-2 text-right font-mono font-semibold ${row.fcfe_usd_m != null && row.fcfe_usd_m >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {row.fcfe_usd_m != null ? row.fcfe_usd_m.toLocaleString() : "—"}
+                              </td>
+                            )}
                             <td className="px-3 py-2 text-zinc-500">{row.assumption_ids.join(", ")}</td>
                           </tr>
                         ))}
@@ -496,8 +536,10 @@ export default function Step5Forecast() {
                       <thead className="bg-zinc-900/50 text-zinc-500">
                         <tr>
                           <th className="px-2 py-1.5 text-left font-medium">Qtr</th>
-                          <th className="px-2 py-1.5 text-right font-medium">Revenue ($M) editable</th>
+                          <th className="px-2 py-1.5 text-right font-medium">{isBankFcfe ? "NII ($M) editable" : "Revenue ($M) editable"}</th>
                           <th className="px-2 py-1.5 text-right font-medium">YoY %</th>
+                          {isBankFcfe && <th className="px-2 py-1.5 text-right font-medium text-sky-400">Net Inc.</th>}
+                          {isBankFcfe && <th className="px-2 py-1.5 text-right font-medium text-emerald-400">FCFE</th>}
                           <th className="px-2 py-1.5 text-left font-medium">Driver</th>
                         </tr>
                       </thead>
@@ -517,6 +559,16 @@ export default function Step5Forecast() {
                               <td className={`px-2 py-1 text-right tabular-nums ${q.yoyGrowth >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                 {q.yoyGrowth > 0 ? "+" : ""}{q.yoyGrowth.toFixed(1)}%
                               </td>
+                              {isBankFcfe && (
+                                <td className="px-2 py-1 text-right tabular-nums text-sky-300 text-xs">
+                                  {q.netIncomeM != null ? q.netIncomeM.toFixed(1) : "—"}
+                                </td>
+                              )}
+                              {isBankFcfe && (
+                                <td className={`px-2 py-1 text-right tabular-nums text-xs font-semibold ${q.fcfeM != null && q.fcfeM >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                  {q.fcfeM != null ? q.fcfeM.toFixed(1) : "—"}
+                                </td>
+                              )}
                               <td className="px-2 py-1 text-zinc-500 max-w-[180px] truncate" title={q.strategicDriver}>{shortDriver(q.strategicDriver)}</td>
                             </tr>
                           );

@@ -118,7 +118,54 @@ export function detectConglomerate(description: string): {
 }
 
 // =============================================================================
-// Full orchestration
+// Financial company detection
+// =============================================================================
+
+const FINANCIAL_INDUSTRY_KEYWORDS = [
+  "bank",
+  "banking",
+  "insurance",
+  "credit services",
+  "capital markets",
+  "asset management",
+  "mortgage",
+  "financial conglomerate",
+  "financial data",
+];
+
+/**
+ * Returns true if the company industry/description indicates it is a financial
+ * institution for which traditional WACC is inappropriate.
+ *
+ * Banks and insurers manage leverage as part of their core business model —
+ * deposits, policy reserves, and short-term borrowings are all funding tools,
+ * not "debt" in the Modigliani-Miller sense. Applying a Hamada re-levering
+ * equation to a bank's D/E ratio would overstate its cost of capital.
+ * Instead, use Ke-only mode and discount equity cash flows directly.
+ */
+export function detectFinancialCompany(
+  industry?: string,
+  companyDescription?: string,
+): { isFinancial: boolean; reason: string } {
+  const text = ((industry ?? "") + " " + (companyDescription ?? "")).toLowerCase();
+
+  for (const kw of FINANCIAL_INDUSTRY_KEYWORDS) {
+    if (text.includes(kw)) {
+      return {
+        isFinancial: true,
+        reason:
+          `Industry profile matches "${kw}" — traditional WACC overstates the ` +
+          `cost of capital because deposits/reserves ≠ conventional debt. ` +
+          `Ke-only mode (equity DCF) is recommended.`,
+      };
+    }
+  }
+
+  return { isFinancial: false, reason: "" };
+}
+
+// =============================================================================
+// Full orchestration — standard WACC (single / conglomerate)
 // =============================================================================
 
 export interface FullWACCInputs {
@@ -156,5 +203,49 @@ export function fullWACCCalculation(inputs: FullWACCInputs): WACCCalculation | n
     weightEquity,
     weightDebt,
     wacc,
+  };
+}
+
+// =============================================================================
+// Financial / Bank — Ke-only (equity DCF discount rate)
+// =============================================================================
+
+export interface FullBankKeInputs {
+  /** Damodaran unlevered beta for the financial-industry category.
+   *  Used directly as the equity beta — no Hamada re-levering applied. */
+  equityBeta: number;
+  constants: WACCConstants;
+}
+
+/**
+ * Bank / Financial institution Ke-only calculation.
+ *
+ * Why no re-levering:
+ *   For banks, deposits and short-term borrowings are intertwined with
+ *   operations and priced at market rates. Separating "debt" from "equity" the
+ *   way Hamada requires is not meaningful — financial firms leverage is their
+ *   business model, not a financing choice. Damodaran's own published bank betas
+ *   already reflect this: they are the equity beta, not the asset beta.
+ *
+ * The result populates WACCCalculation with:
+ *   wacc = costOfEquity, weightEquity = 1, weightDebt = 0
+ * so the rest of the DCF pipeline (Step 8) can consume it unchanged.
+ */
+export function fullBankKeCalculation(inputs: FullBankKeInputs): WACCCalculation {
+  const { equityBeta, constants } = inputs;
+  const { riskFreeRate, impliedERP } = constants;
+
+  const costOfEquity = riskFreeRate + equityBeta * impliedERP;
+
+  return {
+    deRatio: 0,
+    unleveredBeta: equityBeta,
+    releveredBeta: equityBeta,  // no re-levering
+    costOfEquity,
+    preTaxCostOfDebt: 0,
+    afterTaxCostOfDebt: 0,
+    weightEquity: 1,
+    weightDebt: 0,
+    wacc: costOfEquity,         // discount rate = Ke for equity DCF
   };
 }

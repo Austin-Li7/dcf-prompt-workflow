@@ -29,6 +29,19 @@ const STEP4_CAPITAL_SYSTEM_PROMPT = [
   "Use Review Prompt V2: but-for test, reciprocity, source specificity, projection rule, and capex verification.",
   "Capital allocation must use PP&E purchases/capex-style lines where available, not total investing cash flow.",
   "Do not treat management targets, forecasts, or hypothetical future outcomes as verified proof.",
+  // Bank/finance-specific capital and risk guidance
+  "BANK CAPITAL: For banking or financial services segments, PP&E CapEx is not the primary capital constraint.",
+  "Use regulatory capital deployment metrics instead: Tier 1 capital ratio, Common Equity Tier 1 (CET1) ratio, and Risk-Weighted Asset (RWA) growth.",
+  "efficiency_score for bank capital entries must reflect ROATCE (Return on Average Tangible Common Equity) and/or ROAE (Return on Average Equity).",
+  "A positive efficiency_score indicates ROATCE/ROAE above the cost of equity; a negative score indicates capital destruction.",
+  // SVB-style Asset-Liability Management (ALM) risk
+  "INTEREST RATE / ALM RISK: When news mentions Federal Reserve rate decisions or the 10-year Treasury yield, assess the Asset-Liability Mismatch risk.",
+  "Rising rates reduce the mark-to-market value of long-duration bond portfolios held as HTM (held-to-maturity) or AFS (available-for-sale) assets.",
+  "If a bank holds a high concentration of long-term bonds funded by short-term or demand deposits, rising rates create an unrealized loss that can trigger a confidence shock and depositor run — the SVB collapse pattern.",
+  "Flag this risk in validation_warnings when: (1) the news cites a rising rate environment, (2) the company holds material long-duration fixed-income securities, or (3) depositor concentration is high (e.g., single-industry or institutional depositors).",
+  "Model the rate sensitivity: estimate the duration gap and potential unrealized loss per 100bps rise in the 10-year Treasury yield.",
+  // Bank news topics to flag
+  "BANK NEWS TOPICS: When processing recent news, flag material changes in: credit default rates, student loan policy shifts, Fed rate trajectory, 10-year Treasury yield moves, deposit outflows, capital adequacy ratios, and regulatory enforcement actions.",
   "Include review_summary and validation_warnings suitable for a human review UI.",
   "No markdown, commentary, or prose outside the structured response.",
 ].join(" ");
@@ -53,6 +66,17 @@ function buildStep4CapitalPrompt(inputs: {
     "- Explain whether asset_light_exemption applies. If CapEx/Revenue evidence is insufficient, do not claim the exemption as verified.",
     "- Show whether Step 5 revenue ceiling applies, and include a null ceiling when no hard ceiling is supported.",
     "- Keep any source-grounding gaps in validation_warnings and human review fields.",
+    "",
+    "Finance & Banking capital rules (apply when any segment involves lending, deposits, payments, banking, or financial products):",
+    "- REGULATORY CAPITAL: Replace PP&E CapEx analysis with Tier 1 capital ratio, CET1 ratio, and RWA growth as the primary capital deployment metrics.",
+    "- EFFICIENCY SCORE: For bank capital entries, set efficiency_score to reflect ROATCE and/or ROAE. A bank generating ROATCE above its cost of equity (typically 10–15%) earns a positive score; below cost of equity earns negative.",
+    "- ALM / INTEREST RATE RISK: If recent news mentions Fed rate changes or 10-year Treasury yield moves, assess Asset-Liability Mismatch (ALM) risk:",
+    "  (a) Estimate the duration of the bond/securities portfolio vs. the average maturity of deposit liabilities.",
+    "  (b) Compute the approximate unrealized loss per 100bps rise in the 10-year Treasury yield.",
+    "  (c) Assess depositor concentration risk — a single-industry depositor base (e.g., tech startups) amplifies withdrawal correlation during stress.",
+    "  (d) Flag the SVB-pattern risk if: long-duration bond portfolio + rising rates + concentrated depositors → potential confidence shock → bank run.",
+    "  Document the ALM assessment in validation_warnings and human review fields.",
+    "- BANK NEWS TOPICS: Extract and apply material signals from news: credit default rate changes, student loan policy shifts, Fed rate trajectory, 10-year Treasury yield trend, deposit inflows/outflows, capital ratio disclosures, and regulatory enforcement actions.",
   ].join("\n");
 }
 

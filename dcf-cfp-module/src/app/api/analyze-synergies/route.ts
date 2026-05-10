@@ -25,6 +25,12 @@ const STEP4_SYSTEM_PROMPT = [
   "Use Review Prompt V2 skepticism: but-for test, reciprocity test, attraction/moat test, internal-customer test, and projection rule.",
   "Unsupported or narrative-only synergies must be context_only or unsupported and not forecastable.",
   "Capital allocation must use PP&E purchases/capex-style lines where available, not total investing cash flow.",
+  // Bank/finance-specific guidance
+  "BANK SYNERGY: For banking or financial services segments, traditional CapEx synergies (PP&E sharing, manufacturing scale) do not apply.",
+  "Instead, evaluate cross-sell synergies via the Financial Services Productivity Loop: a customer acquired in one product (e.g., lending) becomes a lower-CAC acquisition for adjacent products (e.g., investing, banking, insurance).",
+  "Quantify the cross-sell lift using disclosed multi-product attach rates, member lifetime value, or product-per-member metrics from official filings.",
+  "BANK CAPITAL: For banking/financial segments, replace PP&E CapEx with regulatory capital deployment — Tier 1 capital ratio, CET1 ratio, and Risk-Weighted Asset (RWA) growth are the relevant capital metrics.",
+  "efficiency_score for bank capital entries must reflect ROATCE (Return on Average Tangible Common Equity) and/or ROAE (Return on Average Equity) rather than a generic CapEx-to-revenue calibration.",
   "Include review_summary and validation_warnings suitable for a human review UI.",
   "No markdown, commentary, or prose outside the structured response.",
 ].join(" ");
@@ -50,6 +56,12 @@ function buildStep4Prompt(inputs: {
     "- Apply projection rule: only historical/current disclosed data can verify a claim; targets and hypothetical outcomes are not proof.",
     "- Assign driver_eligibility conservatively: FULL only for proven integration/differentiation/causality; CAPPED for partial evidence; CONTEXT_ONLY or NOT_ALLOWED for narrative-only claims.",
     "- Add capital_allocation even if preliminary; mark workflow_status NEEDS_REVIEW when source support or ceiling math is incomplete.",
+    "",
+    "Finance & Banking rules (apply when any segment involves lending, deposits, payments, banking, or financial products):",
+    "- CROSS-SELL SYNERGY: Evaluate the Financial Services Productivity Loop — a member acquired in lending becomes a lower-CAC target for investing, banking, and insurance products. Use disclosed multi-product attach rates or product-per-member metrics to quantify.",
+    "- CAPITAL (NO CAPEX): Do not model PP&E CapEx for bank/financial segments. Instead use regulatory capital deployment: Tier 1 capital ratio, CET1 ratio, and RWA growth are the capital efficiency metrics.",
+    "- EFFICIENCY SCORE: For bank capital entries, efficiency_score must reflect ROATCE (Return on Average Tangible Common Equity) and/or ROAE (Return on Average Equity). Positive = capital above cost of equity; negative = capital destruction.",
+    "- REGULATORY MOAT AS SYNERGY: If a bank charter enables a segment to cross-sell under one regulated entity (reducing per-product compliance cost), classify this as a Core Integration synergy and cite the charter in the rationale.",
   ].join("\n");
 }
 

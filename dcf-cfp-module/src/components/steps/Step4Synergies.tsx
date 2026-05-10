@@ -526,9 +526,9 @@ export default function Step4Synergies() {
 
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-5 space-y-4">
                 <div className="flex items-center gap-2"><Newspaper size={20} className="text-amber-400" /><h4 className="text-lg font-semibold text-zinc-100">Include Recent News or Management Commentary</h4></div>
-                <p className="text-xs text-zinc-500">Paste recent press releases, M&amp;A announcements, or earnings call snippets regarding CapEx to ensure the model reflects real-time strategy.</p>
+                <p className="text-xs text-zinc-500">Paste recent press releases, M&amp;A announcements, or earnings call snippets to ensure the model reflects real-time strategy. For banks and financial companies, include: Fed rate decisions or 10-year Treasury yield moves, credit default rate trends, student loan policy changes, deposit outflows, ALM disclosures, or management commentary on capital ratios (Tier 1, CET1).</p>
                 <textarea
-                  rows={6} value={newsText} onChange={(e) => setNewsText(e.target.value)} placeholder="(Optional) Paste news, earnings snippets, or commentary here..."
+                  rows={6} value={newsText} onChange={(e) => setNewsText(e.target.value)} placeholder="(Optional) Paste news, earnings snippets, or commentary here... For banks: include Fed rate decisions, 10-year Treasury moves, credit default rates, student loan policy, deposit outflows, or capital ratio updates."
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y" />
               </div>
 

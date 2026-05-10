@@ -49,7 +49,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCapital
       return NextResponse.json({ entry: entryData, error: "No API key found for the selected provider.", requiresApiKey: true }, { status: 401 });
     }
 
-    const prompt = `Refine this capital allocation matrix entry based on user feedback. Keep the exact same JSON schema. Do not modify the existing efficiencyScore. Current Analysis: ${JSON.stringify(entryData)}. Feedback: ${userFeedback}. Return ONLY the updated JSON object.`;
+    const prompt = `Refine this capital allocation matrix entry based on user feedback. Keep the exact same JSON schema. Current Analysis: ${JSON.stringify(entryData)}. Feedback: ${userFeedback}. Return ONLY the updated JSON object.
+
+Capital revision guidance:
+- Do not modify the existing efficiencyScore unless the user explicitly requests a change or provides new financial data that justifies it.
+- For banking or financial services segments, efficiencyScore reflects ROATCE (Return on Average Tangible Common Equity) and/or ROAE (Return on Average Equity), not a generic CapEx-to-revenue ratio.
+- For bank segments, capital deployment analysis uses Tier 1 capital ratio, CET1 ratio, and RWA growth instead of PP&E CapEx lines.
+- If the user provides updated Fed rate data or 10-year Treasury yield information, assess Asset-Liability Mismatch (ALM) risk: rising rates reduce mark-to-market value of long-duration bond portfolios and can trigger a liquidity crisis if depositor concentration is high. Flag this in validation context if material.`;
 
     const result = await callLLM({ provider: llmProvider, apiKey, prompt, maxTokens: 4096 });
     const rawText = result.text;

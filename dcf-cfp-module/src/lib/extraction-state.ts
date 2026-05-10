@@ -38,7 +38,7 @@ export interface PipelineManifest {
   sessionId: string;
   createdAt: number;
   updatedAt: number;
-  provider: "claude" | "gemini";
+  provider: import("@/types/cfp").LLMProvider;
   targetYears: number[];
   companyName: string;
   files: ManifestFile[];
@@ -242,4 +242,62 @@ export async function clearAllSessions(): Promise<void> {
   tx.objectStore("manifests").clear();
   tx.objectStore("chunks").clear();
   db.close();
+}
+
+// =============================================================================
+// Multi-file pipeline per-file result helpers
+//
+// These reuse the existing "chunks" store with a "mf:" prefixed sessionId so
+// no DB version bump is needed.  Each saved record stores one file's completed
+// structuredResult plus the accumulated hints at the time of saving, allowing
+// the pipeline to resume from exactly where it failed.
+// =============================================================================
+
+const MF_SESSION_PREFIX = "mf:";
+
+export interface MfFileRecord {
+  /** `mf:${sessionId}::${fileName}` */
+  storageKey: string;
+  /** `mf:${sessionId}` — matches the bySession index used by getSessionChunkResults */
+  sessionId: string;
+  /** original filename, e.g. "SOFI-10K-2022.pdf" */
+  chunkKey: string;
+  result: {
+    structuredResult: unknown;
+    /** hints accumulated up to and including this file */
+    hints: unknown | null;
+  };
+  savedAt: number;
+}
+
+/** Save a completed file result so it can be skipped on resume. */
+export async function saveMfFileResult(
+  sessionId: string,
+  fileName: string,
+  structuredResult: unknown,
+  hints: unknown | null,
+): Promise<void> {
+  const mfSessionId = MF_SESSION_PREFIX + sessionId;
+  await saveChunkResult(mfSessionId, fileName, { structuredResult, hints });
+}
+
+/** Load all saved file results for a session. Returns [] if none found. */
+export async function getMfFileResults(sessionId: string): Promise<MfFileRecord[]> {
+  const mfSessionId = MF_SESSION_PREFIX + sessionId;
+  const records = await getSessionChunkResults<{ structuredResult: unknown; hints: unknown | null }>(
+    mfSessionId,
+  );
+  return records.map((r) => ({
+    storageKey: `${mfSessionId}::${r.chunkKey}`,
+    sessionId: mfSessionId,
+    chunkKey: r.chunkKey,
+    result: r.result,
+    savedAt: Date.now(),
+  }));
+}
+
+/** Delete all saved file results for a session (called on successful completion). */
+export async function deleteMfSession(sessionId: string): Promise<void> {
+  const mfSessionId = MF_SESSION_PREFIX + sessionId;
+  await deleteSession(mfSessionId);
 }

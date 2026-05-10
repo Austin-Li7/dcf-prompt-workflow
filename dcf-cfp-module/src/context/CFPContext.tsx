@@ -90,6 +90,10 @@ export const initialCFPState: CFPState = {
     businessType: "single",
     singleBeta: 1.0,
     segments: [],
+    hybridSegments: [],
+    hybridBankBeta: 0.37,
+    bankKeCalculation: null,
+    industrialWaccCalculation: null,
     calculation: null,
     saved: false,
   },
@@ -156,6 +160,12 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
       return {
         ...state,
         history: { rows: [], confirmedYears: [], structuredResults: [], continuity_bridges: [] },
+      };
+
+    case "SET_FILING_HINTS":
+      return {
+        ...state,
+        history: { ...state.history, filingHints: action.payload },
       };
 
     case "SET_COMPETITION":
@@ -237,6 +247,40 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
       // Load a previously-saved full state; always land on step 1 so the
       // user can review what was loaded before continuing.
       return { ...action.payload, currentStep: 1 };
+
+    case "UPDATE_SEGMENT_WORKFLOW_MODE": {
+      const { segmentId, workflowMode } = action.payload;
+      const sr = state.profile.step1StructuredResult;
+      if (!sr) return state;
+
+      const updatedSegments = sr.analysis_view.segments.map((seg) =>
+        seg.id === segmentId ? { ...seg, workflow_mode: workflowMode } : seg,
+      );
+
+      const updatedReviewSegments = state.profile.step1Review?.analysisView.segments.map((seg) =>
+        seg.id === segmentId ? { ...seg, workflow_mode: workflowMode } : seg,
+      );
+
+      return {
+        ...state,
+        profile: {
+          ...state.profile,
+          step1StructuredResult: {
+            ...sr,
+            analysis_view: { ...sr.analysis_view, segments: updatedSegments },
+          },
+          step1Review: state.profile.step1Review
+            ? {
+                ...state.profile.step1Review,
+                analysisView: {
+                  ...state.profile.step1Review.analysisView,
+                  segments: updatedReviewSegments ?? state.profile.step1Review.analysisView.segments,
+                },
+              }
+            : null,
+        },
+      };
+    }
 
     default:
       return state;

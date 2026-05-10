@@ -151,8 +151,9 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
 
   if (!open) return null;
 
-  const hasClaudeKey = settings.claudeApiKey.trim().length > 0;
-  const hasGeminiKey = settings.geminiApiKey.trim().length > 0;
+  const hasClaudeKey    = settings.claudeApiKey.trim().length > 0;
+  const hasGeminiKey    = settings.geminiApiKey.trim().length > 0;
+  const hasDeepSeekKey  = settings.deepseekApiKey.trim().length > 0;
 
   // ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -233,6 +234,7 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
               >
                 <option value="claude">Claude Sonnet 4 (Anthropic)</option>
                 <option value="gemini">Gemini 2.5 Pro (Google)</option>
+                <option value="deepseek">DeepSeek-V3 (DeepSeek)</option>
               </select>
             </div>
 
@@ -270,6 +272,25 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                 placeholder="AI..."
                 value={settings.geminiApiKey}
                 onChange={(e) => updateSettings({ geminiApiKey: e.target.value })}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            {/* DeepSeek key */}
+            <div>
+              <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-zinc-300">
+                <KeyRound size={14} />
+                DeepSeek API Key
+                <span className={`ml-auto flex items-center gap-1 text-xs ${hasDeepSeekKey ? "text-emerald-400" : "text-zinc-600"}`}>
+                  {hasDeepSeekKey ? <><Check size={10} /> Configured</> : <><AlertCircle size={10} /> Not set</>}
+                </span>
+              </label>
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder="sk-..."
+                value={settings.deepseekApiKey}
+                onChange={(e) => updateSettings({ deepseekApiKey: e.target.value })}
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               />
             </div>

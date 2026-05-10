@@ -67,6 +67,7 @@ const AnalysisSegmentSchema = z.object({
   mapped_from_reported_node_ids: z.array(z.string().min(1)).min(1),
   claim_id: z.string().min(1),
   evidence_level: EvidenceLevelSchema,
+  workflow_mode: z.enum(["bank", "industrial"]).optional(),
   offerings: z.array(AnalysisOfferingSchema).default([]),
 });
 
@@ -93,6 +94,9 @@ export const Step1StructuredSchema = z
     schema_version: z.literal("v5.5"),
     company_name: z.string().min(1),
     ticker: z.string().min(1).nullable().optional(),
+    company_type: z
+      .enum(["industrial", "financial_bank", "financial_insurance", "financial_other", "hybrid"])
+      .optional(),
     reported_view: z.object({
       view_type: z.enum(["operating_segment", "revenue_category", "geography", "mixed"]),
       nodes: z.array(ReportedNodeSchema),

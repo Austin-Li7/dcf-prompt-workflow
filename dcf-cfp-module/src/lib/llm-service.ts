@@ -6,6 +6,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
 import type { LLMProvider } from "@/types/cfp";
 
 // =============================================================================
@@ -54,6 +55,16 @@ export function parseStructuredJsonText(
       );
     }
 
+    if (
+      context.provider === "deepseek" &&
+      context.finishReason === "length" &&
+      error instanceof SyntaxError
+    ) {
+      throw new Error(
+        "Structured output was truncated because DeepSeek hit the token limit. Try retrying or reduce the number of target years.",
+      );
+    }
+
     throw error;
   }
 }
@@ -70,12 +81,14 @@ export function resolveApiKey(
   provider: LLMProvider,
   runtimeKey?: string,
 ): { apiKey: string; needsKey: boolean } {
-  const key =
-    (typeof runtimeKey === "string" && runtimeKey.trim()) ||
-    (provider === "claude"
+  const envKey =
+    provider === "claude"
       ? process.env.ANTHROPIC_API_KEY
-      : process.env.GEMINI_API_KEY) ||
-    "";
+      : provider === "deepseek"
+      ? process.env.DEEPSEEK_API_KEY
+      : process.env.GEMINI_API_KEY;
+  const key =
+    (typeof runtimeKey === "string" && runtimeKey.trim()) || envKey || "";
   return { apiKey: key, needsKey: !key };
 }
 
@@ -92,6 +105,18 @@ export async function callLLM(options: CallLLMOptions): Promise<CallLLMResult> {
 
   if (provider === "gemini") {
     return callGemini(apiKey, prompt, systemPrompt, maxTokens, options.responseSchema);
+  }
+
+  if (provider === "deepseek") {
+    return callDeepSeek(
+      apiKey,
+      prompt,
+      systemPrompt,
+      maxTokens,
+      options.responseSchema,
+      options.responseToolName,
+      options.responseToolDescription,
+    );
   }
 
   // Default: Claude
@@ -163,6 +188,125 @@ async function callClaude(
 }
 
 // =============================================================================
+// DeepSeek (OpenAI-compatible API)
+// =============================================================================
+
+/** DeepSeek-V3 (`deepseek-chat`) hard output cap is 8 192 tokens. */
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 8192;
+
+/**
+ * Resolve all JSON Schema `$ref` references inline so the resulting schema has
+ * no `$ref`, `definitions`, or `$schema` keys.
+ *
+ * DeepSeek (OpenAI-compatible) function-calling `parameters` must be a flat
+ * object schema — it cannot process a top-level `$ref`.  Raw `zodToJsonSchema`
+ * output (used for Claude) has exactly this shape, so we resolve it here
+ * instead of maintaining a second schema per route.
+ */
+function resolveSchemaRefs(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rawSchema: Record<string, any>,
+): Record<string, unknown> {
+  const definitions =
+    (rawSchema.definitions as Record<string, unknown> | undefined) ?? {};
+
+  function resolve(node: unknown): unknown {
+    if (Array.isArray(node)) return node.map(resolve);
+    if (!node || typeof node !== "object") return node;
+
+    const rec = node as Record<string, unknown>;
+
+    // Inline $ref — look it up in definitions and recurse
+    if (typeof rec.$ref === "string") {
+      const key = rec.$ref.split("/").pop()!;
+      return key in definitions ? resolve(definitions[key]) : rec;
+    }
+
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(rec)) {
+      if (k === "$schema" || k === "definitions") continue; // strip meta-only keys
+      out[k] = resolve(v);
+    }
+    return out;
+  }
+
+  return resolve(rawSchema) as Record<string, unknown>;
+}
+
+async function callDeepSeek(
+  apiKey: string,
+  prompt: string,
+  systemPrompt: string | undefined,
+  maxTokens: number,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  responseSchema?: Record<string, any>,
+  responseToolName = "submit_structured_result",
+  responseToolDescription = "Return the validated structured payload.",
+): Promise<CallLLMResult> {
+  const client = new OpenAI({
+    apiKey,
+    baseURL: "https://api.deepseek.com/v1",
+  });
+
+  // DeepSeek-V3 caps at 8 192 output tokens; clamp regardless of what the caller passes
+  const cappedTokens = Math.min(maxTokens, DEEPSEEK_MAX_OUTPUT_TOKENS);
+
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+    { role: "user" as const, content: prompt },
+  ];
+
+  const response = await client.chat.completions.create({
+    model: "deepseek-chat",
+    max_tokens: cappedTokens,
+    messages,
+    ...(responseSchema
+      ? {
+          tools: [
+            {
+              type: "function" as const,
+              function: {
+                name: responseToolName,
+                description: responseToolDescription,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                parameters: resolveSchemaRefs(responseSchema) as any,
+              },
+            },
+          ],
+          tool_choice: {
+            type: "function" as const,
+            function: { name: responseToolName },
+          },
+        }
+      : {}),
+  });
+
+  const choice = response.choices[0];
+  // OpenAI SDK types tool_calls on the specific discriminated union; cast to access safely
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const toolCalls = (choice.message as any).tool_calls as
+    | Array<{ function?: { arguments?: string } }>
+    | undefined;
+  const rawText = choice.message.content ?? "";
+  const argumentsText = toolCalls?.[0]?.function?.arguments ?? "";
+
+  let structuredData: unknown;
+  if (argumentsText) {
+    try {
+      structuredData = JSON.parse(argumentsText);
+    } catch {
+      structuredData = undefined;
+    }
+  }
+
+  return {
+    text: argumentsText || rawText,
+    structuredData,
+    finishReason: choice.finish_reason ?? undefined,
+  };
+}
+
+// =============================================================================
 // Gemini (Google)
 // =============================================================================
 
@@ -177,19 +321,26 @@ async function callGemini(
   const genai = new GoogleGenerativeAI(apiKey);
 
   const model = genai.getGenerativeModel({
-    model: "gemini-2.5-pro",
+    model: "gemini-2.5-flash",
     ...(systemPrompt ? { systemInstruction: systemPrompt } : {}),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     generationConfig: {
       maxOutputTokens: maxTokens,
-      // When a schema is provided, lock output to structured JSON
+      // When a schema is provided, lock output to structured JSON and disable thinking.
+      // Gemini 2.5 models count thinking tokens against maxOutputTokens; for large
+      // structured schemas the reasoning budget can consume the entire window before
+      // any JSON is written, causing MAX_TOKENS truncation. Extraction tasks are
+      // pattern-matching and gain no benefit from deep reasoning.
       ...(responseSchema
         ? {
             responseMimeType: "application/json",
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             responseSchema: responseSchema as any,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            thinkingConfig: { thinkingBudget: 0 } as any,
           }
         : {}),
-    },
+    } as any,
   });
 
   const result = await model.generateContent(prompt);

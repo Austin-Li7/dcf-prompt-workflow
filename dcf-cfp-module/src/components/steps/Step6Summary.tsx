@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   Loader2, Download, AlertTriangle, AlertCircle, CheckCircle2,
-  TrendingUp, Flame, Shield, BarChart3, FileSpreadsheet, CalendarClock,
+  TrendingUp, Flame, Shield, BarChart3, FileSpreadsheet, CalendarClock, RefreshCw,
 } from "lucide-react";
-import { downloadXlsx, type SheetData } from "@/lib/excel-utils";
+import * as XLSX from "xlsx";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import EarningsDatePicker from "@/components/ui/EarningsDatePicker";
@@ -81,13 +81,24 @@ export default function Step6Summary() {
     finally { setIsLoading(false); }
   }, [rows, structuredResults, reviewWarningRows, state.competition, state.synergies, activeApiKey, settings.llmProvider]);
 
+  // Auto-trigger on first arrival when forecast is ready and no insights yet
+  const hasAutoFetched = useRef(false);
+  useEffect(() => {
+    if (hasForecast && rows.length > 0 && !insights && !hasAutoFetched.current) {
+      hasAutoFetched.current = true;
+      handleGenerateInsights();
+    }
+  }, [hasForecast, rows, insights, handleGenerateInsights]);
+
   // ---- Save to context ----
   const handleSave = () => {
     dispatch({ type: "SET_SUMMARY", payload: { aggregatedRows: rows, insights } });
   };
 
   // ---- Master Excel export (3+ sheets) ----
-  const handleExport = async () => {
+  const handleExport = () => {
+    const wb = XLSX.utils.book_new();
+
     // Sheet 1: Annual consolidated forecast
     const execRows: Record<string, unknown>[] = rows.map(r => ({
       Segment: r.segment || (r.isTotal ? "" : ""),
@@ -99,6 +110,7 @@ export default function Step6Summary() {
       "FY5 ($M)": r.fy5,
       "5Y CAGR (%)": r.cagr,
     }));
+    // Append insights if available
     if (insights) {
       execRows.push({});
       execRows.push({ Segment: "TOP GROWTH ENGINES" });
@@ -109,7 +121,9 @@ export default function Step6Summary() {
       execRows.push({ Segment: "REVENUE SHIFT", Category: insights.conclusion.revenueShift });
       execRows.push({ Segment: "ECOSYSTEM RESILIENCE", Category: insights.conclusion.ecosystemResilience });
     }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(execRows), "Annual Consolidated");
 
+    // Sheet 2: Segment-level source-of-truth forecast table from Step 5 v5.5
     const segmentForecastRows = structuredResults.flatMap((result) =>
       result.machine_artifact.forecast_table.map((row) => ({
         Segment: row.segment,
@@ -126,37 +140,55 @@ export default function Step6Summary() {
         Flags: row.flags.join(", "),
       })),
     );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(segmentForecastRows.length ? segmentForecastRows : [{ Note: "No Step 5 structured artifact rows" }]),
+      "Segment Forecast",
+    );
 
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(assumptionRows.length ? assumptionRows : [{ Note: "No assumption registry" }]),
+      "Assumption Registry",
+    );
+
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(weakSensitivityRows.length ? weakSensitivityRows : [{ Note: "No weak inference sensitivity rows" }]),
+      "Weak Sensitivity",
+    );
+
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(reviewWarningRows.length ? reviewWarningRows : [{ Note: "No review warnings or audit flags" }]),
+      "Review Warnings",
+    );
+
+    // Synergies & Capital
     const synRows = state.synergies.paths.map(p => ({
       Source: p.sourceBusiness, Capability: p.coreCapability, Recipient: p.recipientBusiness,
       Mechanism: p.mechanism, Impact: p.productImpact, "Signal Type": p.financialSignal.type,
       Flywheel: p.flywheel.isFlywheel ? "Yes" : "No", "Impact Score": p.impactScore,
     }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(synRows.length ? synRows : [{ Note: "No synergy data" }]), "Synergies & Capital");
 
-    const sheets: SheetData[] = [
-      { name: "Annual Consolidated", rows: execRows },
-      { name: "Segment Forecast", rows: (segmentForecastRows.length ? segmentForecastRows : [{ Note: "No Step 5 structured artifact rows" }]) as Record<string, unknown>[] },
-      { name: "Assumption Registry", rows: (assumptionRows.length ? assumptionRows : [{ Note: "No assumption registry" }]) as Record<string, unknown>[] },
-      { name: "Weak Sensitivity", rows: (weakSensitivityRows.length ? weakSensitivityRows : [{ Note: "No weak inference sensitivity rows" }]) as Record<string, unknown>[] },
-      { name: "Review Warnings", rows: (reviewWarningRows.length ? reviewWarningRows : [{ Note: "No review warnings or audit flags" }]) as Record<string, unknown>[] },
-      { name: "Synergies & Capital", rows: (synRows.length ? synRows : [{ Note: "No synergy data" }]) as Record<string, unknown>[] },
-      ...state.forecast.segments.map((seg) => {
-        const qRows: Record<string, unknown>[] = [];
-        for (const prod of seg.products) {
-          for (const q of prod.forecast) {
-            qRows.push({
-              Product: prod.productName, Category: prod.categoryName,
-              Year: q.year, Quarter: q.quarter,
-              "Revenue ($M)": q.revenueM, "YoY Growth (%)": q.yoyGrowth,
-              Driver: q.strategicDriver,
-            });
-          }
+    // Segment quarterly working projection from Step 5 for continuity
+    for (const seg of state.forecast.segments) {
+      const qRows: Record<string, unknown>[] = [];
+      for (const prod of seg.products) {
+        for (const q of prod.forecast) {
+          qRows.push({
+            Product: prod.productName, Category: prod.categoryName,
+            Year: q.year, Quarter: q.quarter,
+            "Revenue ($M)": q.revenueM, "YoY Growth (%)": q.yoyGrowth,
+            Driver: q.strategicDriver,
+          });
         }
-        return { name: seg.segment.slice(0, 31), rows: qRows };
-      }),
-    ];
+      }
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(qRows), seg.segment.slice(0, 31));
+    }
 
-    await downloadXlsx(sheets, `${sName(state.profile.companyName)}-Master-DCF-Module-1-${dateSuffix()}.xlsx`);
+    XLSX.writeFile(wb, `${sName(state.profile.companyName)}-Master-DCF-Module-1-${dateSuffix()}.xlsx`);
   };
 
   // ==========================================================================
@@ -310,20 +342,44 @@ export default function Step6Summary() {
             </section>
           )}
 
-          {/* ===== GENERATE INSIGHTS ===== */}
+          {/* ===== LOADING STATE (auto-trigger, no insights yet) ===== */}
           {!insights && (
-            <section className="flex flex-col items-center gap-3 py-4">
-              {errorMsg && <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300"><AlertCircle size={16} className="mt-0.5 shrink-0" /> {errorMsg}</div>}
-              <button onClick={handleGenerateInsights} disabled={isLoading}
-                className="flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500">
-                {isLoading ? <><Loader2 size={18} className="animate-spin" /> Analyzing...</> : <><TrendingUp size={16} /> Generate Strategic Insights</>}
-              </button>
+            <section className="flex flex-col items-center gap-3 py-6">
+              {isLoading ? (
+                <div className="flex items-center gap-3 text-sm text-zinc-400">
+                  <Loader2 size={20} className="animate-spin text-blue-400" />
+                  Generating strategic insights…
+                </div>
+              ) : errorMsg ? (
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
+                    <AlertCircle size={16} className="mt-0.5 shrink-0" /> {errorMsg}
+                  </div>
+                  <button onClick={handleGenerateInsights}
+                    className="flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-500">
+                    <RefreshCw size={16} /> Retry
+                  </button>
+                </div>
+              ) : null}
             </section>
           )}
 
           {/* ===== AI NARRATIVE ===== */}
           {insights && (
             <section className="space-y-6">
+              {/* Refresh button */}
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                {errorMsg && (
+                  <div className="flex items-center gap-1.5 text-xs text-red-400">
+                    <AlertCircle size={13} className="shrink-0" /> {errorMsg}
+                  </div>
+                )}
+                <button onClick={handleGenerateInsights} disabled={isLoading}
+                  className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50">
+                  {isLoading ? <><Loader2 size={14} className="animate-spin" /> Refreshing...</> : <><RefreshCw size={14} /> Refresh Insights</>}
+                </button>
+              </div>
+
               {/* Top 3 Growth Engines */}
               <div>
                 <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-amber-400">

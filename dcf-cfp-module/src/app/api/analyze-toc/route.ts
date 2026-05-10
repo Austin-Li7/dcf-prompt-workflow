@@ -14,7 +14,7 @@ import type { LLMProvider } from "@/types/cfp";
 //
 // Pipeline:
 //   1. Upload PDF to Google Files API (native PDF understanding, no OCR needed)
-//   2. Run gemini-2.5-pro with responseSchema to locate Item 7 & Item 8 pages
+//   2. Run gemini-2.5-flash with responseSchema to locate Item 7 & Item 8 pages
 //   3. Delete the uploaded file in a `finally` block (no storage leaks)
 //   4. Return { startPage, endPage, reason }
 // =============================================================================
@@ -122,14 +122,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<TocAnalysisRe
     const uploadedFileName = uploadResponse.file.name; // used to delete afterwards
     const fileUri = uploadResponse.file.uri;
 
-    console.log(`[analyze-toc] File uploaded as "${uploadedFileName}". Running gemini-2.5-pro ToC scan…`);
+    console.log(`[analyze-toc] File uploaded as "${uploadedFileName}". Running gemini-2.5-flash ToC scan…`);
 
     // ── Run LLM analysis — always clean up the remote file ───────────────────
     try {
       const genAI = new GoogleGenerativeAI(apiKey);
 
       const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-pro",
+        model: "gemini-2.5-flash",
         generationConfig: {
           responseMimeType: "application/json",
           // eslint-disable-next-line @typescript-eslint/no-explicit-any

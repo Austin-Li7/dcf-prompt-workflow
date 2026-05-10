@@ -321,6 +321,48 @@ function parseAbsoluteFiscalYear(fiscalYear: string): number | null {
   return Number(match[1]);
 }
 
+/**
+ * Returns the aggregated [FY1..FY5] revenue ($M) for a named subset of
+ * segments. Used by the SOTP valuation to split bank vs industrial streams.
+ * Segment matching is case/punctuation-insensitive (normalised comparison).
+ */
+export function aggregateSegmentForecastFy(
+  targetSegments: string[],
+  forecastState: ForecastState,
+): [number, number, number, number, number] {
+  const totals: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+  if (targetSegments.length === 0) return totals;
+
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const targets = targetSegments.map(normalize);
+  const matches = (name: string) => targets.some((t) => normalize(name).includes(t) || t.includes(normalize(name)));
+
+  const structuredResults = getStep5StructuredResults(forecastState);
+  if (structuredResults.length > 0) {
+    const absoluteYearIndex = buildAbsoluteYearIndex(structuredResults);
+    for (const result of structuredResults) {
+      for (const row of result.machine_artifact.forecast_table) {
+        if (!matches(row.segment)) continue;
+        const idx = yearIndexFromForecastRow(row, absoluteYearIndex);
+        if (idx >= 0 && idx < 5) totals[idx] += row.revenue_base_usd_m;
+      }
+    }
+    return totals.map((v) => round(v)) as [number, number, number, number, number];
+  }
+
+  // Legacy quarterly path
+  for (const seg of forecastState.segments) {
+    if (!matches(seg.segment)) continue;
+    for (const prod of seg.products) {
+      for (const q of prod.forecast) {
+        const idx = (q.year ?? 1) - 1;
+        if (idx >= 0 && idx < 5) totals[idx] += q.revenueM;
+      }
+    }
+  }
+  return totals.map((v) => round(v)) as [number, number, number, number, number];
+}
+
 function artifactSegmentLabel(result: Step5StructuredResult): string {
   const segments = Array.from(
     new Set(result.machine_artifact.forecast_table.map((row) => row.segment).filter(Boolean)),

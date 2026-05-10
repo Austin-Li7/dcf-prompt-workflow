@@ -87,3 +87,47 @@ function sanitizeForGemini(value: unknown): unknown {
 export const GEMINI_CHUNK_SUMMARY_SCHEMA = sanitizeForGemini(
   CHUNK_SUMMARY_SCHEMA,
 ) as Record<string, unknown>;
+
+// ---------------------------------------------------------------------------
+// Bank / financial mode — Map-phase schemas
+// ---------------------------------------------------------------------------
+
+export const BankChunkRowSchema = z.object({
+  fiscal_year: z.number().int().min(2000).max(2100),
+  quarter: z.enum(["Q1", "Q2", "Q3", "Q4"]),
+  segment: z.string().min(1),
+  nii_usd_m: z.number().nullable(),
+  non_interest_income_usd_m: z.number().nullable(),
+  provision_for_credit_losses_usd_m: z.number().nullable(),
+  net_income_usd_m: z.number().nullable(),
+  book_value_equity_usd_m: z.number().nullable(),
+  total_rwa_usd_m: z.number().nullable(),
+  tier1_capital_ratio_pct: z.number().nullable(),
+  cet1_ratio_pct: z.number().nullable(),
+  net_interest_margin_pct: z.number().nullable(),
+  efficiency_ratio_pct: z.number().nullable(),
+  return_on_avg_equity_pct: z.number().nullable(),
+  total_assets_usd_m: z.number().nullable(),
+  source_excerpt: z.string().max(160),
+  confidence: z.enum(["high", "medium", "low"]),
+});
+
+export const BankChunkSummarySchema = z.object({
+  chunk_id: z.string(),
+  rows: z.array(BankChunkRowSchema),
+  anomalies: z.array(z.string().max(200)).default([]),
+});
+
+export type BankChunkRow = z.infer<typeof BankChunkRowSchema>;
+export type BankChunkSummary = z.infer<typeof BankChunkSummarySchema>;
+
+const _bankGenerated = zodToJsonSchema(BankChunkSummarySchema, "BankChunkSummary");
+
+export const BANK_CHUNK_SUMMARY_SCHEMA: Record<string, unknown> =
+  ("definitions" in _bankGenerated && _bankGenerated.definitions
+    ? _bankGenerated.definitions.BankChunkSummary
+    : _bankGenerated) as Record<string, unknown>;
+
+export const GEMINI_BANK_CHUNK_SUMMARY_SCHEMA = sanitizeForGemini(
+  BANK_CHUNK_SUMMARY_SCHEMA,
+) as Record<string, unknown>;

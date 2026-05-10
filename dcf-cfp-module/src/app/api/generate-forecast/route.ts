@@ -119,7 +119,16 @@ Rules:
 - If Step 4 capital_allocation.step5_revenue_ceiling applies, keep FY5 base revenue below the ceiling or set workflow_status to NEEDS_REVIEW with a warning.
 - NEVER set workflow_status to BLOCKED. If a segment has no standalone disclosed revenue, set workflow_status to NEEDS_REVIEW, generate a best-effort revenue estimate using available proxies (parent-company aggregates, comparable public companies, industry benchmarks), and document the proxy method in review_summary.warnings. A non-zero estimate with stated uncertainty is always preferable to a blocked forecast.
 - Keep review_summary concise for UI display.
-- No prose outside the structured response.`;
+- No prose outside the structured response.
+
+Finance & Banking FCFE rules (apply when targetSegment involves lending, deposits, payments, or banking):
+- VALUATION METHOD: Set valuation_method to "FCFE" for bank/financial segments. Set "FCFF" for all industrial or non-financial segments.
+- REVENUE = NII: revenue_base_usd_m represents Net Interest Income (NII). NII = Earning Assets × NIM. Set nim_pct to the projected Net Interest Margin (%). Forecast NIM compression or expansion using the Step 2 rate environment data and Step 4 ALM risk context.
+- NET INCOME: net_income_usd_m = NII − Operating Expenses − Provision for Credit Losses (PCL). Derive operating expenses from the disclosed efficiency ratio (OpEx / Net Revenue). Project provision_for_credit_losses_usd_m as loan_balance × expected_loss_rate; use Step 2 historical loss rates or disclosed guidance.
+- REGULATORY CAPITAL INCREASE: regulatory_capital_increase_usd_m = Loan Growth ($) × Target CET1 Ratio. Loan Growth ($) = prior_year_loan_balance × projected_loan_growth_rate (from Step 2). Use the company's disclosed or target CET1 ratio (typically 10–13%). If unavailable, apply 11% as conservative default and flag in review_summary.warnings.
+- FCFE FORMULA: fcfe_usd_m = net_income_usd_m − regulatory_capital_increase_usd_m. FCFE can be negative in high-growth years when capital requirements exceed earnings — do not floor at zero.
+- ARITHMETIC TRACE must show: "NIM (x%) × Earning Assets ($M) → NII ($M) → NII − OpEx − PCL → Net Income ($M) → Net Income − Reg. Capital Increase ($M) = FCFE ($M)".
+- STRATEGIC DRIVERS for bank segments: member/customer growth rate, deposit cost APY, NIM trajectory, credit loss rate, loan origination volume, CET1 ratio target, rate sensitivity on bond portfolio.`;
 
     const result = await callLLM({
       provider: llmProvider,

@@ -313,11 +313,16 @@ export default function Step1Profile() {
 
       {hasResult && (
         <div className="space-y-6">
-          <div className="flex items-center gap-2 text-emerald-400">
-            <CheckCircle2 size={20} />
-            <span className="text-sm font-medium">
-              Analysis complete for <strong>{state.profile.companyName}</strong>
-            </span>
+          <div className="flex flex-wrap items-center gap-3 text-emerald-400">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={20} />
+              <span className="text-sm font-medium">
+                Analysis complete for <strong>{state.profile.companyName}</strong>
+              </span>
+            </div>
+            <FinanceModeIndicator
+              companyType={state.profile.step1StructuredResult?.company_type}
+            />
           </div>
 
           {review && (
@@ -771,5 +776,45 @@ function FileUploadCard({
         </div>
       )}
     </div>
+  );
+}
+
+// =============================================================================
+// Finance Mode Indicator badge
+// =============================================================================
+
+import type { CompanyType } from "@/types/cfp";
+
+function FinanceModeIndicator({ companyType }: { companyType?: CompanyType }) {
+  if (!companyType || companyType === "industrial") return null;
+
+  const config: Record<
+    Exclude<CompanyType, "industrial">,
+    { label: string; className: string }
+  > = {
+    financial_bank: {
+      label: "Finance Mode — Bank",
+      className: "bg-blue-600/20 text-blue-300 border border-blue-600/30",
+    },
+    financial_insurance: {
+      label: "Finance Mode — Insurance",
+      className: "bg-blue-600/20 text-blue-300 border border-blue-600/30",
+    },
+    financial_other: {
+      label: "Finance Mode — Financial",
+      className: "bg-blue-600/20 text-blue-300 border border-blue-600/30",
+    },
+    hybrid: {
+      label: "Finance Mode — Hybrid",
+      className: "bg-purple-600/20 text-purple-300 border border-purple-600/30",
+    },
+  };
+
+  const { label, className } = config[companyType];
+
+  return (
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${className}`}>
+      {label}
+    </span>
   );
 }

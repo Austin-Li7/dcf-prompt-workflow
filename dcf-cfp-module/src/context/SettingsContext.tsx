@@ -19,6 +19,7 @@ const defaultSettings: SettingsState = {
   llmProvider: "claude",
   claudeApiKey: "",
   geminiApiKey: "",
+  deepseekApiKey: "",
 };
 
 // =============================================================================
@@ -71,6 +72,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const activeApiKey =
     settings.llmProvider === "claude"
       ? settings.claudeApiKey
+      : settings.llmProvider === "deepseek"
+      ? settings.deepseekApiKey
       : settings.geminiApiKey;
 
   return (

@@ -15,6 +15,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const unpdf = require("unpdf") as typeof import("unpdf");
 import {
   buildStep2StructuredFromFixtureRecords,
   recordsFromDcfInputPayload,
@@ -27,13 +29,27 @@ import {
   STEP2_RESPONSE_SCHEMA,
 } from "@/lib/step2-schema";
 import {
+  GEMINI_STEP2_BANK_RESPONSE_SCHEMA,
+  parseStep2BankStructuredResult,
+  projectStep2BankStructuredToRows,
+  STEP2_BANK_RESPONSE_SCHEMA,
+} from "@/lib/step2-bank-schema";
+import {
+  BANK_CHUNK_SUMMARY_SCHEMA,
+  BankChunkSummarySchema,
   CHUNK_SUMMARY_SCHEMA,
+  GEMINI_BANK_CHUNK_SUMMARY_SCHEMA,
   GEMINI_CHUNK_SUMMARY_SCHEMA,
   ChunkSummarySchema,
   type ChunkSummary,
+  type BankChunkSummary,
 } from "@/lib/chunk-schema";
 import type { LLMProvider, ExtractHistoryResponse } from "@/types/cfp";
 import type { Step2StructuredResult } from "@/lib/step2-schema";
+import type { Step2BankStructuredResult } from "@/lib/step2-bank-schema";
+
+type WorkflowMode = "bank" | "industrial";
+type AnyStructuredResult = Step2StructuredResult | Step2BankStructuredResult;
 
 // =============================================================================
 // Shared helpers
@@ -72,6 +88,16 @@ const CHUNK_SYSTEM_PROMPT = [
   "Return only valid JSON matching the schema — no prose.",
 ].join(" ");
 
+const BANK_CHUNK_SYSTEM_PROMPT = [
+  "You are a bank financial data extraction assistant.",
+  "Extract NII-driven metrics: net interest income (nii_usd_m), non-interest income, provision for credit losses,",
+  "net income, book value of equity, total risk-weighted assets (total_rwa_usd_m),",
+  "Tier 1 capital ratio (%), CET1 ratio (%), net interest margin (%), efficiency ratio (%),",
+  "return on average equity (%), and total assets — per segment per quarter.",
+  "Return ALL fiscal years and quarters present. Use null for figures not explicitly stated.",
+  "Return only valid JSON matching the schema — no prose.",
+].join(" ");
+
 const REDUCE_SYSTEM_PROMPT = [
   "You are producing the Step 2 historical financials contract for a DCF workflow.",
   "Return only a compact structured JSON object matching the provided schema.",
@@ -82,6 +108,20 @@ const REDUCE_SYSTEM_PROMPT = [
   "Keep review_note and excerpts short. No prose outside the structured response.",
 ].join(" ");
 
+const BANK_REDUCE_SYSTEM_PROMPT = [
+  "You are producing the Step 2 bank historical financials contract for a DCF workflow.",
+  "Return only a compact structured JSON object matching the provided schema.",
+  'The top-level schema_version must be "v5.5" and workflow must be "bank".',
+  "Do not invent financial values. Use null for any metric not explicitly disclosed.",
+  "Capture NII-driven metrics: nii_usd_m, non_interest_income_usd_m, provision_for_credit_losses_usd_m,",
+  "net_income_usd_m, book_value_equity_usd_m, total_rwa_usd_m, tier1_capital_ratio_pct, cet1_ratio_pct,",
+  "net_interest_margin_pct, efficiency_ratio_pct, return_on_avg_equity_pct, total_assets_usd_m.",
+  "Map rows to Step 1 canonical banking segments. At least one primary income metric must be non-null per row.",
+  "Be concise: keep each review_note under 100 characters, sources.excerpt under 80 characters.",
+  "Omit fields that are null from source_excerpt and review_note rather than repeating them verbatim.",
+  "No prose outside the structured response.",
+].join(" ");
+
 const SANITY_SYSTEM_PROMPT = [
   "You are a financial data quality reviewer for a DCF workflow.",
   "Review the supplied Step 2 structured result.",
@@ -89,6 +129,15 @@ const SANITY_SYSTEM_PROMPT = [
   "(2) ensure every quarter claimed is actually present in the data,",
   "(3) check segment/product names match Step 1 canonical names.",
   "Return the complete corrected Step 2 JSON. You may add warnings but must NOT remove existing rows.",
+  "Return only valid JSON matching the schema — no prose.",
+].join(" ");
+
+const BANK_SANITY_SYSTEM_PROMPT = [
+  "You are a bank financial data quality reviewer for a DCF workflow.",
+  "Review the supplied Step 2 bank structured result.",
+  "Your tasks: (1) flag implausible capital ratios (e.g. CET1 > 50%) or negative NII as high-severity warnings,",
+  "(2) verify quarter coverage, (3) confirm segment names match Step 1 canonical bank segments.",
+  'Return the corrected result with workflow="bank". You may add warnings but must NOT remove rows.',
   "Return only valid JSON matching the schema — no prose.",
 ].join(" ");
 
@@ -110,13 +159,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (action === "extract-chunk") return await handleExtractChunk(body);
       if (action === "reduce") return await handleReduce(body);
       if (action === "sanity-review") return await handleSanityReview(body);
+      if (action === "generate-hints") return await handleGenerateHints(body);
 
       return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
     }
 
     // ------------------------------------------------------------------
-    // Multipart form-data path (legacy single-shot extraction)
+    // Multipart form-data path
     // ------------------------------------------------------------------
+    if (contentType.includes("multipart")) {
+      const formData = await req.formData();
+      const multipartAction = formData.get("action") as string | null;
+      if (multipartAction === "parse-pdf") return await handleParsePdf(formData);
+      // Fall through to legacy handler
+      return await handleLegacy(req);
+    }
+
     return await handleLegacy(req);
   } catch (err: unknown) {
     console.error("[extract-history] Unhandled error:", err);
@@ -146,6 +204,12 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
   const architecture = body.architecture;
   const provider = (body.provider as LLMProvider) ?? "gemini";
   const runtimeKey = body.apiKey as string | null | undefined;
+  const workflowMode: WorkflowMode = (body.workflowMode as WorkflowMode) ?? "industrial";
+  const isBank = workflowMode === "bank";
+  /** Optional pre-built hints string injected at the top of the user prompt. */
+  const hintsText = typeof body.hintsText === "string" && body.hintsText.trim()
+    ? body.hintsText.trim()
+    : null;
 
   if (!chunkContent?.trim()) {
     return NextResponse.json({ error: "chunkContent is required." }, { status: 400 });
@@ -164,40 +228,59 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
   const totalChunks = chunkMetadata?.totalChunks ?? 1;
   const chunkId = chunkMetadata?.chunkId ?? `${sourceFile}__${chunkIndex}`;
 
-  const userPrompt = [
-    `Extract ALL historical financial rows from this data segment.`,
-    `Source file: ${sourceFile} (chunk ${chunkIndex + 1} of ${totalChunks})`,
-    `Chunk ID: ${chunkId}`,
-    architecture
-      ? `Step 1 architecture (use these canonical segment/product names):\n${archToString(architecture)}`
-      : "",
-    `Rules:`,
-    `- Include every fiscal year and quarter present in this chunk.`,
-    `- Include ALL named segments/entities even if revenue_usd_m is null — segments that only disclose operating income (e.g. investment income, non-controlled businesses) must still appear as rows with revenue_usd_m: null.`,
-    `- revenue_usd_m and operating_income_usd_m must be in USD millions.`,
-    `- Use null for any figure not explicitly stated.`,
-    `- source_excerpt: copy the exact text snippet (≤ 160 chars) that proves the figure.`,
-    `- Set chunk_id to "${chunkId}".`,
-    ``,
-    `Data:`,
-    chunkContent,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const userPrompt = isBank
+    ? [
+        hintsText ?? "",
+        `Extract ALL historical bank financial metrics from this data segment.`,
+        `Source file: ${sourceFile} (chunk ${chunkIndex + 1} of ${totalChunks})`,
+        `Chunk ID: ${chunkId}`,
+        architecture
+          ? `Step 1 bank segments (use these canonical names):\n${archToString(architecture)}`
+          : "",
+        `Metrics to extract per segment per quarter (USD millions for monetary values, % for ratios):`,
+        `nii_usd_m, non_interest_income_usd_m, provision_for_credit_losses_usd_m, net_income_usd_m,`,
+        `book_value_equity_usd_m, total_rwa_usd_m, tier1_capital_ratio_pct, cet1_ratio_pct,`,
+        `net_interest_margin_pct, efficiency_ratio_pct, return_on_avg_equity_pct, total_assets_usd_m.`,
+        `Set chunk_id to "${chunkId}". Use null for any figure not explicitly stated.`,
+        `source_excerpt: copy the exact text snippet (≤ 160 chars) proving the figure.`,
+        ``,
+        `Data:`,
+        chunkContent,
+      ].filter(Boolean).join("\n")
+    : [
+        hintsText ?? "",
+        `Extract ALL historical financial rows from this data segment.`,
+        `Source file: ${sourceFile} (chunk ${chunkIndex + 1} of ${totalChunks})`,
+        `Chunk ID: ${chunkId}`,
+        architecture
+          ? `Step 1 architecture (use these canonical segment/product names):\n${archToString(architecture)}`
+          : "",
+        `Rules:`,
+        `- Include every fiscal year and quarter present in this chunk.`,
+        `- Include ALL named segments/entities even if revenue_usd_m is null.`,
+        `- revenue_usd_m and operating_income_usd_m must be in USD millions.`,
+        `- Use null for any figure not explicitly stated.`,
+        `- source_excerpt: copy the exact text snippet (≤ 160 chars) that proves the figure.`,
+        `- Set chunk_id to "${chunkId}".`,
+        ``,
+        `Data:`,
+        chunkContent,
+      ].filter(Boolean).join("\n");
 
   const llmResult = await callLLM({
     provider,
     apiKey,
     prompt: userPrompt,
-    systemPrompt: CHUNK_SYSTEM_PROMPT,
-    maxTokens: 8192,
-    responseSchema:
-      provider === "gemini" ? GEMINI_CHUNK_SUMMARY_SCHEMA : CHUNK_SUMMARY_SCHEMA,
+    systemPrompt: isBank ? BANK_CHUNK_SYSTEM_PROMPT : CHUNK_SYSTEM_PROMPT,
+    maxTokens: isBank ? 32768 : 8192,
+    responseSchema: isBank
+      ? (provider === "gemini" ? GEMINI_BANK_CHUNK_SUMMARY_SCHEMA : BANK_CHUNK_SUMMARY_SCHEMA)
+      : (provider === "gemini" ? GEMINI_CHUNK_SUMMARY_SCHEMA : CHUNK_SUMMARY_SCHEMA),
     responseToolName: "submit_chunk_summary",
     responseToolDescription: "Return the extracted financial rows for this data chunk.",
   });
 
-  let summary: ChunkSummary;
+  let summary: ChunkSummary | BankChunkSummary;
   try {
     const payload =
       llmResult.structuredData && typeof llmResult.structuredData === "object"
@@ -207,7 +290,7 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
             finishReason: llmResult.finishReason,
             finishMessage: llmResult.finishMessage,
           });
-    summary = ChunkSummarySchema.parse(payload);
+    summary = isBank ? BankChunkSummarySchema.parse(payload) : ChunkSummarySchema.parse(payload);
   } catch (err) {
     console.error("[extract-history/extract-chunk] Parse error:", err);
     return NextResponse.json(
@@ -229,12 +312,17 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
 // =============================================================================
 
 async function handleReduce(body: Record<string, unknown>): Promise<NextResponse> {
-  const chunkSummaries = body.chunkSummaries as ChunkSummary[] | undefined;
+  const chunkSummaries = body.chunkSummaries as Array<Record<string, unknown>> | undefined;
   const targetYear = Number(body.targetYear);
   const companyName = (body.companyName as string | undefined) ?? "Unknown Company";
   const architecture = body.architecture;
   const provider = (body.provider as LLMProvider) ?? "gemini";
   const runtimeKey = body.apiKey as string | null | undefined;
+  const workflowMode: WorkflowMode = (body.workflowMode as WorkflowMode) ?? "industrial";
+  const isBank = workflowMode === "bank";
+  const hintsText = typeof body.hintsText === "string" && body.hintsText.trim()
+    ? body.hintsText.trim()
+    : null;
 
   if (!Array.isArray(chunkSummaries) || chunkSummaries.length === 0) {
     return NextResponse.json({ error: "chunkSummaries array is required." }, { status: 400 });
@@ -251,51 +339,86 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
     );
   }
 
-  // Filter summaries to rows that are plausibly for targetYear (or adjacent)
+  // Filter summaries to rows plausibly for targetYear
   const relevantSummaries = chunkSummaries.map((s) => ({
     ...s,
-    rows: s.rows.filter(
-      (r) =>
-        r.fiscal_year === targetYear ||
-        // Also keep rows with no explicit year so the LLM can decide
-        r.fiscal_year === 0,
-    ),
+    rows: Array.isArray(s.rows)
+      ? (s.rows as Array<Record<string, unknown>>).filter(
+          (r) => r.fiscal_year === targetYear || r.fiscal_year === 0,
+        )
+      : [],
   })).filter((s) => s.rows.length > 0);
 
-  const userPrompt = [
-    `Task: Synthesise the chunk extraction summaries below into the complete Step 2 DCF`,
-    `historical baseline for FY ${targetYear}.`,
-    ``,
-    `Company: ${companyName}`,
-    `Target Fiscal Year: ${targetYear}`,
-    ``,
-    `Step 1 architecture:`,
-    archToString(architecture),
-    ``,
-    `Rules:`,
-    `- Include ONLY rows where fiscal_year = ${targetYear}.`,
-    `- Merge duplicates by (quarter, segment, product_name) — prefer higher confidence.`,
-    `- Where two chunks conflict on a value, add a validation_warning.`,
-    `- Use source_id references derived from the chunk_id of each summary.`,
-    `- Units: USD millions. schema_version must be "v5.5".`,
-    ``,
-    `Chunk summaries (${relevantSummaries.length} chunks with FY ${targetYear} rows):`,
-    JSON.stringify(relevantSummaries, null, 2),
-  ].join("\n");
+  // For bank mode, strip source_excerpt from each chunk row before sending to the model.
+  // The excerpts are only needed during extraction (map phase); the reduce prompt doesn't
+  // require them and omitting them meaningfully reduces prompt + output token count.
+  const summariesForPrompt = isBank
+    ? relevantSummaries.map((s) => ({
+        ...s,
+        rows: (s.rows as Array<Record<string, unknown>>).map(
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          ({ source_excerpt: _x, ...rest }) => rest,
+        ),
+      }))
+    : relevantSummaries;
+
+  const userPrompt = isBank
+    ? [
+        hintsText ?? "",
+        `Task: Synthesise the bank chunk summaries into the Step 2 bank historical baseline for FY ${targetYear}.`,
+        `Company: ${companyName}`,
+        `Target Fiscal Year: ${targetYear}`,
+        ``,
+        `Step 1 banking segments:`,
+        archToString(architecture),
+        ``,
+        `Rules:`,
+        `- Include ONLY rows where fiscal_year = ${targetYear}.`,
+        `- Merge duplicate (quarter, segment) rows — prefer higher confidence figures.`,
+        `- schema_version must be "v5.5", workflow must be "bank".`,
+        `- Monetary values in USD millions; ratio fields are percentages (e.g. 12.5 for 12.5%).`,
+        `- At least one of nii_usd_m, non_interest_income_usd_m, net_income_usd_m must be non-null per row.`,
+        `- Keep review_note under 100 characters per row. Keep sources.excerpt under 80 characters.`,
+        ``,
+        `Chunk summaries (${summariesForPrompt.length} chunks with FY ${targetYear} rows):`,
+        JSON.stringify(summariesForPrompt, null, 2),
+      ].join("\n")
+    : [
+        hintsText ?? "",
+        `Task: Synthesise the chunk extraction summaries below into the complete Step 2 DCF`,
+        `historical baseline for FY ${targetYear}.`,
+        ``,
+        `Company: ${companyName}`,
+        `Target Fiscal Year: ${targetYear}`,
+        ``,
+        `Step 1 architecture:`,
+        archToString(architecture),
+        ``,
+        `Rules:`,
+        `- Include ONLY rows where fiscal_year = ${targetYear}.`,
+        `- Merge duplicates by (quarter, segment, product_name) — prefer higher confidence.`,
+        `- Where two chunks conflict on a value, add a validation_warning.`,
+        `- Use source_id references derived from the chunk_id of each summary.`,
+        `- Units: USD millions. schema_version must be "v5.5".`,
+        ``,
+        `Chunk summaries (${summariesForPrompt.length} chunks with FY ${targetYear} rows):`,
+        JSON.stringify(summariesForPrompt, null, 2),
+      ].join("\n");
 
   const llmResult = await callLLM({
     provider,
     apiKey,
     prompt: userPrompt,
-    systemPrompt: REDUCE_SYSTEM_PROMPT,
-    maxTokens: 16384,
-    responseSchema:
-      provider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA,
+    systemPrompt: isBank ? BANK_REDUCE_SYSTEM_PROMPT : REDUCE_SYSTEM_PROMPT,
+    maxTokens: isBank ? 65536 : 16384,
+    responseSchema: isBank
+      ? (provider === "gemini" ? GEMINI_STEP2_BANK_RESPONSE_SCHEMA : STEP2_BANK_RESPONSE_SCHEMA)
+      : (provider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA),
     responseToolName: "submit_step2_structured_result",
     responseToolDescription: "Return the complete Step 2 structured result.",
   });
 
-  let structuredResult: Step2StructuredResult;
+  let structuredResult: AnyStructuredResult;
   try {
     const payload =
       llmResult.structuredData && typeof llmResult.structuredData === "object"
@@ -305,7 +428,9 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
             finishReason: llmResult.finishReason,
             finishMessage: llmResult.finishMessage,
           });
-    structuredResult = parseStep2StructuredResult(payload);
+    structuredResult = isBank
+      ? parseStep2BankStructuredResult(payload)
+      : parseStep2StructuredResult(payload);
   } catch (err) {
     console.error("[extract-history/reduce] Parse error:", err);
     return NextResponse.json(
@@ -327,11 +452,13 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
 // =============================================================================
 
 async function handleSanityReview(body: Record<string, unknown>): Promise<NextResponse> {
-  const inputResult = body.structuredResult as Step2StructuredResult | undefined;
+  const inputResult = body.structuredResult as AnyStructuredResult | undefined;
   const targetYear = Number(body.targetYear);
   const architecture = body.architecture;
   const provider = (body.provider as LLMProvider) ?? "gemini";
   const runtimeKey = body.apiKey as string | null | undefined;
+  const workflowMode: WorkflowMode = (body.workflowMode as WorkflowMode) ?? "industrial";
+  const isBank = workflowMode === "bank";
 
   if (!inputResult) {
     return NextResponse.json({ error: "structuredResult is required." }, { status: 400 });
@@ -346,9 +473,9 @@ async function handleSanityReview(body: Record<string, unknown>): Promise<NextRe
   }
 
   const userPrompt = [
-    `Perform a sanity review on this Step 2 historical baseline for FY ${targetYear}.`,
+    `Perform a sanity review on this Step 2 ${isBank ? "bank " : ""}historical baseline for FY ${targetYear}.`,
     ``,
-    `Step 1 architecture (for canonical name validation):`,
+    `Step 1 ${isBank ? "banking segments" : "architecture"} (for canonical name validation):`,
     archToString(architecture),
     ``,
     `Current Step 2 result to review:`,
@@ -362,15 +489,16 @@ async function handleSanityReview(body: Record<string, unknown>): Promise<NextRe
     provider,
     apiKey,
     prompt: userPrompt,
-    systemPrompt: SANITY_SYSTEM_PROMPT,
-    maxTokens: 16384,
-    responseSchema:
-      provider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA,
+    systemPrompt: isBank ? BANK_SANITY_SYSTEM_PROMPT : SANITY_SYSTEM_PROMPT,
+    maxTokens: isBank ? 65536 : 16384,
+    responseSchema: isBank
+      ? (provider === "gemini" ? GEMINI_STEP2_BANK_RESPONSE_SCHEMA : STEP2_BANK_RESPONSE_SCHEMA)
+      : (provider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA),
     responseToolName: "submit_step2_structured_result",
     responseToolDescription: "Return the reviewed Step 2 structured result.",
   });
 
-  let structuredResult: Step2StructuredResult;
+  let structuredResult: AnyStructuredResult;
   try {
     const payload =
       llmResult.structuredData && typeof llmResult.structuredData === "object"
@@ -380,7 +508,9 @@ async function handleSanityReview(body: Record<string, unknown>): Promise<NextRe
             finishReason: llmResult.finishReason,
             finishMessage: llmResult.finishMessage,
           });
-    structuredResult = parseStep2StructuredResult(payload);
+    structuredResult = isBank
+      ? parseStep2BankStructuredResult(payload)
+      : parseStep2StructuredResult(payload);
   } catch (err) {
     // Sanity review failure is non-fatal — return the original
     console.warn("[extract-history/sanity-review] Parse failed, returning original:", err);
@@ -388,6 +518,128 @@ async function handleSanityReview(body: Record<string, unknown>): Promise<NextRe
   }
 
   return NextResponse.json({ structuredResult });
+}
+
+// =============================================================================
+// Action: parse-pdf  (PDF text extraction — multipart upload)
+// =============================================================================
+
+async function handleParsePdf(formData: FormData): Promise<NextResponse> {
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return NextResponse.json({ error: "A PDF file is required." }, { status: 400 });
+  }
+
+  try {
+    const buffer = await file.arrayBuffer();
+    const pdf = await unpdf.getDocumentProxy(new Uint8Array(buffer));
+    const { totalPages, text } = await unpdf.extractText(pdf, { mergePages: false });
+
+    // Build page-delimited text for downstream chunking
+    let fullText: string;
+    if (Array.isArray(text)) {
+      fullText = (text as string[])
+        .map((pageText, idx) => `--- Page ${idx + 1} ---\n${pageText}`)
+        .join("\n\n");
+    } else {
+      fullText = text as string;
+    }
+
+    return NextResponse.json({ text: fullText, pages: totalPages, fileName: file.name });
+  } catch (err) {
+    console.error("[extract-history/parse-pdf] Error:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to extract PDF text." },
+      { status: 422 },
+    );
+  }
+}
+
+// =============================================================================
+// Action: generate-hints  (generate filing structure map from first result)
+// =============================================================================
+
+const GENERATE_HINTS_SYSTEM_PROMPT = [
+  "You are a financial filing analyst.",
+  "Your task is to create a concise location map of where specific metrics were found in a SEC filing.",
+  "This map will be used to speed up extraction from future filings of the same company.",
+  "Return ONLY valid JSON. No prose, no markdown.",
+].join(" ");
+
+async function handleGenerateHints(body: Record<string, unknown>): Promise<NextResponse> {
+  const structuredResult = body.structuredResult;
+  const filingType = (body.filingType as string) ?? "10-K";
+  const fileName = (body.fileName as string) ?? "unknown";
+  const companyName = (body.companyName as string) ?? "Unknown Company";
+  const provider = (body.provider as LLMProvider) ?? "claude";
+  const runtimeKey = body.apiKey as string | null | undefined;
+
+  if (!structuredResult) {
+    return NextResponse.json({ error: "structuredResult is required." }, { status: 400 });
+  }
+
+  const { apiKey, needsKey } = resolveApiKey(provider, runtimeKey ?? undefined);
+  if (needsKey) {
+    return NextResponse.json({ error: "No API key found.", requiresApiKey: true }, { status: 401 });
+  }
+
+  const userPrompt = [
+    `Analyze the following Step 2 bank extraction result from ${companyName}'s ${filingType} filing (${fileName}).`,
+    `Generate a filing hints JSON object that maps each extracted metric to its location.`,
+    ``,
+    `Extraction result:`,
+    JSON.stringify(structuredResult, null, 2),
+    ``,
+    `Return a JSON object with this EXACT structure (omit metrics not clearly identified):`,
+    `{`,
+    `  "metricLocations": {`,
+    `    "nii_usd_m": { "section": "section/table name", "labelVariants": ["label1", "label2"], "notes": "optional" },`,
+    `    "non_interest_income_usd_m": { "section": "...", "labelVariants": ["..."] },`,
+    `    "provision_for_credit_losses_usd_m": { "section": "...", "labelVariants": ["..."] },`,
+    `    "net_income_usd_m": { "section": "...", "labelVariants": ["..."] },`,
+    `    "book_value_equity_usd_m": { "section": "...", "labelVariants": ["..."] },`,
+    `    "total_rwa_usd_m": { "section": "...", "labelVariants": ["..."] },`,
+    `    "tier1_capital_ratio_pct": { "section": "...", "labelVariants": ["..."] },`,
+    `    "cet1_ratio_pct": { "section": "...", "labelVariants": ["..."] },`,
+    `    "net_interest_margin_pct": { "section": "...", "labelVariants": ["..."] },`,
+    `    "efficiency_ratio_pct": { "section": "...", "labelVariants": ["..."] },`,
+    `    "return_on_avg_equity_pct": { "section": "...", "labelVariants": ["..."] },`,
+    `    "total_assets_usd_m": { "section": "...", "labelVariants": ["..."] }`,
+    `  },`,
+    `  "generalNotes": "brief notes about filing structure, fiscal year end, currency",`,
+    `  "keyTableKeywords": ["keyword1", "keyword2"],`,
+    `  "version": 1,`,
+    `  "lastUpdatedByFile": "${fileName}"`,
+    `}`,
+    ``,
+    `Rules: section values should be the exact table/statement heading from the filing.`,
+    `labelVariants should include all synonyms used (e.g. "Net interest income", "NII").`,
+    `keyTableKeywords: 2-5 table header strings that the LLM should search for first.`,
+  ].join("\n");
+
+  const llmResult = await callLLM({
+    provider,
+    apiKey,
+    prompt: userPrompt,
+    systemPrompt: GENERATE_HINTS_SYSTEM_PROMPT,
+    maxTokens: 4096,
+  });
+
+  let hints: unknown;
+  try {
+    const text = llmResult.text.trim();
+    // Strip possible markdown fences
+    const clean = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+    hints = JSON.parse(clean);
+  } catch (err) {
+    console.error("[extract-history/generate-hints] Parse error:", err);
+    return NextResponse.json(
+      { error: "Model did not return valid hints JSON.", raw: llmResult.text.slice(0, 500) },
+      { status: 422 },
+    );
+  }
+
+  return NextResponse.json({ hints });
 }
 
 // =============================================================================

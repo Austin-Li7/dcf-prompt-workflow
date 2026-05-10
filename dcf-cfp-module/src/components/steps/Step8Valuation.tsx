@@ -17,6 +17,7 @@ import {
 import StepShell from "./StepShell";
 import { useCFP } from "@/context/CFPContext";
 import { buildDcfValuation } from "@/lib/dcf-valuation";
+import type { HybridStream } from "@/lib/dcf-valuation";
 import {
   buildStep5AssumptionRows,
   buildStep5ReviewWarningRows,
@@ -80,10 +81,12 @@ export default function Step8Valuation() {
   const { state } = useCFP();
 
   // ── User-adjustable assumptions ──────────────────────────────────────────────
-  const [fcfMargin,             setFcfMargin]             = useState(0.25);
-  const [terminalGrowth,        setTerminalGrowth]        = useState(0.025);
-  const [preferredStockUsdM,    setPreferredStockUsdM]    = useState(0);
-  const [minorityInterestUsdM,  setMinorityInterestUsdM]  = useState(0);
+  const [fcfMargin,                   setFcfMargin]                   = useState(0.25);
+  const [terminalGrowth,              setTerminalGrowth]              = useState(0.025);
+  const [financialTerminalGrowth,     setFinancialTerminalGrowth]     = useState(0.025);
+  const [industrialTerminalGrowth,    setIndustrialTerminalGrowth]    = useState(0.03);
+  const [preferredStockUsdM,          setPreferredStockUsdM]          = useState(0);
+  const [minorityInterestUsdM,        setMinorityInterestUsdM]        = useState(0);
 
   // ── Completion modal ─────────────────────────────────────────────────────────
   const [isSaving,         setIsSaving]         = useState(false);
@@ -100,9 +103,11 @@ export default function Step8Valuation() {
         terminalGrowth,
         preferredStockUsdM,
         minorityInterestUsdM,
+        financialTerminalGrowth,
+        industrialTerminalGrowth,
       }),
-    [fcfMargin, terminalGrowth, preferredStockUsdM, minorityInterestUsdM,
-     state.forecast, state.wacc],
+    [fcfMargin, terminalGrowth, financialTerminalGrowth, industrialTerminalGrowth,
+     preferredStockUsdM, minorityInterestUsdM, state.forecast, state.wacc],
   );
 
   const step5Artifacts  = useMemo(() => getStep5StructuredResults(state.forecast),  [state.forecast]);
@@ -280,14 +285,37 @@ export default function Step8Valuation() {
         </section>
 
         {/* ── Valuation Output ──────────────────────────────────────────────── */}
-        <section className="rounded-xl border border-emerald-700/40 bg-emerald-950/10 p-5">
+        <section className={`rounded-xl border p-5 ${
+          valuation.valuationMode === "FCFE"
+            ? "border-sky-700/40 bg-sky-950/10"
+            : valuation.valuationMode === "HYBRID"
+            ? "border-violet-700/40 bg-violet-950/10"
+            : "border-emerald-700/40 bg-emerald-950/10"
+        }`}>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-emerald-300">
+              <h3 className={`flex items-center gap-2 text-sm font-semibold uppercase tracking-wider ${
+                valuation.valuationMode === "FCFE"   ? "text-sky-300"    :
+                valuation.valuationMode === "HYBRID" ? "text-violet-300" : "text-emerald-300"
+              }`}>
                 <Shield size={16} /> Valuation Output
+                {valuation.valuationMode === "FCFE" && (
+                  <span className="ml-1 rounded-full bg-sky-700/30 px-2 py-0.5 text-xs font-normal text-sky-400">
+                    FCFE / Ke
+                  </span>
+                )}
+                {valuation.valuationMode === "HYBRID" && (
+                  <span className="ml-1 rounded-full bg-violet-700/30 px-2 py-0.5 text-xs font-normal text-violet-400">
+                    Hybrid — Ke + WACC
+                  </span>
+                )}
               </h3>
               <p className="mt-1 text-sm text-zinc-400">
-                FCFF discounted at WACC → Enterprise Value. Equity bridge deducts debt obligations and adds cash.
+                {valuation.valuationMode === "FCFE"
+                  ? "FCFE discounted at Ke → Equity Value directly. Debt service already reflected in FCFE; no EV bridge needed."
+                  : valuation.valuationMode === "HYBRID"
+                  ? "Two parallel streams: financial segments use FCFE/Ke, industrial segments use FCFF/WACC. Equity values are summed."
+                  : "FCFF discounted at WACC → Enterprise Value. Equity bridge deducts debt obligations and adds cash."}
               </p>
             </div>
             <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
@@ -311,21 +339,53 @@ export default function Step8Valuation() {
               <div className="grid gap-3 sm:grid-cols-4">
                 <MetricCard label="Intrinsic / Share" value={fmtPrice(valuation.intrinsicValuePerShare)} highlight />
                 <MetricCard label="Current Price"     value={fmtPrice(valuation.currentPrice)} />
-                <MetricCard label="Equity Value"      value={fmtM(valuation.equityValueUsdM)} />
-                <MetricCard label="Enterprise Value"  value={fmtM(valuation.enterpriseValueUsdM)} />
+                <MetricCard label="Combined Equity Value" value={fmtM(valuation.equityValueUsdM)} />
+                <MetricCard
+                  label={valuation.valuationMode === "FCFE" ? "FCFE-Based Equity Value" : valuation.valuationMode === "HYBRID" ? "Σ Stream Equity Values" : "Enterprise Value"}
+                  value={fmtM(valuation.enterpriseValueUsdM)}
+                />
               </div>
 
-              {/* FCFF projection table + key assumptions */}
-              <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+              {/* ── HYBRID: two stream tables side by side ──────────────── */}
+              {valuation.valuationMode === "HYBRID" && (
+                <HybridStreamsSection
+                  financial={valuation.hybridFinancialStream}
+                  industrial={valuation.hybridIndustrialStream}
+                  fcfMargin={fcfMargin}
+                  setFcfMargin={setFcfMargin}
+                  financialTerminalGrowth={financialTerminalGrowth}
+                  setFinancialTerminalGrowth={setFinancialTerminalGrowth}
+                  industrialTerminalGrowth={industrialTerminalGrowth}
+                  setIndustrialTerminalGrowth={setIndustrialTerminalGrowth}
+                  preferredStockUsdM={preferredStockUsdM}
+                  setPreferredStockUsdM={setPreferredStockUsdM}
+                  minorityInterestUsdM={minorityInterestUsdM}
+                  setMinorityInterestUsdM={setMinorityInterestUsdM}
+                  sharesOutstandingM={valuation.sharesOutstandingM}
+                  intrinsicValuePerShare={valuation.intrinsicValuePerShare}
+                  currentPrice={valuation.currentPrice}
+                />
+              )}
+
+              {/* Cash flow projection table + key assumptions — single-mode only */}
+              {valuation.valuationMode !== "HYBRID" && <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
                 <div className="overflow-x-auto rounded-lg border border-zinc-800">
                   <table className="w-full text-xs">
                     <thead className="bg-zinc-800 text-zinc-400">
                       <tr>
                         <th className="px-3 py-2 text-left font-medium">Year</th>
-                        <th className="px-3 py-2 text-right font-medium">Revenue</th>
-                        <th className="px-3 py-2 text-right font-medium">FCFF</th>
-                        <th className="px-3 py-2 text-right font-medium">Discount</th>
-                        <th className="px-3 py-2 text-right font-medium">PV(FCFF)</th>
+                        <th className="px-3 py-2 text-right font-medium">
+                          {valuation.valuationMode === "FCFE" ? "NII / Revenue" : "Revenue"}
+                        </th>
+                        <th className="px-3 py-2 text-right font-medium">
+                          {valuation.valuationMode === "FCFE" ? "FCFE" : "FCFF"}
+                        </th>
+                        <th className="px-3 py-2 text-right font-medium">
+                          {valuation.valuationMode === "FCFE" ? "÷ (1+Ke)^n" : "Discount"}
+                        </th>
+                        <th className="px-3 py-2 text-right font-medium">
+                          {valuation.valuationMode === "FCFE" ? "PV(FCFE)" : "PV(FCFF)"}
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/60">
@@ -339,7 +399,9 @@ export default function Step8Valuation() {
                         </tr>
                       ))}
                       <tr className="bg-zinc-900/60 text-xs text-zinc-400">
-                        <td className="px-3 py-1.5 italic">Σ PV(FCFF)</td>
+                        <td className="px-3 py-1.5 italic">
+                          {valuation.valuationMode === "FCFE" ? "Σ PV(FCFE)" : "Σ PV(FCFF)"}
+                        </td>
                         <td /><td /><td />
                         <td className="px-3 py-1.5 text-right font-mono">{fmtM(valuation.sumPvFcffUsdM)}</td>
                       </tr>
@@ -353,11 +415,19 @@ export default function Step8Valuation() {
                           {fmtM(valuation.terminalPresentValueUsdM)}
                         </td>
                       </tr>
-                      <tr className="border-t-2 border-zinc-600 bg-zinc-800/50">
-                        <td colSpan={4} className="px-3 py-2 text-xs font-semibold text-emerald-300">
-                          Enterprise Value (Σ PV + Terminal PV)
+                      <tr className={`border-t-2 bg-zinc-800/50 ${
+                        valuation.valuationMode === "FCFE" ? "border-sky-600" : "border-zinc-600"
+                      }`}>
+                        <td colSpan={4} className={`px-3 py-2 text-xs font-semibold ${
+                          valuation.valuationMode === "FCFE" ? "text-sky-300" : "text-emerald-300"
+                        }`}>
+                          {valuation.valuationMode === "FCFE"
+                            ? "Equity Value — Σ PV(FCFE) + PV(Terminal FCFE)"
+                            : "Enterprise Value (Σ PV + Terminal PV)"}
                         </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold text-emerald-300">
+                        <td className={`px-3 py-2 text-right font-mono font-bold ${
+                          valuation.valuationMode === "FCFE" ? "text-sky-300" : "text-emerald-300"
+                        }`}>
                           {fmtM(valuation.enterpriseValueUsdM)}
                         </td>
                       </tr>
@@ -369,73 +439,129 @@ export default function Step8Valuation() {
                   <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
                     <SlidersHorizontal size={15} /> Key Assumptions
                   </h4>
-                  <AssumptionSlider label="FCF Margin"     value={fcfMargin}      min={0.05} max={0.45} step={0.005} onChange={setFcfMargin} />
+                  {valuation.valuationMode !== "FCFE" && (
+                    <AssumptionSlider label="FCF Margin" value={fcfMargin} min={0.05} max={0.45} step={0.005} onChange={setFcfMargin} />
+                  )}
+                  {valuation.valuationMode === "FCFE" && (
+                    <div className="rounded-lg border border-sky-800/30 bg-sky-950/20 px-3 py-2 text-xs text-sky-400">
+                      FCF Margin not applicable — FCFE values come directly from the Step 5 bank forecast.
+                    </div>
+                  )}
                   <AssumptionSlider label="Terminal Growth" value={terminalGrowth} min={0.01} max={0.04} step={0.001} onChange={setTerminalGrowth} />
                   <div className="rounded-lg bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
-                    <span className="text-zinc-500">WACC: </span>
+                    <span className="text-zinc-500">
+                      {valuation.valuationMode === "FCFE" ? "Ke: " : "WACC: "}
+                    </span>
                     {valuation.wacc ? fmtPct(valuation.wacc) : "—"}
                     {"  ·  "}
                     <span className="text-zinc-500">Scale: </span>
                     {valuation.revenueScaleFactor}×
                   </div>
                 </div>
-              </div>
+              </div>}
 
-              {/* Equity Bridge */}
-              <div className="rounded-xl border border-blue-800/40 bg-blue-950/10 p-5">
-                <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
+              {/* Equity Bridge — hidden for HYBRID (each stream owns its own bridge); full for FCFF, simplified for FCFE */}
+              {valuation.valuationMode !== "HYBRID" && <div className={`rounded-xl border p-5 ${
+                valuation.valuationMode === "FCFE"
+                  ? "border-sky-800/40 bg-sky-950/10"
+                  : "border-blue-800/40 bg-blue-950/10"
+              }`}>
+                <h4 className={`flex items-center gap-2 text-sm font-semibold uppercase tracking-wider ${
+                  valuation.valuationMode === "FCFE" ? "text-sky-300" : "text-blue-300"
+                }`}>
                   <ArrowDown size={15} /> Equity Bridge
                 </h4>
-                <p className="mt-1 text-xs text-zinc-500">
-                  Enterprise Value → Equity Value via debt obligations and cash.
-                  Preferred stock and minority interest default to zero; enter actuals if available.
-                </p>
-
-                <div className="mt-4 overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <tbody className="divide-y divide-zinc-800/50">
-                      <BridgeRow label="Enterprise Value"      sublabel="Σ PV(FCFF) + PV(Terminal Value)"          value={valuation.enterpriseValueUsdM}    kind="header" />
-                      <BridgeRow label="− Total Debt"          sublabel="From Step 7 market data"                  value={-valuation.totalDebtUsdM}         kind="deduct" />
-                      <BridgeRow label="− Preferred Stock"     sublabel="User input (USD millions)"                value={-valuation.preferredStockUsdM}    kind="deduct"
-                        editInput={<BridgeInput value={preferredStockUsdM}   onChange={setPreferredStockUsdM}   />}
-                      />
-                      <BridgeRow label="− Minority Interest"   sublabel="User input (USD millions)"                value={-valuation.minorityInterestUsdM}  kind="deduct"
-                        editInput={<BridgeInput value={minorityInterestUsdM} onChange={setMinorityInterestUsdM} />}
-                      />
-                      <BridgeRow label="+ Cash & Equivalents"  sublabel="From Step 7 market data"                  value={valuation.totalCashUsdM}          kind="add" />
-                      <tr className="bg-zinc-800/50">
-                        <td colSpan={2} className="px-3 py-1 text-xs italic text-zinc-500">
-                          Net adjustment = Total Debt + Preferred + Minority Interest − Cash
-                        </td>
-                        <td className="px-3 py-1 text-right font-mono text-xs text-zinc-500">
-                          {valuation.netDebtUsdM >= 0
-                            ? `−${fmtM(valuation.netDebtUsdM)}`
-                            : `+${fmtM(Math.abs(valuation.netDebtUsdM))}`}
-                        </td>
-                        <td />
-                      </tr>
-                      <BridgeRow label="= Equity Value"              sublabel="Value attributable to common shareholders" value={valuation.equityValueUsdM}        kind="result" />
-                      <tr className="bg-zinc-900/40">
-                        <td className="px-3 py-2.5 text-xs text-zinc-500">÷ Shares Outstanding</td>
-                        <td className="px-3 py-2.5 text-xs text-zinc-500">{fmtShares(valuation.sharesOutstandingM)} diluted shares</td>
-                        <td colSpan={2} />
-                      </tr>
-                      <BridgeRow label="= Intrinsic Value / Share" sublabel="vs. current market price" value={null} kind="result"
-                        valueOverride={
-                          <span className="font-mono font-bold text-emerald-300">
-                            {fmtPrice(valuation.intrinsicValuePerShare)}
-                            {valuation.currentPrice && (
-                              <span className="ml-2 text-xs font-normal text-zinc-500">
-                                vs {fmtPrice(valuation.currentPrice)}
+                {valuation.valuationMode === "FCFE" ? (
+                  <>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      FCFE is already equity-level cash flow. Debt service is embedded in the FCFE derivation
+                      (Net Income − Regulatory Capital Increase). No EV-to-equity bridge is needed.
+                    </p>
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <tbody className="divide-y divide-zinc-800/50">
+                          <BridgeRow label="Σ PV(FCFE) + PV(Terminal FCFE)" sublabel="Equity Value — FCFE discounted at Ke" value={valuation.enterpriseValueUsdM} kind="header" />
+                          <BridgeRow label="− Preferred Stock"   sublabel="User input (USD millions)" value={-valuation.preferredStockUsdM} kind="deduct"
+                            editInput={<BridgeInput value={preferredStockUsdM}   onChange={setPreferredStockUsdM}   />}
+                          />
+                          <BridgeRow label="− Minority Interest" sublabel="User input (USD millions)" value={-valuation.minorityInterestUsdM} kind="deduct"
+                            editInput={<BridgeInput value={minorityInterestUsdM} onChange={setMinorityInterestUsdM} />}
+                          />
+                          <BridgeRow label="= Equity Value" sublabel="Attributable to common shareholders" value={valuation.equityValueUsdM} kind="result" />
+                          <tr className="bg-zinc-900/40">
+                            <td className="px-3 py-2.5 text-xs text-zinc-500">÷ Shares Outstanding</td>
+                            <td className="px-3 py-2.5 text-xs text-zinc-500">{fmtShares(valuation.sharesOutstandingM)} diluted shares</td>
+                            <td colSpan={2} />
+                          </tr>
+                          <BridgeRow label="= Intrinsic Value / Share" sublabel="vs. current market price" value={null} kind="result"
+                            valueOverride={
+                              <span className="font-mono font-bold text-emerald-300">
+                                {fmtPrice(valuation.intrinsicValuePerShare)}
+                                {valuation.currentPrice && (
+                                  <span className="ml-2 text-xs font-normal text-zinc-500">
+                                    vs {fmtPrice(valuation.currentPrice)}
+                                  </span>
+                                )}
                               </span>
-                            )}
-                          </span>
-                        }
-                      />
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                            }
+                          />
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Enterprise Value → Equity Value via debt obligations and cash.
+                      Preferred stock and minority interest default to zero; enter actuals if available.
+                    </p>
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <tbody className="divide-y divide-zinc-800/50">
+                          <BridgeRow label="Enterprise Value"      sublabel="Σ PV(FCFF) + PV(Terminal Value)"          value={valuation.enterpriseValueUsdM}    kind="header" />
+                          <BridgeRow label="− Total Debt"          sublabel="From Step 7 market data"                  value={-valuation.totalDebtUsdM}         kind="deduct" />
+                          <BridgeRow label="− Preferred Stock"     sublabel="User input (USD millions)"                value={-valuation.preferredStockUsdM}    kind="deduct"
+                            editInput={<BridgeInput value={preferredStockUsdM}   onChange={setPreferredStockUsdM}   />}
+                          />
+                          <BridgeRow label="− Minority Interest"   sublabel="User input (USD millions)"                value={-valuation.minorityInterestUsdM}  kind="deduct"
+                            editInput={<BridgeInput value={minorityInterestUsdM} onChange={setMinorityInterestUsdM} />}
+                          />
+                          <BridgeRow label="+ Cash & Equivalents"  sublabel="From Step 7 market data"                  value={valuation.totalCashUsdM}          kind="add" />
+                          <tr className="bg-zinc-800/50">
+                            <td colSpan={2} className="px-3 py-1 text-xs italic text-zinc-500">
+                              Net adjustment = Total Debt + Preferred + Minority Interest − Cash
+                            </td>
+                            <td className="px-3 py-1 text-right font-mono text-xs text-zinc-500">
+                              {valuation.netDebtUsdM >= 0
+                                ? `−${fmtM(valuation.netDebtUsdM)}`
+                                : `+${fmtM(Math.abs(valuation.netDebtUsdM))}`}
+                            </td>
+                            <td />
+                          </tr>
+                          <BridgeRow label="= Equity Value"              sublabel="Value attributable to common shareholders" value={valuation.equityValueUsdM}        kind="result" />
+                          <tr className="bg-zinc-900/40">
+                            <td className="px-3 py-2.5 text-xs text-zinc-500">÷ Shares Outstanding</td>
+                            <td className="px-3 py-2.5 text-xs text-zinc-500">{fmtShares(valuation.sharesOutstandingM)} diluted shares</td>
+                            <td colSpan={2} />
+                          </tr>
+                          <BridgeRow label="= Intrinsic Value / Share" sublabel="vs. current market price" value={null} kind="result"
+                            valueOverride={
+                              <span className="font-mono font-bold text-emerald-300">
+                                {fmtPrice(valuation.intrinsicValuePerShare)}
+                                {valuation.currentPrice && (
+                                  <span className="ml-2 text-xs font-normal text-zinc-500">
+                                    vs {fmtPrice(valuation.currentPrice)}
+                                  </span>
+                                )}
+                              </span>
+                            }
+                          />
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </div>}
 
             </div>
           )}
@@ -491,6 +617,197 @@ export default function Step8Valuation() {
         )}
       </div>
     </StepShell>
+  );
+}
+
+// =============================================================================
+// Hybrid streams section
+// =============================================================================
+
+function HybridStreamsSection({
+  financial,
+  industrial,
+  fcfMargin,
+  setFcfMargin,
+  financialTerminalGrowth,
+  setFinancialTerminalGrowth,
+  industrialTerminalGrowth,
+  setIndustrialTerminalGrowth,
+  preferredStockUsdM,
+  setPreferredStockUsdM,
+  minorityInterestUsdM,
+  setMinorityInterestUsdM,
+  sharesOutstandingM,
+  intrinsicValuePerShare,
+  currentPrice,
+}: {
+  financial: HybridStream | null;
+  industrial: HybridStream | null;
+  fcfMargin: number;
+  setFcfMargin: (v: number) => void;
+  financialTerminalGrowth: number;
+  setFinancialTerminalGrowth: (v: number) => void;
+  industrialTerminalGrowth: number;
+  setIndustrialTerminalGrowth: (v: number) => void;
+  preferredStockUsdM: number;
+  setPreferredStockUsdM: (v: number) => void;
+  minorityInterestUsdM: number;
+  setMinorityInterestUsdM: (v: number) => void;
+  sharesOutstandingM: number | null;
+  intrinsicValuePerShare: number | null;
+  currentPrice: number | null;
+}) {
+  // Stream equity values are already net of debt bridges; preferred/minority deducted once here
+  const combinedEquity = (financial?.equityValueUsdM ?? 0) + (industrial?.equityValueUsdM ?? 0);
+
+  return (
+    <div className="space-y-4">
+      {/* Two stream tables */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {financial && (
+          <div className="rounded-lg border border-sky-700/40 bg-sky-950/10 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-sky-300">{financial.label}</p>
+              <span className="rounded-full bg-sky-900/40 px-2 py-0.5 text-xs text-sky-400">{financial.discountLabel}</span>
+            </div>
+            <div className="overflow-x-auto rounded border border-zinc-800">
+              <table className="w-full text-xs">
+                <thead className="bg-zinc-800 text-zinc-400">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Year</th>
+                    <th className="px-3 py-2 text-right">FCFE</th>
+                    <th className="px-3 py-2 text-right">÷(1+Ke)^n</th>
+                    <th className="px-3 py-2 text-right">PV(FCFE)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60">
+                  {financial.forecastRows.map((row) => (
+                    <tr key={row.year}>
+                      <td className="px-3 py-1.5 text-zinc-400">FY{row.year}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-zinc-300">{fmtM(row.fcffUsdM)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-zinc-500">{row.discountFactor.toFixed(3)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-zinc-100">{fmtM(row.presentValueUsdM)}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-zinc-900/60">
+                    <td className="px-3 py-1.5 text-zinc-400">Terminal PV</td>
+                    <td /><td className="px-3 py-1.5 text-right font-mono text-zinc-400">TV {fmtM(financial.terminalValueUsdM)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-zinc-100">{fmtM(financial.terminalPresentValueUsdM)}</td>
+                  </tr>
+                </tbody>
+                <tfoot className="bg-sky-900/20 border-t border-sky-700/30">
+                  <tr>
+                    <td colSpan={3} className="px-3 py-2 text-xs font-semibold text-sky-300">Financial Equity Value</td>
+                    <td className="px-3 py-2 text-right font-mono font-bold text-sky-300">{fmtM(financial.equityValueUsdM)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <p className="text-xs text-zinc-500">FCFE is already equity-level — no EV bridge needed for this stream.</p>
+          </div>
+        )}
+
+        {industrial && (
+          <div className="rounded-lg border border-emerald-700/40 bg-emerald-950/10 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-emerald-300">{industrial.label}</p>
+              <span className="rounded-full bg-emerald-900/40 px-2 py-0.5 text-xs text-emerald-400">{industrial.discountLabel}</span>
+            </div>
+            <div className="overflow-x-auto rounded border border-zinc-800">
+              <table className="w-full text-xs">
+                <thead className="bg-zinc-800 text-zinc-400">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Year</th>
+                    <th className="px-3 py-2 text-right">FCFF</th>
+                    <th className="px-3 py-2 text-right">Discount</th>
+                    <th className="px-3 py-2 text-right">PV(FCFF)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60">
+                  {industrial.forecastRows.map((row) => (
+                    <tr key={row.year}>
+                      <td className="px-3 py-1.5 text-zinc-400">FY{row.year}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-zinc-300">{fmtM(row.fcffUsdM)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-zinc-500">{row.discountFactor.toFixed(3)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-zinc-100">{fmtM(row.presentValueUsdM)}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-zinc-900/60">
+                    <td className="px-3 py-1.5 text-zinc-400">Terminal PV</td>
+                    <td /><td className="px-3 py-1.5 text-right font-mono text-zinc-400">TV {fmtM(industrial.terminalValueUsdM)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-zinc-100">{fmtM(industrial.terminalPresentValueUsdM)}</td>
+                  </tr>
+                </tbody>
+                <tfoot className="bg-emerald-900/20 border-t border-emerald-700/30">
+                  <tr>
+                    <td colSpan={3} className="px-3 py-2 text-xs font-semibold text-emerald-300">Industrial Equity Value</td>
+                    <td className="px-3 py-2 text-right font-mono font-bold text-emerald-300">{fmtM(industrial.equityValueUsdM)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <div className="space-y-2">
+              <AssumptionSlider label="FCF Margin (industrial)" value={fcfMargin} min={0.05} max={0.45} step={0.005} onChange={setFcfMargin} />
+              <AssumptionSlider label="Terminal Growth (WACC stream)" value={industrialTerminalGrowth} min={0.01} max={0.04} step={0.001} onChange={setIndustrialTerminalGrowth} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Financial stream terminal growth (shown under financial stream card if present) */}
+      {financial && (
+        <div className="rounded-lg border border-sky-800/30 bg-sky-950/10 p-3 max-w-xs">
+          <p className="text-xs font-semibold uppercase tracking-wider text-sky-400 mb-2">Financial Stream Assumptions</p>
+          <AssumptionSlider label="Terminal Growth (Ke stream)" value={financialTerminalGrowth} min={0.01} max={0.035} step={0.001} onChange={setFinancialTerminalGrowth} />
+        </div>
+      )}
+
+      {/* Combined equity bridge */}
+      <div className="rounded-xl border border-violet-800/40 bg-violet-950/10 p-5">
+        <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-violet-300">
+          <ArrowDown size={15} /> Combined Equity Bridge
+        </h4>
+        <p className="mt-1 text-xs text-zinc-500">
+          Financial stream equity (FCFE/Ke) + Industrial stream equity (FCFF/WACC, net of debt) sum to total equity value.
+        </p>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full text-sm">
+            <tbody className="divide-y divide-zinc-800/50">
+              {financial && (
+                <BridgeRow label="Financial Stream Equity" sublabel="Σ PV(FCFE) + PV(Terminal FCFE)" value={financial.equityValueUsdM} kind="header" />
+              )}
+              {industrial && (
+                <BridgeRow label="Industrial Stream Equity" sublabel="EV − net debt (industrial segments)" value={industrial.equityValueUsdM} kind="header" />
+              )}
+              <BridgeRow label="− Preferred Stock"   sublabel="User input (USD millions)" value={-preferredStockUsdM} kind="deduct"
+                editInput={<BridgeInput value={preferredStockUsdM}   onChange={setPreferredStockUsdM}   />}
+              />
+              <BridgeRow label="− Minority Interest" sublabel="User input (USD millions)" value={-minorityInterestUsdM} kind="deduct"
+                editInput={<BridgeInput value={minorityInterestUsdM} onChange={setMinorityInterestUsdM} />}
+              />
+              <BridgeRow label="= Combined Equity Value" sublabel="Attributable to common shareholders" value={combinedEquity - preferredStockUsdM - minorityInterestUsdM} kind="result" />
+              <tr className="bg-zinc-900/40">
+                <td className="px-3 py-2.5 text-xs text-zinc-500">÷ Shares Outstanding</td>
+                <td className="px-3 py-2.5 text-xs text-zinc-500">{fmtShares(sharesOutstandingM)} diluted shares</td>
+                <td colSpan={2} />
+              </tr>
+              <BridgeRow label="= Intrinsic Value / Share" sublabel="vs. current market price" value={null} kind="result"
+                valueOverride={
+                  <span className="font-mono font-bold text-violet-300">
+                    {fmtPrice(intrinsicValuePerShare)}
+                    {currentPrice && (
+                      <span className="ml-2 text-xs font-normal text-zinc-500">
+                        vs {fmtPrice(currentPrice)}
+                      </span>
+                    )}
+                  </span>
+                }
+              />
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }
 

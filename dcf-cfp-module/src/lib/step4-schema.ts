@@ -6,6 +6,14 @@ import type {
   Step4ReviewState,
 } from "../types/cfp.ts";
 
+/** Truncates to maxLen instead of hard-failing — same pattern as step2-bank-schema.ts */
+const boundedStr = (maxLen: number) =>
+  z.preprocess((v) => {
+    if (typeof v !== "string") return v;
+    if (v.trim() === "") return v;
+    return v.length > maxLen ? v.slice(0, maxLen) : v;
+  }, z.string().min(1).max(maxLen));
+
 const EvidenceLevelSchema = z.enum([
   "DISCLOSED",
   "STRONG_INFERENCE",
@@ -36,7 +44,7 @@ const SourceSchema = z.object({
 
 const ClaimSchema = z.object({
   claim_id: z.string().min(1),
-  text: z.string().min(1).max(300),
+  text: boundedStr(300),
   source_ids: z.array(z.string().min(1)).min(1),
   evidence_level: EvidenceLevelSchema,
   source_snippet: z.string().min(1).transform((value) => value.slice(0, 220)).nullable(),
@@ -50,7 +58,7 @@ const FinancialSignalSchema = z.object({
     "Cost Displacement",
     "product-only",
   ]),
-  evidence: z.string().min(1).max(320),
+  evidence: boundedStr(320),
   status: z.enum(["financially-material", "product-only"]),
   claim_id: z.string().min(1),
   source_ids: z.array(z.string().min(1)).min(1),
@@ -58,17 +66,17 @@ const FinancialSignalSchema = z.object({
 
 const FlywheelSchema = z.object({
   is_flywheel: z.boolean(),
-  loop_description: z.string().min(1).max(260),
+  loop_description: boundedStr(260),
 });
 
 export const Step4SynergySchema = z.object({
   synergy_id: z.string().min(1),
   source_business: z.string().min(1),
-  core_capability: z.string().min(1).max(180),
+  core_capability: boundedStr(180),
   recipient_business: z.string().min(1),
-  mechanism: z.string().min(1).max(360),
-  product_impact: z.string().min(1).max(360),
-  competitor_constraint: z.string().min(1).max(360),
+  mechanism: boundedStr(360),
+  product_impact: boundedStr(360),
+  competitor_constraint: boundedStr(360),
   financial_signal: FinancialSignalSchema,
   flywheel: FlywheelSchema,
   integration_verdict: z.enum(["PROVEN", "PARTIAL", "NOT_PROVEN"]),
@@ -82,35 +90,35 @@ export const Step4SynergySchema = z.object({
   ]),
   driver_eligibility: z.enum(["FULL", "CAPPED_3PP", "CAPPED_2PP", "CONTEXT_ONLY", "NOT_ALLOWED"]),
   basis_claim_ids: z.array(z.string().min(1)).min(1),
-  financial_metric_link: z.string().min(1).max(220),
+  financial_metric_link: boundedStr(220),
   impact_score: z.number().int().min(-5).max(5),
   human_review_required: z.boolean(),
-  review_rationale: z.string().min(1).max(360),
+  review_rationale: boundedStr(360),
 });
 
 const CapitalMetricSchema = z.object({
   metric_id: z.string().min(1),
-  pillar: z.string().min(1).max(160),
-  objective: z.string().min(1).max(320),
+  pillar: boundedStr(160),
+  objective: boundedStr(320),
   capital_intensity: z.enum(["Low", "Medium", "High", "Unknown"]),
-  strategic_leverage: z.string().min(1).max(320),
+  strategic_leverage: boundedStr(320),
   synergy_link: z.string().min(1),
   efficiency_score: z.number().int().min(-5).max(5),
   claim_id: z.string().min(1),
   source_ids: z.array(z.string().min(1)).min(1),
-  review_note: z.string().min(1).max(320),
+  review_note: boundedStr(320),
 });
 
 const CapitalAllocationSchema = z.object({
   capital_metrics: z.array(CapitalMetricSchema),
   feasibility_checkpoints: z.object({
-    capex_runway: z.string().min(1).max(320),
-    scale_economics: z.string().min(1).max(320),
-    guidance_alignment: z.string().min(1).max(320),
+    capex_runway: boundedStr(320),
+    scale_economics: boundedStr(320),
+    guidance_alignment: boundedStr(320),
   }),
   step5_revenue_ceiling: z.object({
     applies: z.boolean(),
-    reason: z.string().min(1).max(320),
+    reason: boundedStr(320),
     ceiling_revenue_usd_m: z.number().nullable(),
   }),
   asset_light_exemption: z.boolean(),
@@ -121,7 +129,7 @@ const CapitalAllocationSchema = z.object({
 const ValidationWarningSchema = z.object({
   code: z.string().min(1),
   severity: z.enum(["info", "warn", "high"]),
-  message: z.string().min(1).max(260),
+  message: boundedStr(260),
   synergy_ids: z.array(z.string().min(1)).default([]),
   capital_metric_ids: z.array(z.string().min(1)).default([]),
 });
@@ -131,9 +139,9 @@ export const Step4StructuredSchema = z
     schema_version: z.literal("v5.5"),
     company_name: z.string().min(1),
     review_summary: z.object({
-      one_line: z.string().min(1).max(260),
-      highlights: z.array(z.string().min(1).max(220)).default([]),
-      warnings: z.array(z.string().min(1).max(220)).default([]),
+      one_line: boundedStr(260),
+      highlights: z.array(boundedStr(220)).default([]),
+      warnings: z.array(boundedStr(220)).default([]),
     }),
     sources: z.array(SourceSchema),
     claims: z.array(ClaimSchema),
@@ -461,18 +469,9 @@ function normalizeCapitalAllocation(
   };
 }
 
-/** Matches "N/A", "n/a", "none", "null", "undefined", "not applicable", "-", "" */
-const NA_SENTINEL_RE = /^(n\/?a|none|null|undefined|not\s*applicable|-)$/i;
-
 function normalizeSynergyLink(rawLink: unknown, synergyIds: Set<string>): string | unknown {
   if (typeof rawLink !== "string") return rawLink;
   if (synergyIds.has(rawLink)) return rawLink;
-
-  // Sentinel "no-link" values → fall back to the first valid synergy so the schema stays valid.
-  // normalizeCapitalAllocation will push a CAPITAL_SYNERGY_LINK_NORMALIZED warning automatically.
-  if (NA_SENTINEL_RE.test(rawLink.trim()) && synergyIds.size > 0) {
-    return Array.from(synergyIds)[0];
-  }
 
   const candidates = rawLink
     .split(/[,\n;|]+|\s+and\s+/i)

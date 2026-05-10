@@ -34,6 +34,12 @@ const Step5ForecastRowSchema = z.object({
   assumption_ids: z.array(z.string().min(1)).min(1),
   driver_quality: DriverQualitySchema,
   flags: z.array(z.string().min(1)).default([]),
+  // Bank/FCFE fields — null for industrial segments
+  nim_pct: z.number().nullable().optional(),
+  net_income_usd_m: z.number().nullable().optional(),
+  provision_for_credit_losses_usd_m: z.number().nullable().optional(),
+  regulatory_capital_increase_usd_m: z.number().nullable().optional(),
+  fcfe_usd_m: z.number().nullable().optional(),
 });
 
 const WeakInferenceSensitivitySchema = z.object({
@@ -56,6 +62,7 @@ export const Step5StructuredSchema = z
   .object({
     schema_version: z.literal("v5.5"),
     company_name: z.string().min(1),
+    valuation_method: z.enum(["FCFF", "FCFE"]).default("FCFF"),
     review_summary: ReviewSummarySchema,
     machine_artifact: z.object({
       forecast_mode: ForecastModeSchema,
@@ -374,6 +381,7 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
   return {
     ...record,
     schema_version: "v5.5",
+    valuation_method: record.valuation_method === "FCFE" ? "FCFE" : "FCFF",
     review_summary: normalizedReviewSummary,
     machine_artifact: {
       ...machineRecord,
@@ -537,8 +545,11 @@ function historicalRowsForBaseline(
 ): HistoricalData["rows"] {
   const structuredResults = history?.structuredResults ?? [];
   if (structuredResults.length > 0) {
-    return structuredResults.flatMap((result) =>
-      result.rows
+    return structuredResults.flatMap((result) => {
+      // Skip bank-mode artifacts — they don't have revenue_usd_m / product fields
+      if ("workflow" in result && result.workflow === "bank") return [];
+      const industrialResult = result as import("./step2-schema").Step2StructuredResult;
+      return industrialResult.rows
         .filter((row) => typeof row.revenue_usd_m === "number")
         .map((row) => ({
           id: row.row_id,
@@ -558,14 +569,14 @@ function historicalRowsForBaseline(
           internalVerify: row.validation_status === "verified_source" ? "Yes" : "No",
           sourceType: "User Provided",
           sourceName:
-            result.sources.find((source) => source.source_id === row.source_id)?.name ??
+            industrialResult.sources.find((source) => source.source_id === row.source_id)?.name ??
             "Step 2 structured artifact",
           sourceLink:
-            result.sources.find((source) => source.source_id === row.source_id)?.locator ??
+            industrialResult.sources.find((source) => source.source_id === row.source_id)?.locator ??
             "Not available",
           reviewNote: row.review_note,
-        })),
-    );
+        }));
+    });
   }
 
   return history?.rows.filter((row) => typeof row.revenue === "number") ?? [];
@@ -692,6 +703,11 @@ export function projectStep5StructuredToProducts(
           revenueM: Math.round(row.revenue_base_usd_m * 10) / 10,
           yoyGrowth: Math.round(row.yoy_growth_pct * 10) / 10,
           strategicDriver: driverText(row, assumptionMap),
+          nimPct: row.nim_pct ?? null,
+          netIncomeM: typeof row.net_income_usd_m === "number" ? Math.round(row.net_income_usd_m * 10) / 10 : null,
+          provisionForCreditLossesM: typeof row.provision_for_credit_losses_usd_m === "number" ? Math.round(row.provision_for_credit_losses_usd_m * 10) / 10 : null,
+          regulatoryCapitalIncreaseM: typeof row.regulatory_capital_increase_usd_m === "number" ? Math.round(row.regulatory_capital_increase_usd_m * 10) / 10 : null,
+          fcfeM: typeof row.fcfe_usd_m === "number" ? Math.round(row.fcfe_usd_m * 10) / 10 : null,
         })),
       };
     });
@@ -718,6 +734,10 @@ export function projectStep5StructuredToProducts(
       (year) => {
         const row = annualByYear.get(year) ?? annualRows[Math.min(year - 1, annualRows.length - 1)];
         const quarterlyRevenue = Math.round((row.revenue_base_usd_m / 4) * 10) / 10;
+        const qNetIncome = typeof row.net_income_usd_m === "number" ? Math.round((row.net_income_usd_m / 4) * 10) / 10 : null;
+        const qPcl = typeof row.provision_for_credit_losses_usd_m === "number" ? Math.round((row.provision_for_credit_losses_usd_m / 4) * 10) / 10 : null;
+        const qRegCap = typeof row.regulatory_capital_increase_usd_m === "number" ? Math.round((row.regulatory_capital_increase_usd_m / 4) * 10) / 10 : null;
+        const qFcfe = typeof row.fcfe_usd_m === "number" ? Math.round((row.fcfe_usd_m / 4) * 10) / 10 : null;
 
         return ["Q1", "Q2", "Q3", "Q4"].map((quarter) => ({
           year,
@@ -725,6 +745,11 @@ export function projectStep5StructuredToProducts(
           revenueM: quarterlyRevenue,
           yoyGrowth: Math.round(row.yoy_growth_pct * 10) / 10,
           strategicDriver: driverText(row, assumptionMap),
+          nimPct: row.nim_pct ?? null,
+          netIncomeM: qNetIncome,
+          provisionForCreditLossesM: qPcl,
+          regulatoryCapitalIncreaseM: qRegCap,
+          fcfeM: qFcfe,
         }));
       },
     );

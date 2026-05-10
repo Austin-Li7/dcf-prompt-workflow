@@ -5,12 +5,40 @@
 // ---------------------------------------------------------------------------
 // Global Settings (LLM Provider & API Keys)
 // ---------------------------------------------------------------------------
-export type LLMProvider = "claude" | "gemini";
+export type LLMProvider = "claude" | "gemini" | "deepseek";
+
+// ---------------------------------------------------------------------------
+// Finance-mode types (used by Steps 1 & 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Identifies how the company's primary business model should be valued.
+ * - industrial        : default; revenue / EBITDA / FCFF workflow
+ * - financial_bank    : chartered bank / lender; NII / capital-ratio workflow
+ * - financial_insurance: insurer; combined-ratio / float workflow
+ * - financial_other   : asset manager, REIT, fintech without charter
+ * - hybrid            : banking charter + industrial/tech segments (e.g. SoFi)
+ */
+export type CompanyType =
+  | "industrial"
+  | "financial_bank"
+  | "financial_insurance"
+  | "financial_other"
+  | "hybrid";
+
+/**
+ * Per-segment routing flag set by the LLM in Step 1 and overrideable by the
+ * user in Step 2 before extraction begins.
+ * - bank       : NII-driven, regulated banking/lending segment
+ * - industrial : revenue / operating-income-driven segment
+ */
+export type WorkflowMode = "bank" | "industrial";
 
 export interface SettingsState {
   llmProvider: LLMProvider;
   claudeApiKey: string;
   geminiApiKey: string;
+  deepseekApiKey: string;
 }
 
 /** Identifies one fiscal quarter (e.g. Q1 2025). */
@@ -125,6 +153,7 @@ export interface Step1AnalysisSegment {
   mapped_from_reported_node_ids: string[];
   claim_id: string;
   evidence_level: Step1EvidenceLevel;
+  workflow_mode?: WorkflowMode;
   offerings: Step1AnalysisOffering[];
 }
 
@@ -145,6 +174,7 @@ export interface Step1StructuredResult {
   schema_version: "v5.5";
   company_name: string;
   ticker?: string | null;
+  company_type?: CompanyType;
   reported_view: Step1ReportedView;
   analysis_view: Step1AnalysisView;
   claims: Step1Claim[];
@@ -198,6 +228,7 @@ export interface Step1AnalysisSegmentReviewEntry {
   mappedReportedNodeIds: string[];
   claimId: string;
   evidenceLevel: Step1EvidenceLevel;
+  workflow_mode?: WorkflowMode;
   offerings: Step1AnalysisOfferingReviewEntry[];
 }
 
@@ -281,6 +312,20 @@ export interface HistoricalExtractionRow {
   sourceName?: string;
   sourceLink?: string;
   reviewNote?: string;
+  // Bank / financial workflow fields (only populated for bank-mode rows)
+  workflow_mode?: WorkflowMode;
+  nii_usd_m?: number | null;
+  non_interest_income_usd_m?: number | null;
+  provision_for_credit_losses_usd_m?: number | null;
+  net_income_usd_m?: number | null;
+  book_value_equity_usd_m?: number | null;
+  total_rwa_usd_m?: number | null;
+  tier1_capital_ratio_pct?: number | null;
+  cet1_ratio_pct?: number | null;
+  net_interest_margin_pct?: number | null;
+  efficiency_ratio_pct?: number | null;
+  return_on_avg_equity_pct?: number | null;
+  total_assets_usd_m?: number | null;
 }
 
 export type Step2EvidenceLevel =
@@ -348,6 +393,48 @@ export interface Step2StructuredResult {
   };
 }
 
+/** One extracted bank-mode row (NII-driven metrics instead of revenue/opIncome). */
+export interface Step2BankHistoricalRow {
+  row_id: string;
+  fiscal_year: number;
+  quarter: "Q1" | "Q2" | "Q3" | "Q4";
+  segment: string;
+  nii_usd_m: number | null;
+  non_interest_income_usd_m: number | null;
+  provision_for_credit_losses_usd_m: number | null;
+  net_income_usd_m: number | null;
+  book_value_equity_usd_m: number | null;
+  total_rwa_usd_m: number | null;
+  tier1_capital_ratio_pct: number | null;
+  cet1_ratio_pct: number | null;
+  net_interest_margin_pct: number | null;
+  efficiency_ratio_pct: number | null;
+  return_on_avg_equity_pct: number | null;
+  total_assets_usd_m: number | null;
+  mapped_from_step1_ids: string[];
+  source_id: string;
+  evidence_level: Step2EvidenceLevel;
+  validation_status: Step2ValidationStatus;
+  review_note: string;
+}
+
+/** Structured artifact produced by the bank extraction pipeline for one fiscal year. */
+export interface Step2BankStructuredResult {
+  schema_version: "v5.5";
+  workflow: "bank";
+  company_name: string;
+  target_year: number;
+  rows: Step2BankHistoricalRow[];
+  sources: Step2Source[];
+  excluded_items: Step2ExcludedItem[];
+  validation_warnings: Step2ValidationWarning[];
+  review_summary: {
+    one_line: string;
+    highlights: string[];
+    warnings: string[];
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Step 2 – Continuity Bridge (segment restructuring audit record)
 // ---------------------------------------------------------------------------
@@ -388,17 +475,50 @@ export interface ContinuityBridge {
 /** Shape returned by POST /api/extract-history */
 export interface ExtractHistoryResponse {
   rows: Omit<HistoricalExtractionRow, "id" | "yoyGrowth">[];
-  structuredResult?: Step2StructuredResult | null;
+  structuredResult?: Step2StructuredResult | Step2BankStructuredResult | null;
   error?: string;
   requiresApiKey?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 – Filing Hints  (bank multi-file PDF extraction)
+// ---------------------------------------------------------------------------
+
+/** Location description for one metric inside a specific filing type. */
+export interface MetricLocationHint {
+  section: string;
+  labelVariants: string[];
+  notes?: string;
+}
+
+/** Hints for all metrics within one filing type (10-K or 10-Q). */
+export interface FilingTypeHints {
+  metricLocations: Partial<Record<string, MetricLocationHint>>;
+  generalNotes: string;
+  keyTableKeywords: string[];
+  version: number;
+  lastUpdatedByFile: string;
+}
+
+/**
+ * Filing structure hints generated after the first 10-K and first 10-Q
+ * are processed.  Stored in HistoricalData so they survive a JSON save/load,
+ * allowing future year uploads to benefit from prior filing patterns.
+ */
+export interface FilingHints {
+  companyName: string;
+  tenK: FilingTypeHints | null;
+  tenQ: FilingTypeHints | null;
 }
 
 /** The master history kept in global context (confirmed rows across years). */
 export interface HistoricalData {
   rows: HistoricalExtractionRow[];
   confirmedYears: number[]; // distinct years already appended (max 5)
-  structuredResults?: Step2StructuredResult[]; // approved Step 2 v5.5 artifacts
+  structuredResults?: (Step2StructuredResult | Step2BankStructuredResult)[]; // approved Step 2 v5.5 artifacts
   continuity_bridges?: ContinuityBridge[]; // segment restructuring audit records
+  /** Filing structure hints from bank mode PDF extraction — persisted for future year uploads. */
+  filingHints?: FilingHints;
 }
 
 // Kept for backward-compat — used by the export API
@@ -908,6 +1028,12 @@ export interface Step5ForecastRow {
   assumption_ids: string[];
   driver_quality: Step5DriverQuality;
   flags: string[];
+  // Bank/FCFE optional fields
+  nim_pct?: number | null;
+  net_income_usd_m?: number | null;
+  provision_for_credit_losses_usd_m?: number | null;
+  regulatory_capital_increase_usd_m?: number | null;
+  fcfe_usd_m?: number | null;
 }
 
 export interface Step5MachineArtifact {
@@ -935,6 +1061,7 @@ export interface Step5MachineArtifact {
 export interface Step5StructuredResult {
   schema_version: "v5.5";
   company_name: string;
+  valuation_method?: "FCFF" | "FCFE";
   review_summary: Step5ReviewSummary;
   machine_artifact: Step5MachineArtifact;
 }
@@ -945,6 +1072,12 @@ export interface ForecastQuarterPoint {
   revenueM: number; // USD millions
   yoyGrowth: number; // percentage
   strategicDriver: string;
+  // Bank/FCFE optional fields (null for industrial segments)
+  nimPct?: number | null;
+  netIncomeM?: number | null;
+  provisionForCreditLossesM?: number | null;
+  regulatoryCapitalIncreaseM?: number | null;
+  fcfeM?: number | null;
 }
 
 export interface ProductForecast {
@@ -1002,6 +1135,14 @@ export interface AggregatedRow {
   cagr: number; // percentage, ((FY5/FY1)^(1/4) - 1) * 100
   isSubtotal?: boolean;
   isTotal?: boolean;
+  // Bank/FCFE optional fields — populated when segment uses FCFE valuation
+  fcfe_fy1?: number;
+  fcfe_fy2?: number;
+  fcfe_fy3?: number;
+  fcfe_fy4?: number;
+  fcfe_fy5?: number;
+  fcfe_cagr?: number;
+  isBankSegment?: boolean;
 }
 
 /** Returned by the AI summary API */
@@ -1021,9 +1162,38 @@ export interface SummaryInsights {
   conclusion: SummaryConclusion;
 }
 
+// Bank-specific summary types
+export interface BankTopDriver {
+  name: string;
+  fcfe_cagr: string;
+  nim_pct: string;
+  explanation: string;
+}
+
+export interface BankSummaryConclusion {
+  capitalPosition: string;
+  creditQuality: string;
+  nimOutlook: string;
+  fcfeTrajectory: string;
+}
+
+export interface BankSummaryInsights {
+  summaryMode: "BANK";
+  topDrivers: BankTopDriver[];
+  conclusion: BankSummaryConclusion;
+}
+
+export interface HybridSummaryInsights {
+  summaryMode: "HYBRID";
+  bankInsights: BankSummaryInsights;
+  industrialInsights: SummaryInsights;
+}
+
+export type AnyInsights = SummaryInsights | BankSummaryInsights | HybridSummaryInsights;
+
 /** Shape returned by POST /api/generate-summary */
 export interface GenerateSummaryResponse {
-  insights: SummaryInsights;
+  insights: AnyInsights;
   error?: string;
   requiresApiKey?: boolean;
 }
@@ -1031,7 +1201,7 @@ export interface GenerateSummaryResponse {
 /** Global state for Step 6 */
 export interface SummaryState {
   aggregatedRows: AggregatedRow[];
-  insights: SummaryInsights | null;
+  insights: AnyInsights | null;
 }
 
 // Legacy types kept for backward compatibility
@@ -1103,6 +1273,7 @@ export type CFPAction =
   | { type: "SET_HISTORY"; payload: HistoricalData }
   | { type: "APPEND_HISTORY_ROWS"; payload: { year: number; rows: HistoricalExtractionRow[] } }
   | { type: "CLEAR_HISTORY" }
+  | { type: "SET_FILING_HINTS"; payload: FilingHints }
   | { type: "SET_COMPETITION"; payload: CompetitiveLandscape }
   | { type: "CLEAR_COMPETITION" }
   | { type: "SET_SYNERGIES"; payload: SynergiesAndDrivers }
@@ -1133,7 +1304,9 @@ export type CFPAction =
   | { type: "CLEAR_WACC" }
   | { type: "RESET" }
   /** Restore a full previously-saved state (load from file or IndexedDB). currentStep is reset to 1. */
-  | { type: "RESTORE_STATE"; payload: CFPState };
+  | { type: "RESTORE_STATE"; payload: CFPState }
+  /** Override the workflow_mode tag for one analysis segment (set by user in Step 2 review panel). */
+  | { type: "UPDATE_SEGMENT_WORKFLOW_MODE"; payload: { segmentId: string; workflowMode: WorkflowMode } };
 
 // ---------------------------------------------------------------------------
 // Company Save / Load

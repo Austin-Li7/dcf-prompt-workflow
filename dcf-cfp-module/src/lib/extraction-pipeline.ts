@@ -14,10 +14,14 @@
  *   After 3 failed attempts the pipeline pauses and notifies the caller via onProgress.
  */
 
-import type { LLMProvider } from "@/types/cfp";
-import type { ChunkSummary } from "./chunk-schema";
+import type { LLMProvider, WorkflowMode } from "@/types/cfp";
+import type { ChunkSummary, BankChunkSummary } from "./chunk-schema";
 import type { Step2StructuredResult } from "./step2-schema";
+import type { Step2BankStructuredResult } from "./step2-bank-schema";
 import type { FileChunk } from "./extraction-chunker";
+
+type AnySummary = ChunkSummary | BankChunkSummary;
+type AnyStructuredResult = Step2StructuredResult | Step2BankStructuredResult;
 import { chunkFile, chunkTextNotes } from "./extraction-chunker";
 import {
   saveManifest,
@@ -66,7 +70,7 @@ export type PipelinePhase =
 
 export interface PipelineYearResult {
   year: number;
-  structuredResult: Step2StructuredResult;
+  structuredResult: AnyStructuredResult;
 }
 
 export interface PipelineResult {
@@ -82,6 +86,8 @@ export interface PipelineOptions {
   provider: LLMProvider;
   apiKey: string;
   companyName: string;
+  /** Routes the pipeline to bank-mode chunk/reduce/review prompts when set to "bank". */
+  workflowMode?: WorkflowMode;
   /** Pass an existing session ID to resume a paused run. */
   resumeSessionId?: string;
   onProgress: (p: PipelinePhase) => void;
@@ -220,16 +226,16 @@ async function postJson<T>(
 // =============================================================================
 
 interface ChunkExtractionResponse {
-  summary?: ChunkSummary;
+  summary?: AnySummary;
   error?: string;
 }
 
 async function extractChunk(
   chunk: FileChunk,
   chunkId: string,
-  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture">,
+  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture" | "workflowMode">,
   onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<ChunkSummary> {
+): Promise<AnySummary> {
   const response = await postJson<ChunkExtractionResponse>(
     "/api/extract-history",
     {
@@ -244,6 +250,7 @@ async function extractChunk(
       architecture: options.architecture,
       provider: options.provider,
       apiKey: options.apiKey,
+      workflowMode: options.workflowMode ?? "industrial",
     },
     onRateLimit,
   );
@@ -259,17 +266,17 @@ async function extractChunk(
 // =============================================================================
 
 interface ReduceResponse {
-  structuredResult?: Step2StructuredResult;
+  structuredResult?: AnyStructuredResult;
   error?: string;
 }
 
 async function reduceChunks(
-  summaries: ChunkSummary[],
+  summaries: AnySummary[],
   targetYear: number,
   companyName: string,
-  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture">,
+  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture" | "workflowMode">,
   onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<Step2StructuredResult> {
+): Promise<AnyStructuredResult> {
   const response = await postJson<ReduceResponse>(
     "/api/extract-history",
     {
@@ -280,6 +287,7 @@ async function reduceChunks(
       architecture: options.architecture,
       provider: options.provider,
       apiKey: options.apiKey,
+      workflowMode: options.workflowMode ?? "industrial",
     },
     onRateLimit,
   );
@@ -295,16 +303,16 @@ async function reduceChunks(
 // =============================================================================
 
 interface SanityReviewResponse {
-  structuredResult?: Step2StructuredResult;
+  structuredResult?: AnyStructuredResult;
   error?: string;
 }
 
 async function sanityReview(
-  result: Step2StructuredResult,
+  result: AnyStructuredResult,
   targetYear: number,
-  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture">,
+  options: Pick<PipelineOptions, "provider" | "apiKey" | "architecture" | "workflowMode">,
   onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<Step2StructuredResult> {
+): Promise<AnyStructuredResult> {
   const response = await postJson<SanityReviewResponse>(
     "/api/extract-history",
     {
@@ -314,6 +322,7 @@ async function sanityReview(
       architecture: options.architecture,
       provider: options.provider,
       apiKey: options.apiKey,
+      workflowMode: options.workflowMode ?? "industrial",
     },
     onRateLimit,
   );
@@ -422,7 +431,7 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
   // Step 3 — Map phase: extract all chunks (max 3 concurrent)
   // ---------------------------------------------------------------------------
 
-  const chunkResults = new Map<string, ChunkSummary>();
+  const chunkResults = new Map<string, AnySummary>();
 
   // Reload already-saved results from IndexedDB (resume path)
   if (completedKeys.size > 0) {
@@ -529,7 +538,7 @@ export async function runExtractionPipeline(options: PipelineOptions): Promise<P
       totalYears: targetYears.length,
     });
 
-    let result: Step2StructuredResult;
+    let result: AnyStructuredResult;
     try {
       result = await reduceChunks(allSummaries, year, companyName, options, rateNotify);
     } catch (err) {

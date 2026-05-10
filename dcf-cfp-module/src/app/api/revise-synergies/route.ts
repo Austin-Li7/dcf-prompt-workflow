@@ -54,7 +54,13 @@ Review Prompt V2 logic tests:
 - Preserve or update synergyClassification and reviewRationale using the but-for test and reciprocity test.
 - If the relationship is only adjacent profit with no functional interdependency, classify it as Adjacent Revenue.
 - Do not treat management targets or hypothetical future outcomes as verified proof.
-Return ONLY the updated JSON object. Do not modify the existing impactScore unless the user explicitly asks to change it.`;
+Return ONLY the updated JSON object. Do not modify the existing impactScore unless the user explicitly asks to change it.
+
+Finance & Banking synergy guidance (apply when the segment involves lending, banking, deposits, payments, or financial products):
+- Traditional CapEx sharing or manufacturing synergies do not apply to banking segments.
+- Evaluate cross-sell synergies via the Financial Services Productivity Loop: a customer acquired in one product (e.g., personal loans) becomes a lower-CAC acquisition for adjacent products (e.g., investing, checking, insurance).
+- Quantify cross-sell lift using disclosed multi-product attach rates, members-per-product metrics, or product-per-member data from official filings.
+- If the synergy relies on shared regulatory infrastructure (e.g., bank charter enabling deposit + lending under one entity), classify it as Core Integration and note the regulatory moat in reviewRationale.`;
 
     const result = await callLLM({ provider: llmProvider, apiKey, prompt, maxTokens: 4096 });
     const rawText = result.text;
