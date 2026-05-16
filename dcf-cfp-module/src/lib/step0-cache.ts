@@ -55,6 +55,45 @@ export interface RefreshPlan {
   conditionalNotes: string[];
 }
 
+export type Step0ImpactHorizon = "next_quarter" | "one_to_two_years" | "long_term" | "unknown";
+export type Step0ImpactMateriality = "low" | "medium" | "high" | "unknown";
+export type Step0ImpactCertainty = "low" | "medium" | "high";
+
+export interface Step0ManualOverride {
+  enabled: boolean;
+  eventSummary: string;
+  horizon: Step0ImpactHorizon;
+  materiality: Step0ImpactMateriality;
+  certainty: Step0ImpactCertainty;
+  manualSteps: number[];
+}
+
+export interface Step0DetectedEvent {
+  id: string;
+  source: "sec" | "earnings" | "news" | "market";
+  changeType: Step0ChangeType;
+  title: string;
+  summary: string;
+  detectedAt: string;
+  eventDate: string | null;
+  url: string | null;
+  confidence: Step0ImpactCertainty;
+  horizon: Step0ImpactHorizon;
+  materiality: Step0ImpactMateriality;
+  suggestedSteps: number[];
+  requiresReview: boolean;
+  rationale: string;
+}
+
+export interface Step0DetectResponse {
+  ticker: string;
+  companyName: string | null;
+  detectedAt: string;
+  events: Step0DetectedEvent[];
+  warnings: string[];
+  error?: string;
+}
+
 export const STEP_LABELS: Record<number, string> = {
   1: "Business Architecture",
   2: "Historical Financial Data",
@@ -169,6 +208,8 @@ export const STEP0_RULES: Step0Rule[] = [
 ];
 
 const ALL_ANALYSIS_STEPS = [1, 2, 3, 4, 5, 6, 7, 8];
+const FILING_CHANGE_TYPES: Step0ChangeType[] = ["new_10k", "new_10q", "earnings_release"];
+const FULL_RERUN_CHANGE_TYPES: Step0ChangeType[] = ["new_10k", "mna_or_divestiture"];
 
 function normalizeTicker(value: string): string {
   return value.trim().toUpperCase();
@@ -275,6 +316,7 @@ export function saveCachedRun(run: CachedCompanyRun): void {
 export function analyzeRefreshPlan(
   cachedRun: CachedCompanyRun | null,
   selectedChanges: Step0ChangeType[],
+  manualOverride?: Step0ManualOverride,
 ): RefreshPlan {
   if (!cachedRun) {
     return {
@@ -305,9 +347,17 @@ export function analyzeRefreshPlan(
   }
 
   const matchedRules = STEP0_RULES.filter((rule) => selectedChanges.includes(rule.changeType));
-  const rerunSteps = Array.from(new Set(matchedRules.flatMap((rule) => rule.rerunSteps))).sort((a, b) => a - b);
+  const ruleSteps = matchedRules.flatMap((rule) => rule.rerunSteps);
+  const mandatorySteps = matchedRules
+    .filter((rule) => FILING_CHANGE_TYPES.includes(rule.changeType) || FULL_RERUN_CHANGE_TYPES.includes(rule.changeType))
+    .flatMap((rule) => rule.rerunSteps);
+  const usesManualOverride = Boolean(manualOverride?.enabled && manualOverride.manualSteps.length > 0);
+  const rerunSteps = Array.from(
+    new Set(usesManualOverride ? [...mandatorySteps, ...(manualOverride?.manualSteps ?? [])] : ruleSteps),
+  ).sort((a, b) => a - b);
   const reusableSteps = ALL_ANALYSIS_STEPS.filter((step) => !rerunSteps.includes(step));
   const status = rerunSteps.length === ALL_ANALYSIS_STEPS.length ? "full_rerun" : "partial_rerun";
+  const manualNotes = buildManualOverrideNotes(manualOverride, mandatorySteps.length > 0);
 
   return {
     status,
@@ -320,7 +370,59 @@ export function analyzeRefreshPlan(
       status === "full_rerun"
         ? "Material structural change detected. Run the full workflow."
         : `Reuse stable outputs and restart from Step ${rerunSteps[0]}.`,
-    reasons: matchedRules.map((rule) => rule.reason),
-    conditionalNotes: matchedRules.flatMap((rule) => rule.conditionalNotes),
+    reasons: [
+      ...matchedRules.map((rule) => rule.reason),
+      ...manualNotes.reasons,
+    ],
+    conditionalNotes: [
+      ...matchedRules.flatMap((rule) => rule.conditionalNotes),
+      ...manualNotes.conditionalNotes,
+    ],
   };
+}
+
+function buildManualOverrideNotes(
+  manualOverride: Step0ManualOverride | undefined,
+  hasMandatorySteps: boolean,
+): { reasons: string[]; conditionalNotes: string[] } {
+  if (!manualOverride?.enabled) return { reasons: [], conditionalNotes: [] };
+
+  const horizonText: Record<Step0ImpactHorizon, string> = {
+    next_quarter: "next-quarter only",
+    one_to_two_years: "one to two years",
+    long_term: "long-term",
+    unknown: "unknown horizon",
+  };
+  const materialityText: Record<Step0ImpactMateriality, string> = {
+    low: "low materiality",
+    medium: "medium materiality",
+    high: "high materiality",
+    unknown: "unknown materiality",
+  };
+
+  const reasons = [
+    `Manual impact override applied: ${horizonText[manualOverride.horizon]}, ${materialityText[manualOverride.materiality]}, ${manualOverride.certainty} certainty.`,
+  ];
+
+  if (manualOverride.eventSummary.trim()) {
+    reasons.push(`Event note: ${manualOverride.eventSummary.trim()}`);
+  }
+
+  const conditionalNotes = [
+    "If the event later proves durable or financially material, revisit Step 0 and expand the rerun steps.",
+  ];
+
+  if (hasMandatorySteps) {
+    conditionalNotes.push("Mandatory filing-driven steps were kept even with manual override enabled.");
+  }
+
+  if (manualOverride.horizon === "unknown" || manualOverride.materiality === "unknown") {
+    conditionalNotes.push("Unknown horizon or materiality should be treated as a monitoring item unless evidence supports a long-term forecast change.");
+  }
+
+  if (manualOverride.certainty === "low") {
+    conditionalNotes.push("Low-certainty events should usually update scenarios or sensitivities before changing the base-case DCF.");
+  }
+
+  return { reasons, conditionalNotes };
 }
