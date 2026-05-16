@@ -95,7 +95,7 @@ export interface Step0ManualOverride {
 
 export interface Step0DetectedEvent {
   id: string;
-  source: "sec" | "earnings" | "news" | "market";
+  source: "sec" | "earnings" | "news" | "market" | "user";
   changeType: Step0ChangeType;
   title: string;
   summary: string;

@@ -23,9 +23,11 @@ import {
   analyzeRefreshPlan,
   findCachedRun,
   getCachedRuns,
+  type Step0DcfImpactDriver,
   type Step0ImpactCertainty,
   type Step0ImpactHorizon,
   type Step0ImpactMateriality,
+  type Step0ImpactQuantifiability,
   type Step0ManualOverride,
   type Step0ChangeType,
   type Step0DetectResponse,
@@ -80,6 +82,13 @@ export default function Step0RefreshGate() {
   const [detectError, setDetectError] = useState<string | null>(null);
   const [detectedEvents, setDetectedEvents] = useState<Step0DetectedEvent[]>([]);
   const [acceptedEventIds, setAcceptedEventIds] = useState<string[]>([]);
+  const [customTitle, setCustomTitle] = useState("");
+  const [customSummary, setCustomSummary] = useState("");
+  const [customChangeType, setCustomChangeType] = useState<Step0ChangeType>("new_product_or_technology");
+  const [customHorizon, setCustomHorizon] = useState<Step0ImpactHorizon>("unknown");
+  const [customMateriality, setCustomMateriality] = useState<Step0ImpactMateriality>("unknown");
+  const [customCertainty, setCustomCertainty] = useState<Step0ImpactCertainty>("low");
+  const [customQuantifiability, setCustomQuantifiability] = useState<Step0ImpactQuantifiability>("unknown");
 
   const manualOverride: Step0ManualOverride = useMemo(
     () => ({
@@ -148,18 +157,15 @@ export default function Step0RefreshGate() {
     );
   };
 
-  const handleDetectUpdates = async () => {
-    const ticker = lookup.trim() || state.profile.ticker || state.profile.companyName;
-    if (!ticker.trim()) {
-      setDetectError("Enter a ticker or company first.");
-      return;
-    }
+  const detectUpdates = async (tickerInput: string) => {
+    const ticker = tickerInput.trim();
+    if (!ticker) return;
 
     setIsDetecting(true);
     setDetectError(null);
 
     try {
-      const response = await fetch(`/api/step0-detect?ticker=${encodeURIComponent(ticker.trim())}`);
+      const response = await fetch(`/api/step0-detect?ticker=${encodeURIComponent(ticker)}`);
       const data = (await response.json()) as Step0DetectResponse;
 
       if (!response.ok) {
@@ -178,6 +184,35 @@ export default function Step0RefreshGate() {
     } finally {
       setIsDetecting(false);
     }
+  };
+
+  const handleDetectUpdates = async () => {
+    const ticker = lookup.trim() || state.profile.ticker || state.profile.companyName;
+    if (!ticker.trim()) {
+      setDetectError("Enter a ticker or company first.");
+      return;
+    }
+
+    await detectUpdates(ticker);
+  };
+
+  const handleCheckDatabaseAndUpdates = async () => {
+    const currentLookup = lookup.trim();
+    if (!currentLookup) {
+      setDetectError("Enter a ticker or company first.");
+      return;
+    }
+
+    const matchedRun = findCachedRun(currentLookup);
+    setCheckedLookup(currentLookup);
+    setChecked(true);
+    setCacheRefreshKey((value) => value + 1);
+    setDetectedEvents([]);
+    setAcceptedEventIds([]);
+    setDetectError(null);
+
+    if (!matchedRun) return;
+    await detectUpdates(currentLookup);
   };
 
   const acceptSelectedEvents = () => {
@@ -203,10 +238,39 @@ export default function Step0RefreshGate() {
     }
   };
 
-  const handleCheckDatabase = () => {
-    setCheckedLookup(lookup);
-    setChecked(true);
-    setCacheRefreshKey((value) => value + 1);
+  const addCustomEvent = () => {
+    const title = customTitle.trim();
+    const summary = customSummary.trim();
+    if (!title && !summary) {
+      setDetectError("Add a title or event detail before adding your own event.");
+      return;
+    }
+
+    const event = buildCustomEvent({
+      title: title || "User-provided event",
+      summary: summary || title,
+      changeType: customChangeType,
+      horizon: customHorizon,
+      materiality: customMateriality,
+      certainty: customCertainty,
+      quantifiability: customQuantifiability,
+    });
+
+    setDetectedEvents((current) => [event, ...current]);
+    setAcceptedEventIds((current) => [...current, event.id]);
+    setDetectError(null);
+
+    if (eventNeedsManualParameters(event)) {
+      setManualOverrideEnabled(true);
+      setEventSummary(event.impactAssessment.assessmentSummary);
+      setManualSteps(event.suggestedSteps);
+      setImpactHorizon(event.impactAssessment.horizon);
+      setImpactMateriality(event.impactAssessment.materiality);
+      setImpactCertainty(event.impactAssessment.certainty);
+    }
+
+    setCustomTitle("");
+    setCustomSummary("");
   };
 
   const toggleManualStep = (step: number) => {
@@ -260,11 +324,12 @@ export default function Step0RefreshGate() {
               />
             </div>
             <button
-              onClick={handleCheckDatabase}
+              onClick={handleCheckDatabaseAndUpdates}
+              disabled={isDetecting}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
             >
-              <Database size={16} />
-              Check Database
+              {isDetecting ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+              Check Database & Updates
             </button>
             <button
               onClick={handleDetectUpdates}
@@ -291,6 +356,122 @@ export default function Step0RefreshGate() {
               icon={<FileSearch size={16} />}
               label="Last updated"
               value={cachedRun ? formatDate(cachedRun.updatedAt) : "Not available"}
+            />
+          </div>
+        </section>
+
+        {checked && !cachedRun && (
+          <section className="rounded-lg border border-blue-800/50 bg-blue-950/15 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-blue-300">No historical run found</h3>
+                <p className="mt-1 text-sm leading-6 text-zinc-300">
+                  This company is not in the local run database yet, so Step 0 recommends a full first-pass analysis starting at Step 1.
+                </p>
+              </div>
+              <button
+                onClick={forceFullRun}
+                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
+              >
+                <ArrowRight size={16} />
+                Start Step 1
+              </button>
+            </div>
+          </section>
+        )}
+
+        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-300">
+                Add your own event
+              </h3>
+              <p className="mt-1 text-sm leading-6 text-zinc-500">
+                Add management commentary, private research notes, product rumors, or any event the automatic detector missed.
+              </p>
+            </div>
+            <button
+              onClick={addCustomEvent}
+              className="rounded-lg border border-zinc-700 px-3 py-2 text-sm font-semibold text-zinc-200 transition-colors hover:bg-zinc-800"
+            >
+              Add Event
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-zinc-300">Event title</span>
+              <input
+                value={customTitle}
+                onChange={(event) => setCustomTitle(event.target.value)}
+                placeholder="e.g. Apple announces a new AI device"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-blue-500"
+              />
+            </label>
+            <SelectField
+              label="Event type"
+              value={customChangeType}
+              onChange={(value) => setCustomChangeType(value as Step0ChangeType)}
+              options={STEP0_RULES.map((rule) => [rule.changeType, rule.label])}
+            />
+          </div>
+
+          <div className="mt-3">
+            <label htmlFor="custom-event-summary" className="mb-1.5 block text-sm font-medium text-zinc-300">
+              Event detail
+            </label>
+            <textarea
+              id="custom-event-summary"
+              value={customSummary}
+              onChange={(event) => setCustomSummary(event.target.value)}
+              placeholder="Describe what happened, why it may affect the forecast, and what is still uncertain."
+              rows={3}
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm leading-6 text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-blue-500"
+            />
+          </div>
+
+          <div className="mt-3 grid gap-3 md:grid-cols-4">
+            <SelectField
+              label="Impact horizon"
+              value={customHorizon}
+              onChange={(value) => setCustomHorizon(value as Step0ImpactHorizon)}
+              options={[
+                ["unknown", "Unknown"],
+                ["next_quarter", "Next quarter"],
+                ["one_to_two_years", "1-2 years"],
+                ["long_term", "Long-term"],
+              ]}
+            />
+            <SelectField
+              label="Materiality"
+              value={customMateriality}
+              onChange={(value) => setCustomMateriality(value as Step0ImpactMateriality)}
+              options={[
+                ["unknown", "Unknown"],
+                ["low", "Low"],
+                ["medium", "Medium"],
+                ["high", "High"],
+              ]}
+            />
+            <SelectField
+              label="Certainty"
+              value={customCertainty}
+              onChange={(value) => setCustomCertainty(value as Step0ImpactCertainty)}
+              options={[
+                ["low", "Low"],
+                ["medium", "Medium"],
+                ["high", "High"],
+              ]}
+            />
+            <SelectField
+              label="Can quantify?"
+              value={customQuantifiability}
+              onChange={(value) => setCustomQuantifiability(value as Step0ImpactQuantifiability)}
+              options={[
+                ["unknown", "Unknown"],
+                ["estimable", "Estimable"],
+                ["known", "Known"],
+              ]}
             />
           </div>
         </section>
@@ -628,6 +809,104 @@ function eventNeedsManualParameters(event: Step0DetectedEvent): boolean {
     event.impactAssessment.materiality === "unknown" ||
     event.impactAssessment.certainty === "low"
   );
+}
+
+function buildCustomEvent({
+  title,
+  summary,
+  changeType,
+  horizon,
+  materiality,
+  certainty,
+  quantifiability,
+}: {
+  title: string;
+  summary: string;
+  changeType: Step0ChangeType;
+  horizon: Step0ImpactHorizon;
+  materiality: Step0ImpactMateriality;
+  certainty: Step0ImpactCertainty;
+  quantifiability: Step0ImpactQuantifiability;
+}): Step0DetectedEvent {
+  const suggestedSteps = getSuggestedStepsForChange(changeType, horizon, materiality, quantifiability);
+  const action =
+    horizon === "long_term" &&
+    materiality !== "unknown" &&
+    materiality !== "low" &&
+    certainty === "high" &&
+    quantifiability !== "unknown"
+      ? "auto_rerun"
+      : "manual_parameters";
+
+  return {
+    id: `user-${Date.now()}`,
+    source: "user",
+    changeType,
+    title,
+    summary,
+    detectedAt: new Date().toISOString(),
+    eventDate: null,
+    url: null,
+    confidence: certainty,
+    horizon,
+    materiality,
+    suggestedSteps,
+    requiresReview: action !== "auto_rerun",
+    rationale: action === "auto_rerun"
+      ? "User-provided event is marked as long-term, material, high-certainty, and quantifiable enough to route automatically."
+      : "User-provided event needs parameter review because impact horizon, magnitude, certainty, or quantifiability is not fully established.",
+    impactAssessment: {
+      horizon,
+      materiality,
+      certainty,
+      quantifiability,
+      action,
+      dcfDrivers: getDcfDriversForChange(changeType),
+      parameterHints: action === "auto_rerun"
+        ? ["Use the user-provided evidence as an explicit input when rerunning the affected steps."]
+        : ["Set a scenario or manual assumption before changing the base-case DCF.", "If the event later becomes quantifiable, update Step 0 and rerun the affected steps."],
+      assessmentSummary: `${summary} Impact is ${quantifiability}, ${certainty}-certainty, and ${horizon.replace(/_/g, " ")} with ${materiality} materiality.`,
+    },
+  };
+}
+
+function getSuggestedStepsForChange(
+  changeType: Step0ChangeType,
+  horizon: Step0ImpactHorizon,
+  materiality: Step0ImpactMateriality,
+  quantifiability: Step0ImpactQuantifiability,
+): number[] {
+  const ruleSteps = STEP0_RULES.find((rule) => rule.changeType === changeType)?.rerunSteps ?? [5, 6, 8];
+  if (horizon === "unknown" || materiality === "unknown" || quantifiability === "unknown") {
+    return Array.from(new Set([5, 6, 8, ...ruleSteps.filter((step) => step === 3 || step === 4 || step === 7)])).sort((a, b) => a - b);
+  }
+  return ruleSteps;
+}
+
+function getDcfDriversForChange(changeType: Step0ChangeType): Step0DcfImpactDriver[] {
+  switch (changeType) {
+    case "new_10k":
+      return ["revenue_growth", "operating_margin", "business_mix", "net_debt", "wacc", "terminal_growth"];
+    case "new_10q":
+    case "earnings_release":
+      return ["revenue_growth", "operating_margin", "net_debt"];
+    case "mna_or_divestiture":
+      return ["business_mix", "revenue_growth", "operating_margin", "net_debt", "wacc", "terminal_growth"];
+    case "new_product_or_technology":
+      return ["revenue_growth", "gross_margin", "operating_margin", "terminal_growth"];
+    case "competitive_shift":
+      return ["revenue_growth", "operating_margin", "moat_duration", "terminal_growth"];
+    case "regulation_or_litigation":
+      return ["revenue_growth", "operating_margin", "wacc", "terminal_growth"];
+    case "management_change":
+      return ["business_mix", "capex", "share_count", "net_debt", "terminal_growth"];
+    case "market_data_change":
+      return ["wacc", "share_count", "net_debt"];
+    case "macro_change":
+      return ["revenue_growth", "operating_margin", "wacc", "terminal_growth"];
+    default:
+      return ["revenue_growth", "operating_margin"];
+  }
 }
 
 function DetectedEventCard({
