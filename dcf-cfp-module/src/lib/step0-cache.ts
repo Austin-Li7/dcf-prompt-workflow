@@ -58,6 +58,31 @@ export interface RefreshPlan {
 export type Step0ImpactHorizon = "next_quarter" | "one_to_two_years" | "long_term" | "unknown";
 export type Step0ImpactMateriality = "low" | "medium" | "high" | "unknown";
 export type Step0ImpactCertainty = "low" | "medium" | "high";
+export type Step0DcfImpactDriver =
+  | "revenue_growth"
+  | "gross_margin"
+  | "operating_margin"
+  | "capex"
+  | "working_capital"
+  | "wacc"
+  | "terminal_growth"
+  | "share_count"
+  | "net_debt"
+  | "business_mix"
+  | "moat_duration";
+export type Step0ImpactQuantifiability = "known" | "estimable" | "unknown";
+export type Step0ImpactAction = "auto_rerun" | "manual_parameters" | "monitor";
+
+export interface Step0ImpactAssessment {
+  horizon: Step0ImpactHorizon;
+  materiality: Step0ImpactMateriality;
+  certainty: Step0ImpactCertainty;
+  quantifiability: Step0ImpactQuantifiability;
+  action: Step0ImpactAction;
+  dcfDrivers: Step0DcfImpactDriver[];
+  parameterHints: string[];
+  assessmentSummary: string;
+}
 
 export interface Step0ManualOverride {
   enabled: boolean;
@@ -83,6 +108,7 @@ export interface Step0DetectedEvent {
   suggestedSteps: number[];
   requiresReview: boolean;
   rationale: string;
+  impactAssessment: Step0ImpactAssessment;
 }
 
 export interface Step0DetectResponse {

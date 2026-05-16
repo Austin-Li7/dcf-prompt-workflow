@@ -167,7 +167,11 @@ export default function Step0RefreshGate() {
       }
 
       setDetectedEvents(data.events);
-      setAcceptedEventIds(data.events.filter((event) => !event.requiresReview).map((event) => event.id));
+      setAcceptedEventIds(
+        data.events
+          .filter((event) => event.impactAssessment.action === "auto_rerun")
+          .map((event) => event.id),
+      );
       if (data.ticker) setLookup(data.ticker);
     } catch (err: unknown) {
       setDetectError(err instanceof Error ? err.message : "Detection failed.");
@@ -180,22 +184,22 @@ export default function Step0RefreshGate() {
     const nextChanges = Array.from(
       new Set([...selectedChanges, ...acceptedEvents.map((event) => event.changeType)]),
     );
-    const reviewEvents = acceptedEvents.filter((event) => event.requiresReview);
+    const reviewEvents = acceptedEvents.filter((event) => eventNeedsManualParameters(event));
     setSelectedChanges(nextChanges);
 
     if (reviewEvents.length > 0) {
       setManualOverrideEnabled(true);
       setEventSummary(
         reviewEvents
-          .map((event) => `${event.title}: ${event.rationale}`)
+          .map((event) => `${event.title}: ${event.impactAssessment.assessmentSummary}`)
           .join("\n"),
       );
       const suggestedSteps = Array.from(new Set(reviewEvents.flatMap((event) => event.suggestedSteps))).sort((a, b) => a - b);
       if (suggestedSteps.length > 0) setManualSteps(suggestedSteps);
       const firstReviewEvent = reviewEvents[0];
-      setImpactHorizon(firstReviewEvent.horizon);
-      setImpactMateriality(firstReviewEvent.materiality);
-      setImpactCertainty(firstReviewEvent.confidence);
+      setImpactHorizon(firstReviewEvent.impactAssessment.horizon);
+      setImpactMateriality(firstReviewEvent.impactAssessment.materiality);
+      setImpactCertainty(firstReviewEvent.impactAssessment.certainty);
     }
   };
 
@@ -299,7 +303,7 @@ export default function Step0RefreshGate() {
                   Detected events
                 </h3>
                 <p className="mt-1 text-sm leading-6 text-zinc-500">
-                  Accept the events you want Step 0 to use. Review-required events can still be adjusted in the manual override panel.
+                  Accept events after reviewing their DCF impact. Known long-term effects route automatically; uncertain or unquantified effects open manual parameters.
                 </p>
               </div>
               <button
@@ -616,6 +620,16 @@ function SelectField({
   );
 }
 
+function eventNeedsManualParameters(event: Step0DetectedEvent): boolean {
+  return (
+    event.impactAssessment.action === "manual_parameters" ||
+    event.impactAssessment.quantifiability === "unknown" ||
+    event.impactAssessment.horizon === "unknown" ||
+    event.impactAssessment.materiality === "unknown" ||
+    event.impactAssessment.certainty === "low"
+  );
+}
+
 function DetectedEventCard({
   event,
   accepted,
@@ -625,6 +639,14 @@ function DetectedEventCard({
   accepted: boolean;
   onToggle: () => void;
 }) {
+  const assessment = event.impactAssessment;
+  const actionTone =
+    assessment.action === "auto_rerun"
+      ? "bg-emerald-500/15 text-emerald-300"
+      : assessment.action === "manual_parameters"
+        ? "bg-amber-500/15 text-amber-300"
+        : "bg-zinc-800 text-zinc-300";
+
   return (
     <button
       onClick={onToggle}
@@ -653,26 +675,55 @@ function DetectedEventCard({
                 Review
               </span>
             )}
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${actionTone}`}>
+              {assessment.action === "auto_rerun"
+                ? "Auto route"
+                : assessment.action === "manual_parameters"
+                  ? "Manual parameters"
+                  : "Monitor"}
+            </span>
           </span>
           <span className="mt-1 block text-xs leading-5 text-zinc-500">{event.summary}</span>
-          <span className="mt-2 block text-xs leading-5 text-zinc-400">{event.rationale}</span>
+          <span className="mt-2 block text-xs leading-5 text-zinc-400">{assessment.assessmentSummary}</span>
           <span className="mt-3 flex flex-wrap gap-2 text-xs">
             <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-zinc-300">
               {event.changeType.replace(/_/g, " ")}
             </span>
             <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-zinc-300">
-              Horizon: {event.horizon.replace(/_/g, " ")}
+              Horizon: {assessment.horizon.replace(/_/g, " ")}
             </span>
             <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-zinc-300">
-              Materiality: {event.materiality}
+              Materiality: {assessment.materiality}
             </span>
             <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-zinc-300">
-              Confidence: {event.confidence}
+              Certainty: {assessment.certainty}
+            </span>
+            <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-zinc-300">
+              Quantifiability: {assessment.quantifiability}
             </span>
             <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-blue-300">
               Rerun: {stepText(event.suggestedSteps)}
             </span>
           </span>
+          <span className="mt-3 block text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            DCF drivers
+          </span>
+          <span className="mt-2 flex flex-wrap gap-2 text-xs">
+            {assessment.dcfDrivers.map((driver) => (
+              <span key={driver} className="rounded-full bg-zinc-950 px-2.5 py-1 text-zinc-300">
+                {driver.replace(/_/g, " ")}
+              </span>
+            ))}
+          </span>
+          {assessment.parameterHints.length > 0 && (
+            <span className="mt-3 block space-y-1.5">
+              {assessment.parameterHints.slice(0, 2).map((hint) => (
+                <span key={hint} className="block rounded-lg bg-zinc-950 px-3 py-2 text-xs leading-5 text-zinc-400">
+                  {hint}
+                </span>
+              ))}
+            </span>
+          )}
           {event.url && (
             <span className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-blue-300">
               Source <ExternalLink size={12} />
