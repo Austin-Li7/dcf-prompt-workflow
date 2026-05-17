@@ -11,7 +11,6 @@ import {
   History,
   Loader2,
   RefreshCcw,
-  RotateCcw,
   SlidersHorizontal,
 } from "lucide-react";
 import StepShell from "./StepShell";
@@ -140,14 +139,6 @@ export default function Step0RefreshGate() {
     () => detectedEvents.filter((event) => acceptedEventIds.includes(event.id)),
     [acceptedEventIds, detectedEvents],
   );
-
-  const toggleChange = (changeType: Step0ChangeType) => {
-    setSelectedChanges((current) =>
-      current.includes(changeType)
-        ? current.filter((item) => item !== changeType)
-        : [...current, changeType],
-    );
-  };
 
   const toggleAcceptedEvent = (eventId: string) => {
     setAcceptedEventIds((current) =>
@@ -540,60 +531,6 @@ export default function Step0RefreshGate() {
             </div>
           </section>
         )}
-
-        <section>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-300">
-                Change checklist
-              </h3>
-              <p className="mt-1 text-sm text-zinc-500">
-                Leave all unchecked when there are no new filings, news, market, or macro updates.
-              </p>
-            </div>
-            <button
-              onClick={() => setSelectedChanges([])}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
-            >
-              <RotateCcw size={14} />
-              Clear
-            </button>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            {STEP0_RULES.map((rule) => {
-              const selected = selectedChanges.includes(rule.changeType);
-              return (
-                <button
-                  key={rule.changeType}
-                  onClick={() => toggleChange(rule.changeType)}
-                  className={`rounded-lg border p-4 text-left transition-colors ${
-                    selected
-                      ? "border-blue-500/60 bg-blue-950/30"
-                      : "border-zinc-800 bg-zinc-950 hover:border-zinc-700"
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <span
-                      className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border ${
-                        selected ? "border-blue-400 bg-blue-500 text-white" : "border-zinc-600"
-                      }`}
-                    >
-                      {selected ? "✓" : ""}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-semibold text-zinc-100">{rule.label}</span>
-                      <span className="mt-1 block text-xs leading-5 text-zinc-500">{rule.description}</span>
-                      <span className="mt-2 block text-xs font-mono text-blue-300">
-                        Rerun: {stepText(rule.rerunSteps)}
-                      </span>
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </section>
 
         <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
