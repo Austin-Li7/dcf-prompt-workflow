@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   Archive,
   ArrowRight,
@@ -77,8 +77,10 @@ export default function Step0RefreshGate() {
   const [impactMateriality, setImpactMateriality] = useState<Step0ImpactMateriality>("unknown");
   const [impactCertainty, setImpactCertainty] = useState<Step0ImpactCertainty>("low");
   const [manualSteps, setManualSteps] = useState<number[]>([5, 6, 8]);
+  const [manualStepScores, setManualStepScores] = useState<Record<number, number>>(() => buildDefaultStepScores([5, 6, 8]));
   const [isDetecting, setIsDetecting] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
+  const [detectionNote, setDetectionNote] = useState<string | null>(null);
   const [detectedEvents, setDetectedEvents] = useState<Step0DetectedEvent[]>([]);
   const [acceptedEventIds, setAcceptedEventIds] = useState<string[]>([]);
   const [customTitle, setCustomTitle] = useState("");
@@ -88,6 +90,7 @@ export default function Step0RefreshGate() {
   const [customMateriality, setCustomMateriality] = useState<Step0ImpactMateriality>("unknown");
   const [customCertainty, setCustomCertainty] = useState<Step0ImpactCertainty>("low");
   const [customQuantifiability, setCustomQuantifiability] = useState<Step0ImpactQuantifiability>("unknown");
+  const [cacheReady, setCacheReady] = useState(false);
 
   const manualOverride: Step0ManualOverride = useMemo(
     () => ({
@@ -113,16 +116,24 @@ export default function Step0RefreshGate() {
     getStep0CacheSnapshot,
     getStep0ServerSnapshot,
   );
+
+  useEffect(() => {
+    setCacheReady(true);
+  }, []);
+
   const cachedRuns = useMemo(() => {
     void cacheSnapshot;
     void cacheRefreshKey;
+    if (!cacheReady) return [];
     return getCachedRuns();
-  }, [cacheRefreshKey, cacheSnapshot]);
+  }, [cacheReady, cacheRefreshKey, cacheSnapshot]);
   const cachedRun = useMemo(() => {
     void cacheSnapshot;
     void cacheRefreshKey;
+    if (!cacheReady) return null;
     return findCachedRun(checked ? checkedLookup : state.profile.ticker || state.profile.companyName);
   }, [
+    cacheReady,
     cacheRefreshKey,
     cacheSnapshot,
     checked,
@@ -148,12 +159,13 @@ export default function Step0RefreshGate() {
     );
   };
 
-  const detectUpdates = async (tickerInput: string) => {
+  const detectUpdates = async (tickerInput: string, sinceIso?: string): Promise<Step0DetectedEvent[]> => {
     const ticker = tickerInput.trim();
-    if (!ticker) return;
+    if (!ticker) return [];
 
     setIsDetecting(true);
     setDetectError(null);
+    setDetectionNote(null);
 
     try {
       const response = await fetch(`/api/step0-detect?ticker=${encodeURIComponent(ticker)}`);
@@ -163,28 +175,36 @@ export default function Step0RefreshGate() {
         throw new Error(data.error || `Detection failed (${response.status})`);
       }
 
-      setDetectedEvents(data.events);
+      const newEvents = sinceIso ? filterEventsSince(data.events, sinceIso) : data.events;
+      setDetectedEvents(newEvents);
       setAcceptedEventIds(
-        data.events
+        newEvents
           .filter((event) => event.impactAssessment.action === "auto_rerun")
           .map((event) => event.id),
       );
       if (data.ticker) setLookup(data.ticker);
+      if (sinceIso && newEvents.length === 0) {
+        setDetectionNote(`No new detected events since the last saved run (${formatDate(sinceIso)}).`);
+      }
+      return newEvents;
     } catch (err: unknown) {
       setDetectError(err instanceof Error ? err.message : "Detection failed.");
+      return [];
     } finally {
       setIsDetecting(false);
     }
   };
 
   const handleDetectUpdates = async () => {
-    const ticker = lookup.trim() || state.profile.ticker || state.profile.companyName;
-    if (!ticker.trim()) {
+    const userLookup = lookup.trim() || state.profile.ticker || state.profile.companyName;
+    if (!userLookup.trim()) {
       setDetectError("Enter a ticker or company first.");
       return;
     }
 
-    await detectUpdates(ticker);
+    const matchedRun = findCachedRun(userLookup);
+    const ticker = matchedRun?.ticker || userLookup;
+    await detectUpdates(ticker, matchedRun?.updatedAt);
   };
 
   const handleCheckDatabaseAndUpdates = async () => {
@@ -200,10 +220,14 @@ export default function Step0RefreshGate() {
     setCacheRefreshKey((value) => value + 1);
     setDetectedEvents([]);
     setAcceptedEventIds([]);
+    setSelectedChanges([]);
+    setManualOverrideEnabled(false);
+    setManualStepScores(buildDefaultStepScores([5, 6, 8]));
+    setDetectionNote(null);
     setDetectError(null);
 
     if (!matchedRun) return;
-    await detectUpdates(currentLookup);
+    await detectUpdates(matchedRun.ticker, matchedRun.updatedAt);
   };
 
   const acceptSelectedEvents = () => {
@@ -222,6 +246,7 @@ export default function Step0RefreshGate() {
       );
       const suggestedSteps = Array.from(new Set(reviewEvents.flatMap((event) => event.suggestedSteps))).sort((a, b) => a - b);
       if (suggestedSteps.length > 0) setManualSteps(suggestedSteps);
+      setManualStepScores(mergeStepImpactScores(reviewEvents));
       const firstReviewEvent = reviewEvents[0];
       setImpactHorizon(firstReviewEvent.impactAssessment.horizon);
       setImpactMateriality(firstReviewEvent.impactAssessment.materiality);
@@ -240,25 +265,24 @@ export default function Step0RefreshGate() {
     const event = buildCustomEvent({
       title: title || "User-provided event",
       summary: summary || title,
-      changeType: customChangeType,
-      horizon: customHorizon,
-      materiality: customMateriality,
-      certainty: customCertainty,
-      quantifiability: customQuantifiability,
+      fallbackChangeType: customChangeType,
+      fallbackHorizon: customHorizon,
+      fallbackMateriality: customMateriality,
+      fallbackCertainty: customCertainty,
+      fallbackQuantifiability: customQuantifiability,
     });
 
     setDetectedEvents((current) => [event, ...current]);
     setAcceptedEventIds((current) => [...current, event.id]);
     setDetectError(null);
 
-    if (eventNeedsManualParameters(event)) {
-      setManualOverrideEnabled(true);
-      setEventSummary(event.impactAssessment.assessmentSummary);
-      setManualSteps(event.suggestedSteps);
-      setImpactHorizon(event.impactAssessment.horizon);
-      setImpactMateriality(event.impactAssessment.materiality);
-      setImpactCertainty(event.impactAssessment.certainty);
-    }
+    setManualOverrideEnabled(true);
+    setEventSummary(buildManualOverrideSummary(event));
+    setManualSteps(event.suggestedSteps);
+    setManualStepScores(buildStepImpactScores(event));
+    setImpactHorizon(event.impactAssessment.horizon);
+    setImpactMateriality(event.impactAssessment.materiality);
+    setImpactCertainty(event.impactAssessment.certainty);
 
     setCustomTitle("");
     setCustomSummary("");
@@ -270,6 +294,10 @@ export default function Step0RefreshGate() {
         ? current.filter((item) => item !== step)
         : [...current, step].sort((a, b) => a - b),
     );
+  };
+
+  const updateManualStepScore = (step: number, score: number) => {
+    setManualStepScores((current) => ({ ...current, [step]: score }));
   };
 
   const applyCachedState = () => {
@@ -506,6 +534,34 @@ export default function Step0RefreshGate() {
           </section>
         )}
 
+        {detectionNote && detectedEvents.length === 0 && !detectError && (
+          <section className="rounded-lg border border-emerald-800/50 bg-emerald-950/10 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-300">
+                  <CheckCircle2 size={16} />
+                  No new updates detected
+                </h3>
+                <p className="mt-1 text-sm leading-6 text-zinc-300">
+                  {detectionNote} You can reuse the cached result, or add your own event before deciding.
+                </p>
+              </div>
+              {cachedRun && (
+                <button
+                  onClick={() => {
+                    applyCachedState();
+                    dispatch({ type: "SET_STEP", payload: 8 });
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-500"
+                >
+                  <CheckCircle2 size={16} />
+                  Use Cached Result
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
         {cachedRun && (
           <section className="rounded-lg border border-emerald-800/50 bg-emerald-950/10 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -541,7 +597,7 @@ export default function Step0RefreshGate() {
               </h3>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-zinc-500">
                 Use this when a news event may matter, but the duration or financial impact is uncertain.
-                Filing-driven events still keep their mandatory rerun steps.
+                User-added events are summarized here with source verification, impact size, DCF drivers, and selected rerun steps.
               </p>
             </div>
             <button
@@ -611,30 +667,68 @@ export default function Step0RefreshGate() {
             </div>
 
             <div>
-              <p className="mb-2 text-sm font-medium text-zinc-300">Manual rerun steps</p>
-              <div className="grid gap-2 sm:grid-cols-2">
+              <p className="mb-2 text-sm font-medium text-zinc-300">Step-level impact scores</p>
+              <div className="space-y-2">
                 {Object.entries(STEP_LABELS).map(([step, label]) => {
                   const stepNumber = Number(step);
                   const selected = manualSteps.includes(stepNumber);
+                  const score = manualStepScores[stepNumber] ?? 0;
                   return (
-                    <button
+                    <div
                       key={step}
-                      disabled={!manualOverrideEnabled}
-                      onClick={() => toggleManualStep(stepNumber)}
-                      className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed ${
+                      className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
                         selected
                           ? "border-blue-500/60 bg-blue-950/30 text-blue-200"
-                          : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700"
+                          : "border-zinc-800 bg-zinc-900 text-zinc-400"
                       }`}
                     >
-                      Step {step}: {label}
-                    </button>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <label className="inline-flex min-w-[220px] flex-1 items-center gap-2">
+                          <input
+                            type="checkbox"
+                            disabled={!manualOverrideEnabled}
+                            checked={selected}
+                            onChange={() => toggleManualStep(stepNumber)}
+                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-blue-500 disabled:cursor-not-allowed"
+                          />
+                          <span className="font-medium">
+                            Step {step}: {label}
+                          </span>
+                        </label>
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${stepImpactTone(score)}`}>
+                          Impact {score}/100
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-2 md:grid-cols-[1fr_8rem]">
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={5}
+                          disabled={!manualOverrideEnabled}
+                          value={score}
+                          onChange={(event) => updateManualStepScore(stepNumber, Number(event.target.value))}
+                          className="w-full disabled:cursor-not-allowed"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          disabled={!manualOverrideEnabled}
+                          value={score}
+                          onChange={(event) => updateManualStepScore(stepNumber, clampScore(Number(event.target.value)))}
+                          className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-right text-xs text-zinc-100 disabled:cursor-not-allowed"
+                        />
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-zinc-500">
+                        {stepImpactExplanation(stepNumber, score, selected)}
+                      </p>
+                    </div>
                   );
                 })}
               </div>
               <p className="mt-2 text-xs leading-5 text-zinc-500">
-                Default for uncertain product/news events is Step 5, Step 6, and Step 8: update assumptions,
-                summarize uncertainty, and refresh valuation without rewriting the company architecture.
+                Steps above the impact threshold are pre-selected automatically, but you can uncheck any step or adjust the score when the impact is uncertain.
               </p>
             </div>
           </div>
@@ -748,23 +842,50 @@ function eventNeedsManualParameters(event: Step0DetectedEvent): boolean {
   );
 }
 
+function filterEventsSince(events: Step0DetectedEvent[], sinceIso: string): Step0DetectedEvent[] {
+  const since = new Date(sinceIso).getTime();
+  if (Number.isNaN(since)) return events;
+
+  return events.filter((event) => {
+    const timestamp = event.eventDate ? new Date(event.eventDate).getTime() : Number.NaN;
+    if (Number.isNaN(timestamp)) return true;
+    if (event.source === "earnings" && timestamp > Date.now()) return false;
+    return timestamp > since;
+  });
+}
+
 function buildCustomEvent({
   title,
   summary,
-  changeType,
-  horizon,
-  materiality,
-  certainty,
-  quantifiability,
+  fallbackChangeType,
+  fallbackHorizon,
+  fallbackMateriality,
+  fallbackCertainty,
+  fallbackQuantifiability,
 }: {
   title: string;
   summary: string;
-  changeType: Step0ChangeType;
-  horizon: Step0ImpactHorizon;
-  materiality: Step0ImpactMateriality;
-  certainty: Step0ImpactCertainty;
-  quantifiability: Step0ImpactQuantifiability;
+  fallbackChangeType: Step0ChangeType;
+  fallbackHorizon: Step0ImpactHorizon;
+  fallbackMateriality: Step0ImpactMateriality;
+  fallbackCertainty: Step0ImpactCertainty;
+  fallbackQuantifiability: Step0ImpactQuantifiability;
 }): Step0DetectedEvent {
+  const inferred = inferCustomEventImpact({
+    title,
+    summary,
+    fallbackChangeType,
+    fallbackHorizon,
+    fallbackMateriality,
+    fallbackCertainty,
+    fallbackQuantifiability,
+  });
+  const { changeType, horizon, materiality, certainty, quantifiability, verification, sourceUrl } = inferred;
+  const verificationScore = scoreCustomEventVerification({
+    text: `${title} ${summary}`.toLowerCase(),
+    sourceUrl,
+    certainty,
+  });
   const suggestedSteps = getSuggestedStepsForChange(changeType, horizon, materiality, quantifiability);
   const action =
     horizon === "long_term" &&
@@ -780,18 +901,19 @@ function buildCustomEvent({
     source: "user",
     changeType,
     title,
-    summary,
+    summary: `${summary} Verification: ${verification}. Verification score: ${verificationScore}/100.`,
     detectedAt: new Date().toISOString(),
     eventDate: null,
-    url: null,
+    url: sourceUrl,
     confidence: certainty,
     horizon,
     materiality,
     suggestedSteps,
     requiresReview: action !== "auto_rerun",
+    verificationScore,
     rationale: action === "auto_rerun"
-      ? "User-provided event is marked as long-term, material, high-certainty, and quantifiable enough to route automatically."
-      : "User-provided event needs parameter review because impact horizon, magnitude, certainty, or quantifiability is not fully established.",
+      ? `${verification} Verification score: ${verificationScore}/100. The event appears long-term, material, high-certainty, and quantifiable enough to route automatically.`
+      : `${verification} Verification score: ${verificationScore}/100. Parameter review is needed because impact horizon, magnitude, certainty, or quantifiability is not fully established.`,
     impactAssessment: {
       horizon,
       materiality,
@@ -801,10 +923,288 @@ function buildCustomEvent({
       dcfDrivers: getDcfDriversForChange(changeType),
       parameterHints: action === "auto_rerun"
         ? ["Use the user-provided evidence as an explicit input when rerunning the affected steps."]
-        : ["Set a scenario or manual assumption before changing the base-case DCF.", "If the event later becomes quantifiable, update Step 0 and rerun the affected steps."],
-      assessmentSummary: `${summary} Impact is ${quantifiability}, ${certainty}-certainty, and ${horizon.replace(/_/g, " ")} with ${materiality} materiality.`,
+        : [
+            "Set a scenario or manual assumption before changing the base-case DCF.",
+            "Verify the source and quantify revenue, margin, WACC, or terminal-growth impact before changing the base case.",
+          ],
+      assessmentSummary: `${verification} Verification score: ${verificationScore}/100. Estimated DCF impact is ${materiality}, ${certainty}-certainty, ${quantifiability}, and ${horizon.replace(/_/g, " ")}.`,
     },
   };
+}
+
+function inferCustomEventImpact({
+  title,
+  summary,
+  fallbackChangeType,
+  fallbackHorizon,
+  fallbackMateriality,
+  fallbackCertainty,
+  fallbackQuantifiability,
+}: {
+  title: string;
+  summary: string;
+  fallbackChangeType: Step0ChangeType;
+  fallbackHorizon: Step0ImpactHorizon;
+  fallbackMateriality: Step0ImpactMateriality;
+  fallbackCertainty: Step0ImpactCertainty;
+  fallbackQuantifiability: Step0ImpactQuantifiability;
+}): {
+  changeType: Step0ChangeType;
+  horizon: Step0ImpactHorizon;
+  materiality: Step0ImpactMateriality;
+  certainty: Step0ImpactCertainty;
+  quantifiability: Step0ImpactQuantifiability;
+  verification: string;
+  sourceUrl: string | null;
+} {
+  const text = `${title} ${summary}`.toLowerCase();
+  const sourceUrl = extractFirstUrl(`${title} ${summary}`);
+  const inferredChangeType = inferChangeTypeFromText(text) ?? fallbackChangeType;
+  const verification = buildVerificationNote(text, sourceUrl);
+  const inferredHorizon = inferHorizonFromText(text, fallbackHorizon);
+  const inferredMateriality = inferMaterialityFromText(text, inferredChangeType, fallbackMateriality);
+  const inferredCertainty = inferCertaintyFromText(text, sourceUrl, fallbackCertainty);
+  const inferredQuantifiability = inferQuantifiabilityFromText(text, fallbackQuantifiability);
+
+  return {
+    changeType: inferredChangeType,
+    horizon: inferredHorizon,
+    materiality: inferredMateriality,
+    certainty: inferredCertainty,
+    quantifiability: inferredQuantifiability,
+    verification,
+    sourceUrl,
+  };
+}
+
+function inferChangeTypeFromText(text: string): Step0ChangeType | null {
+  if (matches(text, ["10-k", "annual report"])) return "new_10k";
+  if (matches(text, ["10-q", "quarterly report"])) return "new_10q";
+  if (matches(text, ["earnings", "guidance", "quarter results", "revenue miss", "revenue beat"])) return "earnings_release";
+  if (matches(text, ["acquire", "acquisition", "merger", "divest", "spinoff", "spin off"])) return "mna_or_divestiture";
+  if (matches(text, ["launch", "unveil", "release", "product", "ai", "chip", "platform", "technology"])) return "new_product_or_technology";
+  if (matches(text, ["rival", "competitor", "market share", "price war", "pricing pressure"])) return "competitive_shift";
+  if (matches(text, ["lawsuit", "regulator", "antitrust", "ban", "fine", "settlement", "probe"])) return "regulation_or_litigation";
+  if (matches(text, ["ceo", "cfo", "resigns", "appoints", "management", "activist"])) return "management_change";
+  if (matches(text, ["stock price", "share price", "beta", "debt yield", "buyback", "interest rate"])) return "market_data_change";
+  if (matches(text, ["inflation", "rates", "fx", "tariff", "recession", "consumer demand"])) return "macro_change";
+  return null;
+}
+
+function inferHorizonFromText(text: string, fallback: Step0ImpactHorizon): Step0ImpactHorizon {
+  if (matches(text, ["next quarter", "this quarter", "near term", "short term", "temporary"])) return "next_quarter";
+  if (matches(text, ["2026", "2027", "one year", "two year", "1-2", "12 month", "24 month"])) return "one_to_two_years";
+  if (matches(text, ["long term", "multi year", "platform", "structural", "permanent", "durable"])) return "long_term";
+  return fallback;
+}
+
+function inferMaterialityFromText(
+  text: string,
+  changeType: Step0ChangeType,
+  fallback: Step0ImpactMateriality,
+): Step0ImpactMateriality {
+  if (matches(text, ["material", "major", "significant", "billion", "guidance", "restructure", "acquisition"])) return "high";
+  if (matches(text, ["pilot", "small", "minor", "limited", "immaterial"])) return "low";
+  if (["new_10k", "mna_or_divestiture"].includes(changeType)) return "high";
+  if (fallback !== "unknown") return fallback;
+  return ["new_product_or_technology", "competitive_shift", "regulation_or_litigation"].includes(changeType)
+    ? "medium"
+    : "unknown";
+}
+
+function inferCertaintyFromText(
+  text: string,
+  sourceUrl: string | null,
+  fallback: Step0ImpactCertainty,
+): Step0ImpactCertainty {
+  if (matches(text, ["rumor", "unconfirmed", "could", "may", "might", "speculation"])) return "low";
+  if (sourceUrl || matches(text, ["announced", "confirmed", "filed", "reported", "official", "press release"])) return "high";
+  return fallback === "low" ? "medium" : fallback;
+}
+
+function inferQuantifiabilityFromText(
+  text: string,
+  fallback: Step0ImpactQuantifiability,
+): Step0ImpactQuantifiability {
+  if (/\$?\d+(\.\d+)?\s?(billion|million|bn|m|%|percent)/i.test(text)) return "known";
+  if (matches(text, ["guidance", "target", "forecast", "expected", "estimate"])) return "estimable";
+  return fallback;
+}
+
+function buildVerificationNote(text: string, sourceUrl: string | null): string {
+  if (sourceUrl || matches(text, ["official", "press release", "filed", "sec", "10-k", "10-q"])) {
+    return "Source verification is strong based on an official filing, source link, or official wording";
+  }
+  if (matches(text, ["reported", "according to", "news", "bloomberg", "reuters", "wsj", "cnbc"])) {
+    return "Source verification is medium based on reported news language";
+  }
+  if (matches(text, ["rumor", "unconfirmed", "speculation"])) {
+    return "Source verification is weak; verify the event before treating it as a base-case input";
+  }
+  return "Source verification is unclear; confirm with an official filing, company release, or reputable news source";
+}
+
+function scoreCustomEventVerification({
+  text,
+  sourceUrl,
+  certainty,
+}: {
+  text: string;
+  sourceUrl: string | null;
+  certainty: Step0ImpactCertainty;
+}): number {
+  let score = 55;
+
+  if (sourceUrl) score += 25;
+  if (matches(text, ["official", "press release", "filed", "sec", "10-k", "10-q"])) score += 30;
+  if (matches(text, ["reuters", "bloomberg", "wsj", "cnbc", "reported", "according to"])) score += 20;
+  if (matches(text, ["satirical", "fictional", "parody"])) score -= 45;
+  if (matches(text, ["rumor", "unconfirmed", "speculation"])) score -= 12;
+  if (matches(text, ["could", "may", "might"])) score -= 5;
+  if (certainty === "high") score += 10;
+  if (certainty === "low") score -= 5;
+
+  return Math.max(5, Math.min(100, score));
+}
+
+function getEventVerificationScore(event: Step0DetectedEvent): number {
+  if (typeof event.verificationScore === "number") return event.verificationScore;
+  if (event.source === "sec") return 98;
+  if (event.url && event.confidence === "high") return 88;
+  if (event.url) return 78;
+  if (event.confidence === "high") return 75;
+  if (event.confidence === "medium") return 60;
+  return 40;
+}
+
+function verificationTone(score: number): string {
+  if (score >= 80) return "bg-emerald-500/15 text-emerald-300";
+  if (score >= 55) return "bg-amber-500/15 text-amber-300";
+  return "bg-red-500/15 text-red-300";
+}
+
+function extractFirstUrl(value: string): string | null {
+  return value.match(/https?:\/\/[^\s)]+/i)?.[0] ?? null;
+}
+
+function matches(text: string, keywords: string[]): boolean {
+  return keywords.some((keyword) => {
+    if (keyword.includes(" ")) return text.includes(keyword);
+    return new RegExp(`\\b${escapeRegExp(keyword)}\\b`, "i").test(text);
+  });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildManualOverrideSummary(event: Step0DetectedEvent): string {
+  const assessment = event.impactAssessment;
+  const verificationScore = getEventVerificationScore(event);
+  const stepScores = buildStepImpactScores(event);
+  const stepScoreText = Object.entries(STEP_LABELS)
+    .map(([step, label]) => `Step ${step} ${label}: ${stepScores[Number(step)]}/100`)
+    .join("; ");
+  return [
+    `Event: ${event.title}`,
+    `Verification score: ${verificationScore}/100.`,
+    `Verification: ${event.rationale}`,
+    `Impact size: ${assessment.materiality}; certainty: ${assessment.certainty}; quantifiability: ${assessment.quantifiability}; horizon: ${assessment.horizon.replace(/_/g, " ")}.`,
+    `Affected steps selected: ${stepText(event.suggestedSteps)}.`,
+    `Step impact scores: ${stepScoreText}.`,
+    `DCF drivers: ${assessment.dcfDrivers.map((driver) => driver.replace(/_/g, " ")).join(", ")}.`,
+    `Suggested handling: ${assessment.assessmentSummary}`,
+  ].join("\n");
+}
+
+function buildDefaultStepScores(selectedSteps: number[]): Record<number, number> {
+  return Object.keys(STEP_LABELS).reduce<Record<number, number>>((scores, step) => {
+    const stepNumber = Number(step);
+    scores[stepNumber] = selectedSteps.includes(stepNumber) ? 60 : 10;
+    return scores;
+  }, {});
+}
+
+function mergeStepImpactScores(events: Step0DetectedEvent[]): Record<number, number> {
+  return events.reduce<Record<number, number>>((merged, event) => {
+    const scores = buildStepImpactScores(event);
+    Object.entries(scores).forEach(([step, score]) => {
+      const stepNumber = Number(step);
+      merged[stepNumber] = Math.max(merged[stepNumber] ?? 0, score);
+    });
+    return merged;
+  }, buildDefaultStepScores([]));
+}
+
+function buildStepImpactScores(event: Step0DetectedEvent): Record<number, number> {
+  const assessment = event.impactAssessment;
+  const materialityBase: Record<Step0ImpactMateriality, number> = {
+    high: 85,
+    medium: 65,
+    low: 35,
+    unknown: 55,
+  };
+  const certaintyAdjustment: Record<Step0ImpactCertainty, number> = {
+    high: 10,
+    medium: 0,
+    low: -10,
+  };
+  const quantifiabilityAdjustment: Record<Step0ImpactQuantifiability, number> = {
+    known: 8,
+    estimable: 0,
+    unknown: -5,
+  };
+  const base = materialityBase[assessment.materiality] +
+    certaintyAdjustment[assessment.certainty] +
+    quantifiabilityAdjustment[assessment.quantifiability];
+
+  return Object.keys(STEP_LABELS).reduce<Record<number, number>>((scores, step) => {
+    const stepNumber = Number(step);
+    if (!event.suggestedSteps.includes(stepNumber)) {
+      scores[stepNumber] = getIndirectStepImpact(event, stepNumber);
+      return scores;
+    }
+    scores[stepNumber] = clampScore(base + getStepSpecificImpactAdjustment(event, stepNumber));
+    return scores;
+  }, {});
+}
+
+function getIndirectStepImpact(event: Step0DetectedEvent, step: number): number {
+  if (event.changeType === "new_10k") return 55;
+  if (event.changeType === "market_data_change" && step < 7) return 10;
+  if (event.changeType === "new_product_or_technology" && step === 1) return 20;
+  if (event.changeType === "competitive_shift" && step === 7) return 25;
+  return 10;
+}
+
+function getStepSpecificImpactAdjustment(event: Step0DetectedEvent, step: number): number {
+  if (event.changeType === "new_10k" && step <= 2) return 10;
+  if (event.changeType === "new_10q" && step === 2) return 12;
+  if (event.changeType === "new_product_or_technology" && (step === 3 || step === 4)) return 8;
+  if (event.changeType === "competitive_shift" && step === 3) return 12;
+  if (event.changeType === "market_data_change" && (step === 7 || step === 8)) return 15;
+  if (step === 6) return -5;
+  return 0;
+}
+
+function clampScore(value: number): number {
+  if (Number.isNaN(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function stepImpactTone(score: number): string {
+  if (score >= 75) return "bg-red-500/15 text-red-300";
+  if (score >= 50) return "bg-amber-500/15 text-amber-300";
+  if (score >= 25) return "bg-blue-500/15 text-blue-300";
+  return "bg-zinc-800 text-zinc-400";
+}
+
+function stepImpactExplanation(step: number, score: number, selected: boolean): string {
+  const action = selected ? "selected for rerun" : "not selected";
+  if (score >= 75) return `High impact: this step is ${action} because the event can materially change its inputs.`;
+  if (score >= 50) return `Medium impact: this step is ${action}; review before deciding whether to rerun.`;
+  if (score >= 25) return `Low to moderate impact: this step is ${action}, usually optional unless your evidence is stronger.`;
+  return `Minimal impact: this step is ${action} unless you manually decide the event changes this area.`;
 }
 
 function getSuggestedStepsForChange(
@@ -856,6 +1256,7 @@ function DetectedEventCard({
   onToggle: () => void;
 }) {
   const assessment = event.impactAssessment;
+  const verificationScore = getEventVerificationScore(event);
   const actionTone =
     assessment.action === "auto_rerun"
       ? "bg-emerald-500/15 text-emerald-300"
@@ -897,6 +1298,9 @@ function DetectedEventCard({
                 : assessment.action === "manual_parameters"
                   ? "Manual parameters"
                   : "Monitor"}
+            </span>
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${verificationTone(verificationScore)}`}>
+              Truth score {verificationScore}/100
             </span>
           </span>
           <span className="mt-1 block text-xs leading-5 text-zinc-500">{event.summary}</span>

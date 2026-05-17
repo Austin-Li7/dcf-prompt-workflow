@@ -108,6 +108,7 @@ export interface Step0DetectedEvent {
   suggestedSteps: number[];
   requiresReview: boolean;
   rationale: string;
+  verificationScore?: number;
   impactAssessment: Step0ImpactAssessment;
 }
 
@@ -241,6 +242,38 @@ function normalizeTicker(value: string): string {
   return value.trim().toUpperCase();
 }
 
+function normalizeCompanyLookup(value: string): string {
+  return value
+    .trim()
+    .toUpperCase()
+    .replace(/&/g, " AND ")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(
+      /\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|LTD|LIMITED|PLC|LLC|LP|THE|CLASS|CL|COMMON|STOCK)\b/g,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function lookupMatchesRun(lookup: string, run: CachedCompanyRun): boolean {
+  const tickerLookup = normalizeTicker(lookup);
+  const companyLookup = normalizeCompanyLookup(lookup);
+  const runTicker = normalizeTicker(run.ticker);
+  const runCompany = normalizeCompanyLookup(run.companyName);
+
+  if (!tickerLookup && !companyLookup) return false;
+  if (runTicker === tickerLookup) return true;
+  if (runCompany === companyLookup) return true;
+
+  return Boolean(
+    companyLookup &&
+      runCompany &&
+      companyLookup.length >= 3 &&
+      (runCompany.startsWith(companyLookup) || companyLookup.startsWith(runCompany)),
+  );
+}
+
 function hasStepOutput(state: CFPState): boolean {
   return Boolean(
     state.profile.rawAnalysisMarkdown ||
@@ -288,13 +321,7 @@ export function getCachedRuns(): CachedCompanyRun[] {
 }
 
 export function findCachedRun(tickerOrCompany: string): CachedCompanyRun | null {
-  const lookup = normalizeTicker(tickerOrCompany);
-  if (!lookup) return null;
-  return (
-    getCachedRuns().find(
-      (run) => normalizeTicker(run.ticker) === lookup || normalizeTicker(run.companyName) === lookup,
-    ) ?? null
-  );
+  return getCachedRuns().find((run) => lookupMatchesRun(tickerOrCompany, run)) ?? null;
 }
 
 export function buildCachedRunFromState(state: CFPState): CachedCompanyRun | null {

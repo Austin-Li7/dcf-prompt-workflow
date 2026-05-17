@@ -236,6 +236,24 @@ function normalizeStep2StructuredPayload(payload: unknown): unknown {
 
   const p = { ...(payload as Record<string, unknown>), schema_version: "v5.5" };
 
+  if (Array.isArray(p.sources)) {
+    p.sources = (p.sources as Record<string, unknown>[]).map((source) => {
+      const locator = typeof source.locator === "string" ? source.locator.trim() : source.locator;
+      const excerpt = typeof source.excerpt === "string" ? source.excerpt.trim() : source.excerpt;
+
+      return {
+        ...source,
+        locator: locator === "" ? null : locator,
+        excerpt:
+          typeof excerpt === "string" && excerpt.length > 220
+            ? `${excerpt.slice(0, 217)}...`
+            : excerpt === ""
+              ? null
+              : excerpt,
+      };
+    });
+  }
+
   // Recover rows with missing/empty mapped_from_step1_ids instead of hard-failing.
   if (Array.isArray(p.rows)) {
     let missingMappingCount = 0;

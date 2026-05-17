@@ -24,6 +24,7 @@ import {
   getStep5StructuredResults,
 } from "@/lib/aggregate-forecast";
 import {
+  buildCompanyAnalysisSave,
   saveCompanyAnalysis,
   downloadSave,
 } from "@/lib/company-saves";
@@ -148,6 +149,7 @@ export default function Step8Valuation() {
       const record = await saveCompanyAnalysis(state, snapshot);
       setSavedRecord(record);
     } catch (err) {
+      setSavedRecord(buildCompanyAnalysisSave(state, snapshot));
       setSaveError(err instanceof Error ? err.message : "Save failed.");
     } finally {
       setIsSaving(false);

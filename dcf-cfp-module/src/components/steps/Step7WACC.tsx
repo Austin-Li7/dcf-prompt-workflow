@@ -141,6 +141,21 @@ export default function Step7WACC() {
     }
   }, [dispatch, tickerInput]);
 
+  const updateMarketDataUsdM = (field: "marketCap" | "totalDebt" | "interestExpense", valueUsdM: number) => {
+    setFetchedData((current) => {
+      const base: WACCDataResponse = current ?? {
+        ticker: activeTicker,
+        companyName: companyName || activeTicker || "Manual company",
+        marketCap: 0,
+        totalDebt: 0,
+        interestExpense: 0,
+        riskFreeRate: constants.riskFreeRate,
+        companyDescription: "",
+      };
+      return { ...base, [field]: Math.max(0, valueUsdM) * 1_000_000 };
+    });
+  };
+
   useEffect(() => {
     if (hasTicker && !fetchedData) fetchData(activeTicker);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -451,12 +466,67 @@ export default function Step7WACC() {
             </div>
           )}
 
+          {!fetchedData && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Manual market data override</p>
+              <p className="mt-1 text-xs text-zinc-600">
+                If no ticker data is available, enter USD millions manually to unlock the WACC calculation.
+              </p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                <MarketDataInput
+                  label="Market Cap"
+                  valueUsd={0}
+                  onChange={(value) => updateMarketDataUsdM("marketCap", value)}
+                />
+                <MarketDataInput
+                  label="Total Debt"
+                  valueUsd={0}
+                  onChange={(value) => updateMarketDataUsdM("totalDebt", value)}
+                />
+                <MarketDataInput
+                  label="Interest Expense"
+                  valueUsd={0}
+                  onChange={(value) => updateMarketDataUsdM("interestExpense", value)}
+                />
+              </div>
+            </div>
+          )}
+
           {fetchedData && !fetchError && (
             <>
               <div className="grid gap-3 sm:grid-cols-3">
                 <DataCard label="Market Cap" value={fmtB(fetchedData.marketCap)} />
                 <DataCard label="Total Debt" value={fmtB(fetchedData.totalDebt)} />
                 <DataCard label="Interest Expense" value={fmtB(fetchedData.interestExpense)} />
+              </div>
+              {fetchedData.marketCap <= 0 && businessType !== "financial" && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs leading-5 text-amber-200">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  Market cap is missing or zero, so Step 7 cannot calculate WACC yet. Enter a manual market cap below, or switch to Financial / Bank mode if this company should use Ke-only.
+                </div>
+              )}
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Manual market data override</p>
+                <p className="mt-1 text-xs text-zinc-600">
+                  Use this when Yahoo returns zero values for private, delisted, or stale tickers. Values are USD millions.
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                  <MarketDataInput
+                    label="Market Cap"
+                    valueUsd={fetchedData.marketCap}
+                    onChange={(value) => updateMarketDataUsdM("marketCap", value)}
+                  />
+                  <MarketDataInput
+                    label="Total Debt"
+                    valueUsd={fetchedData.totalDebt}
+                    onChange={(value) => updateMarketDataUsdM("totalDebt", value)}
+                  />
+                  <MarketDataInput
+                    label="Interest Expense"
+                    valueUsd={fetchedData.interestExpense}
+                    onChange={(value) => updateMarketDataUsdM("interestExpense", value)}
+                  />
+                </div>
               </div>
               {fetchedData.industry && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
@@ -538,7 +608,7 @@ export default function Step7WACC() {
             <div className="rounded-lg border border-amber-700/30 bg-amber-950/20 p-3 text-xs text-amber-200 space-y-1">
               <p className="font-semibold text-amber-300">Bank / Financial — Ke-Only Mode</p>
               <p>Deposits and policy reserves are operational funding, not Modigliani-Miller debt. Applying Hamada
-                re-levering to a bank's balance sheet overstates its cost of capital. Use Damodaran's published
+                re-levering to a bank&apos;s balance sheet overstates its cost of capital. Use Damodaran&apos;s published
                 bank-industry beta directly as the equity beta: Ke = Rf + β × ERP.
                 Discount <strong>equity</strong> cash flows (FCFE / dividends) at Ke.</p>
             </div>
@@ -1026,6 +1096,22 @@ function DataCard({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg bg-zinc-950 px-3 py-2">
       <p className="text-xs text-zinc-500">{label}</p>
       <p className="mt-0.5 text-sm font-semibold text-zinc-200">{value}</p>
+    </div>
+  );
+}
+
+function MarketDataInput({ label, valueUsd, onChange }: { label: string; valueUsd: number; onChange: (v: number) => void }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs text-zinc-500">{label} (USD M)</label>
+      <input
+        type="number"
+        min={0}
+        step="1"
+        value={Math.round((valueUsd / 1_000_000) * 100) / 100}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500"
+      />
     </div>
   );
 }

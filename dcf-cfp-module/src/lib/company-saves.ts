@@ -94,15 +94,13 @@ function getSavesByTicker(db: IDBDatabase, ticker: string): Promise<CompanySave[
  * Persist a new versioned save for the current session.
  * Returns the completed CompanySave record (including the assigned version).
  */
-export async function saveCompanyAnalysis(
+export function buildCompanyAnalysisSave(
   cfpState: CFPState,
   snapshot: ValuationSnapshot,
-): Promise<CompanySave> {
-  const db      = await openDb();
-  const ticker  = (cfpState.profile.ticker || "UNKNOWN").toUpperCase();
-  const version = await nextVersion(db, ticker);
-
-  const save: CompanySave = {
+  version = 1,
+): CompanySave {
+  const ticker = (cfpState.profile.ticker || "UNKNOWN").toUpperCase();
+  return {
     saveId:      uuid(),
     companyName: cfpState.profile.companyName || ticker,
     ticker,
@@ -111,6 +109,16 @@ export async function saveCompanyAnalysis(
     cfpState,
     snapshot,
   };
+}
+
+export async function saveCompanyAnalysis(
+  cfpState: CFPState,
+  snapshot: ValuationSnapshot,
+): Promise<CompanySave> {
+  const db      = await openDb();
+  const ticker  = (cfpState.profile.ticker || "UNKNOWN").toUpperCase();
+  const version = await nextVersion(db, ticker);
+  const save    = buildCompanyAnalysisSave(cfpState, snapshot, version);
 
   await new Promise<void>((resolve, reject) => {
     const tx  = db.transaction(STORE, "readwrite");
@@ -182,7 +190,7 @@ export function downloadSave(save: CompanySave): void {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /**

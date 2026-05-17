@@ -51,6 +51,10 @@ import type { Step2BankStructuredResult } from "@/lib/step2-bank-schema";
 type WorkflowMode = "bank" | "industrial";
 type AnyStructuredResult = Step2StructuredResult | Step2BankStructuredResult;
 
+const STEP2_CHUNK_MAX_TOKENS = 32768;
+const STEP2_REDUCE_MAX_TOKENS = 65536;
+const STEP2_REVIEW_MAX_TOKENS = 65536;
+
 // =============================================================================
 // Shared helpers
 // =============================================================================
@@ -105,7 +109,8 @@ const REDUCE_SYSTEM_PROMPT = [
   "Do not invent financial values. Use null for unavailable revenue or operating income.",
   "Map rows only to Step 1 canonical analysis segments and offerings.",
   "Rows must include source_id, mapped_from_step1_ids, evidence_level, validation_status, and review_note.",
-  "Keep review_note and excerpts short. No prose outside the structured response.",
+  "Be concise: keep review_note under 100 characters and sources.excerpt under 80 characters.",
+  "No prose outside the structured response.",
 ].join(" ");
 
 const BANK_REDUCE_SYSTEM_PROMPT = [
@@ -272,7 +277,7 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
     apiKey,
     prompt: userPrompt,
     systemPrompt: isBank ? BANK_CHUNK_SYSTEM_PROMPT : CHUNK_SYSTEM_PROMPT,
-    maxTokens: isBank ? 32768 : 8192,
+    maxTokens: STEP2_CHUNK_MAX_TOKENS,
     responseSchema: isBank
       ? (provider === "gemini" ? GEMINI_BANK_CHUNK_SUMMARY_SCHEMA : BANK_CHUNK_SUMMARY_SCHEMA)
       : (provider === "gemini" ? GEMINI_CHUNK_SUMMARY_SCHEMA : CHUNK_SUMMARY_SCHEMA),
@@ -349,18 +354,16 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
       : [],
   })).filter((s) => s.rows.length > 0);
 
-  // For bank mode, strip source_excerpt from each chunk row before sending to the model.
-  // The excerpts are only needed during extraction (map phase); the reduce prompt doesn't
-  // require them and omitting them meaningfully reduces prompt + output token count.
-  const summariesForPrompt = isBank
-    ? relevantSummaries.map((s) => ({
-        ...s,
-        rows: (s.rows as Array<Record<string, unknown>>).map(
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          ({ source_excerpt: _x, ...rest }) => rest,
-        ),
-      }))
-    : relevantSummaries;
+  // Strip source_excerpt from each chunk row before sending to the reduce model.
+  // The excerpts are useful during map extraction, but carrying every snippet into
+  // reduce inflates prompt/output size and can cause Gemini MAX_TOKENS truncation.
+  const summariesForPrompt = relevantSummaries.map((s) => ({
+    ...s,
+    rows: (s.rows as Array<Record<string, unknown>>).map(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      ({ source_excerpt: _x, ...rest }) => rest,
+    ),
+  }));
 
   const userPrompt = isBank
     ? [
@@ -410,7 +413,7 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
     apiKey,
     prompt: userPrompt,
     systemPrompt: isBank ? BANK_REDUCE_SYSTEM_PROMPT : REDUCE_SYSTEM_PROMPT,
-    maxTokens: isBank ? 65536 : 16384,
+    maxTokens: STEP2_REDUCE_MAX_TOKENS,
     responseSchema: isBank
       ? (provider === "gemini" ? GEMINI_STEP2_BANK_RESPONSE_SCHEMA : STEP2_BANK_RESPONSE_SCHEMA)
       : (provider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA),
@@ -490,7 +493,7 @@ async function handleSanityReview(body: Record<string, unknown>): Promise<NextRe
     apiKey,
     prompt: userPrompt,
     systemPrompt: isBank ? BANK_SANITY_SYSTEM_PROMPT : SANITY_SYSTEM_PROMPT,
-    maxTokens: isBank ? 65536 : 16384,
+    maxTokens: STEP2_REVIEW_MAX_TOKENS,
     responseSchema: isBank
       ? (provider === "gemini" ? GEMINI_STEP2_BANK_RESPONSE_SCHEMA : STEP2_BANK_RESPONSE_SCHEMA)
       : (provider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA),
@@ -801,7 +804,7 @@ async function handleLegacy(req: NextRequest): Promise<NextResponse<ExtractHisto
     apiKey,
     prompt: userPrompt,
     systemPrompt,
-    maxTokens: 16384,
+    maxTokens: STEP2_REDUCE_MAX_TOKENS,
     responseSchema:
       llmProvider === "gemini" ? GEMINI_STEP2_RESPONSE_SCHEMA : STEP2_RESPONSE_SCHEMA,
   });

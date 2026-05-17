@@ -219,13 +219,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
     });
   } catch (err: unknown) {
     console.error("[analyze-company] Error:", err);
+    const message = err instanceof Error ? err.message : "Analysis failed. Check server logs for details.";
     return NextResponse.json(
       {
         rawMarkdown: "",
         structuredResult: null,
         architectureJson: null,
         step1Review: null,
-        error: "Analysis failed. Check server logs for details.",
+        error: message,
       },
       { status: 500 },
     );
