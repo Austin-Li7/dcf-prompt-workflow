@@ -80,11 +80,12 @@ function fmtDate(iso: string): string {
 export default function Step8Valuation() {
   const { state } = useCFP();
 
-  // ── User-adjustable assumptions ──────────────────────────────────────────────
-  const [fcfMargin,                   setFcfMargin]                   = useState(0.25);
-  const [terminalGrowth,              setTerminalGrowth]              = useState(0.025);
+  // ── User-adjustable assumptions — seeded from Step 7 persisted state ─────────
+  const [fcfMargin,                   setFcfMargin]                   = useState(state.wacc.fcfMargin ?? 0.25);
+  const [terminalGrowth,              setTerminalGrowth]              = useState(state.wacc.terminalGrowth ?? 0.025);
+  const [bankFcfMargin,               setBankFcfMargin]               = useState(state.wacc.bankFcfMargin ?? 0.20);
   const [financialTerminalGrowth,     setFinancialTerminalGrowth]     = useState(0.025);
-  const [industrialTerminalGrowth,    setIndustrialTerminalGrowth]    = useState(0.03);
+  const [industrialTerminalGrowth,    setIndustrialTerminalGrowth]    = useState(state.wacc.terminalGrowth ?? 0.025);
   const [preferredStockUsdM,          setPreferredStockUsdM]          = useState(0);
   const [minorityInterestUsdM,        setMinorityInterestUsdM]        = useState(0);
 
@@ -101,18 +102,49 @@ export default function Step8Valuation() {
         wacc:     state.wacc,
         fcfMargin,
         terminalGrowth,
+        bankFcfMargin,
         preferredStockUsdM,
         minorityInterestUsdM,
         financialTerminalGrowth,
         industrialTerminalGrowth,
       }),
-    [fcfMargin, terminalGrowth, financialTerminalGrowth, industrialTerminalGrowth,
+    [fcfMargin, terminalGrowth, bankFcfMargin, financialTerminalGrowth, industrialTerminalGrowth,
      preferredStockUsdM, minorityInterestUsdM, state.forecast, state.wacc],
   );
 
   const step5Artifacts  = useMemo(() => getStep5StructuredResults(state.forecast),  [state.forecast]);
   const assumptionRows  = useMemo(() => buildStep5AssumptionRows(state.forecast),    [state.forecast]);
   const reviewWarnings  = useMemo(() => buildStep5ReviewWarningRows(state.forecast), [state.forecast]);
+
+  // ── Step 2 historical baseline (last 2 confirmed fiscal years, total revenue) ─
+  const historicalBaseline = useMemo(() => {
+    const rows = state.history.rows;
+    if (!rows.length) return [];
+    const byYear = new Map<number, number>();
+    for (const row of rows) {
+      if (row.revenue == null) continue;
+      byYear.set(row.fiscalYear, (byYear.get(row.fiscalYear) ?? 0) + row.revenue);
+    }
+    return Array.from(byYear.entries())
+      .sort((a, b) => a[0] - b[0])
+      .slice(-2)
+      .map(([year, rev]) => ({ year, revenueUsdM: rev }));
+  }, [state.history.rows]);
+
+  // ── Step 3 primary competitors (HIGH / MEDIUM materiality, max 4) ────────────
+  const competitors = useMemo(() => {
+    const cats = state.competition.structuredResult?.categories
+      ?? state.competition.step3Review?.categories?.map((c) => ({
+          category: c.category,
+          primary_competitor: c.editable.primaryCompetitor,
+          competitive_status: c.editable.competitiveStatus,
+          materiality: c.materiality,
+        }))
+      ?? [];
+    return cats
+      .filter((c) => c.materiality !== "LOW")
+      .slice(0, 4) as Array<{ category: string; primary_competitor: string; competitive_status: string; materiality: string }>;
+  }, [state.competition]);
 
   // ── "Valuation Complete" handler ─────────────────────────────────────────────
   const handleComplete = useCallback(async () => {
@@ -121,6 +153,7 @@ export default function Step8Valuation() {
     setSavedRecord(null);
     setShowCompleteModal(true);
 
+    const isHybrid = valuation.valuationMode === "HYBRID";
     const snapshot: ValuationSnapshot = {
       enterpriseValueUsdM:     valuation.enterpriseValueUsdM,
       sumPvFcffUsdM:           valuation.sumPvFcffUsdM,
@@ -142,6 +175,13 @@ export default function Step8Valuation() {
       decisionAction:          valuation.decision.action,
       decisionLabel:           valuation.decision.label,
       decisionSummary:         valuation.decision.summary,
+      valuationMode:           valuation.valuationMode,
+      bankKe:                  isHybrid ? (state.wacc.bankKeCalculation?.wacc ?? null) : null,
+      industrialWacc:          isHybrid ? (state.wacc.industrialWaccCalculation?.wacc ?? null) : null,
+      bankFcfMargin:           isHybrid ? bankFcfMargin : null,
+      industrialFcfMargin:     isHybrid ? fcfMargin : null,
+      financialTerminalGrowth: isHybrid ? financialTerminalGrowth : null,
+      industrialTerminalGrowth: isHybrid ? industrialTerminalGrowth : null,
     };
 
     try {
@@ -152,7 +192,7 @@ export default function Step8Valuation() {
     } finally {
       setIsSaving(false);
     }
-  }, [valuation, fcfMargin, terminalGrowth, state]);
+  }, [valuation, fcfMargin, terminalGrowth, bankFcfMargin, financialTerminalGrowth, industrialTerminalGrowth, state]);
 
   return (
     <StepShell
@@ -266,6 +306,59 @@ export default function Step8Valuation() {
           </div>
         )}
 
+        {/* ── Pipeline Context Header ─────────────────────────────────────── */}
+        <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-5 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-400">
+            <div className="flex flex-wrap items-center gap-4">
+              {state.profile.companyName && (
+                <span className="font-semibold text-zinc-200">{state.profile.companyName}</span>
+              )}
+              {state.profile.ticker && (
+                <span className="font-mono text-zinc-500">{state.profile.ticker}</span>
+              )}
+              {state.wacc.businessType && (
+                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                  state.wacc.businessType === "financial" ? "bg-amber-900/40 text-amber-300" :
+                  state.wacc.businessType === "hybrid"    ? "bg-teal-900/40 text-teal-300" :
+                  state.wacc.businessType === "conglomerate" ? "bg-purple-900/40 text-purple-300" :
+                  "bg-zinc-800 text-zinc-300"
+                }`}>
+                  {state.wacc.businessType === "single" ? "Single Business" :
+                   state.wacc.businessType === "conglomerate" ? "Conglomerate" :
+                   state.wacc.businessType === "financial" ? "Financial / Ke-Only" :
+                   "Hybrid SOTP"}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-4">
+              {valuation.wacc !== null && (
+                <span>
+                  {valuation.valuationMode === "FCFE" ? "Ke" : "WACC"}:{" "}
+                  <span className="font-mono text-zinc-200">{fmtPct(valuation.wacc)}</span>
+                </span>
+              )}
+              {valuation.valuationMode === "HYBRID" && state.wacc.bankKeCalculation && state.wacc.industrialWaccCalculation && (
+                <span>
+                  Bank Ke: <span className="font-mono text-amber-300">{fmtPct(state.wacc.bankKeCalculation.wacc)}</span>
+                  {" · "}
+                  Industrial WACC: <span className="font-mono text-emerald-300">{fmtPct(state.wacc.industrialWaccCalculation.wacc)}</span>
+                </span>
+              )}
+              {state.wacc.fetchedAt && (
+                <span className="text-zinc-600">
+                  Market data: {new Date(state.wacc.fetchedAt).toLocaleDateString()}
+                </span>
+              )}
+              {!state.forecast.approved && (
+                <span className="text-amber-400">Step 5 forecast not approved</span>
+              )}
+              {!state.wacc.saved && (
+                <span className="text-amber-400">Step 7 WACC not saved</span>
+              )}
+            </div>
+          </div>
+        </section>
+
         {/* ── Business Decision Banner ────────────────────────────────────── */}
         <section className={`rounded-xl border p-5 ${
           valuation.decision.action === "BUY"
@@ -353,6 +446,8 @@ export default function Step8Valuation() {
                   industrial={valuation.hybridIndustrialStream}
                   fcfMargin={fcfMargin}
                   setFcfMargin={setFcfMargin}
+                  bankFcfMargin={bankFcfMargin}
+                  setBankFcfMargin={setBankFcfMargin}
                   financialTerminalGrowth={financialTerminalGrowth}
                   setFinancialTerminalGrowth={setFinancialTerminalGrowth}
                   industrialTerminalGrowth={industrialTerminalGrowth}
@@ -389,6 +484,23 @@ export default function Step8Valuation() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/60">
+                      {/* Step 2 historical baseline rows */}
+                      {historicalBaseline.map((row) => (
+                        <tr key={`hist-${row.year}`} className="opacity-60">
+                          <td className="px-3 py-2 text-zinc-500 italic">FY{row.year} (hist)</td>
+                          <td className="px-3 py-2 text-right font-mono text-zinc-500">{fmtM(row.revenueUsdM)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-zinc-600">—</td>
+                          <td className="px-3 py-2 text-right font-mono text-zinc-600">—</td>
+                          <td className="px-3 py-2 text-right font-mono text-zinc-600">—</td>
+                        </tr>
+                      ))}
+                      {historicalBaseline.length > 0 && (
+                        <tr className="bg-zinc-800/20">
+                          <td colSpan={5} className="px-3 py-1 text-xs italic text-zinc-600">
+                            ↑ Step 2 historical · ↓ Step 5 forecast
+                          </td>
+                        </tr>
+                      )}
                       {valuation.forecastRows.map((row) => (
                         <tr key={row.year}>
                           <td className="px-3 py-2 text-zinc-300">FY{row.year}</td>
@@ -570,11 +682,32 @@ export default function Step8Valuation() {
         {/* ── Bottom info panels ───────────────────────────────────────────── */}
         <section className="grid gap-4 lg:grid-cols-3">
           <InfoPanel title="Market Sanity Check" icon={<BarChart3 size={15} />}>
-            <p>
-              Analyst consensus target prices serve as an external cross-check only.
-              They are not an input to this model. Large divergences between model
-              output and analyst targets should prompt assumption review.
-            </p>
+            {competitors.length > 0 ? (
+              <>
+                <p className="mb-2 text-zinc-500">Step 3 primary competitors — compare implied multiples against these peers before acting on model output.</p>
+                <ul className="space-y-1.5">
+                  {competitors.map((c, i) => (
+                    <li key={i} className="flex items-start justify-between gap-2">
+                      <span>
+                        <span className="font-medium text-zinc-200">{c.primary_competitor}</span>
+                        <span className="ml-1 text-zinc-500">({c.category})</span>
+                      </span>
+                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${
+                        c.competitive_status === "Leader"     ? "bg-emerald-900/40 text-emerald-300" :
+                        c.competitive_status === "Challenger" ? "bg-amber-900/40 text-amber-300" :
+                                                                "bg-zinc-800 text-zinc-400"
+                      }`}>
+                        {c.competitive_status}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p>
+                Run Step 3 to populate competitor benchmarks here. Analyst consensus target prices serve as an external cross-check only — large divergences between model output and analyst targets should prompt assumption review.
+              </p>
+            )}
           </InfoPanel>
 
           <InfoPanel title="Top Model Drivers" icon={<CheckCircle2 size={15} />}>
@@ -629,6 +762,8 @@ function HybridStreamsSection({
   industrial,
   fcfMargin,
   setFcfMargin,
+  bankFcfMargin,
+  setBankFcfMargin,
   financialTerminalGrowth,
   setFinancialTerminalGrowth,
   industrialTerminalGrowth,
@@ -645,6 +780,8 @@ function HybridStreamsSection({
   industrial: HybridStream | null;
   fcfMargin: number;
   setFcfMargin: (v: number) => void;
+  bankFcfMargin: number;
+  setBankFcfMargin: (v: number) => void;
   financialTerminalGrowth: number;
   setFinancialTerminalGrowth: (v: number) => void;
   industrialTerminalGrowth: number;
@@ -754,11 +891,13 @@ function HybridStreamsSection({
         )}
       </div>
 
-      {/* Financial stream terminal growth (shown under financial stream card if present) */}
+      {/* Financial stream assumptions */}
       {financial && (
-        <div className="rounded-lg border border-sky-800/30 bg-sky-950/10 p-3 max-w-xs">
-          <p className="text-xs font-semibold uppercase tracking-wider text-sky-400 mb-2">Financial Stream Assumptions</p>
+        <div className="rounded-lg border border-sky-800/30 bg-sky-950/10 p-3 space-y-3 max-w-sm">
+          <p className="text-xs font-semibold uppercase tracking-wider text-sky-400">Financial Stream Assumptions</p>
+          <AssumptionSlider label="Bank FCFE Margin" value={bankFcfMargin} min={0.05} max={0.35} step={0.005} onChange={setBankFcfMargin} />
           <AssumptionSlider label="Terminal Growth (Ke stream)" value={financialTerminalGrowth} min={0.01} max={0.035} step={0.001} onChange={setFinancialTerminalGrowth} />
+          <p className="text-xs text-zinc-600">FCFE / NII proxy. Banks typically 15–25%. Adjust if earnings profile is unusual.</p>
         </div>
       )}
 

@@ -1344,6 +1344,14 @@ export interface ValuationSnapshot {
   decisionAction: "BUY" | "WATCH" | "AVOID" | "INSUFFICIENT_DATA";
   decisionLabel: string;
   decisionSummary: string;
+  // Valuation mode + hybrid-specific rates (populated for HYBRID, null otherwise)
+  valuationMode: "FCFF" | "FCFE" | "HYBRID";
+  bankKe: number | null;
+  industrialWacc: number | null;
+  bankFcfMargin: number | null;
+  industrialFcfMargin: number | null;
+  financialTerminalGrowth: number | null;
+  industrialTerminalGrowth: number | null;
 }
 
 /** One saved run for a company — stored in IndexedDB and exported as JSON. */

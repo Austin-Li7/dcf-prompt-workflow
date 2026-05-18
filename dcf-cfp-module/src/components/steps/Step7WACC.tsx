@@ -15,6 +15,7 @@ import {
   detectConglomerate, detectFinancialCompany,
 } from "@/lib/wacc-math";
 import { inferTickerFromCompanyName, normalizeTickerInput } from "@/lib/ticker-lookup";
+import { damodaranBetaForWorkflowMode } from "@/lib/damodaran-betas";
 import { buildWaccSegmentsFromCFP } from "@/lib/wacc-handoff";
 import { buildDcfValuation, buildSotpValuation } from "@/lib/dcf-valuation";
 import { aggregateSegmentForecastFy, buildStep5AssumptionRows, buildStep5ReviewWarningRows, getStep5StructuredResults } from "@/lib/aggregate-forecast";
@@ -84,13 +85,14 @@ export default function Step7WACC() {
   // ── Hybrid SOTP mode ────────────────────────────────────────────────────────
   const [hybridSegments, setHybridSegments] = useState<WACCSegmentRow[]>(state.wacc.hybridSegments);
   const [hybridBankBeta, setHybridBankBeta] = useState(state.wacc.hybridBankBeta);
-  const [bankFcfMargin, setBankFcfMargin] = useState(0.20);
-  const [industrialFcfMargin, setIndustrialFcfMargin] = useState(0.25);
+  const [bankFcfMargin, setBankFcfMargin] = useState(state.wacc.bankFcfMargin ?? 0.20);
+  const [industrialFcfMargin, setIndustrialFcfMargin] = useState(state.wacc.industrialFcfMargin ?? 0.25);
 
   // ── Shared dashboard ────────────────────────────────────────────────────────
   const [showValuationDashboard, setShowValuationDashboard] = useState(false);
-  const [terminalGrowth, setTerminalGrowth] = useState(0.025);
-  const [fcfMargin, setFcfMargin] = useState(0.25); // for single/conglomerate/financial
+  const [terminalGrowth, setTerminalGrowth] = useState(state.wacc.terminalGrowth ?? 0.025);
+  const [fcfMargin, setFcfMargin] = useState(state.wacc.fcfMargin ?? 0.25);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(state.wacc.fetchedAt ?? null);
 
   // ── Detect hints from fetched data ─────────────────────────────────────────
   const conglomerateHint = useMemo(() => {
@@ -129,6 +131,7 @@ export default function Step7WACC() {
       const data: WACCDataResponse = await res.json();
       if (data.error) setFetchError(data.error);
       setFetchedData(data);
+      setFetchedAt(new Date().toISOString());
       if (data.ticker) {
         setTickerInput(data.ticker);
         dispatch({ type: "UPDATE_PROFILE", payload: { ticker: data.ticker } });
@@ -183,9 +186,9 @@ export default function Step7WACC() {
       workflowMode: (workflowModes[r.name] ?? "industrial") as "bank" | "industrial",
     }));
     setHybridSegments(annotated);
-    // Set hybrid bank beta from Damodaran if available
-    const bankBetaFromFetch = businessType === "hybrid" && fetchedData?.damodaranBeta ? fetchedData.damodaranBeta : hybridBankBeta;
-    setHybridBankBeta(bankBetaFromFetch);
+    // Use the Damodaran bank beta (0.37) — the whole-company damodaranBeta
+    // reflects the dominant industry (e.g. Software 0.96) and is wrong here.
+    setHybridBankBeta(damodaranBetaForWorkflowMode("bank"));
   };
 
   const addHybridSegment = () =>
@@ -213,15 +216,17 @@ export default function Step7WACC() {
   const effectiveBeta = businessType === "conglomerate" ? weightedBeta : singleBeta;
 
   // Primary calculation (used for single / conglomerate / financial)
-  const calculation: WACCCalculation | null = useMemo(() => {
-    if (businessType === "hybrid") return null; // hybrid uses separate calculations
+  const waccResult = useMemo(() => {
+    if (businessType === "hybrid") return null;
     if (!fetchedData || fetchedData.marketCap <= 0) return null;
-    if (businessType === "financial") return fullBankKeCalculation({ equityBeta: singleBeta, constants });
+    if (businessType === "financial") return { calculation: fullBankKeCalculation({ equityBeta: singleBeta, constants }), warnings: [] };
     return fullWACCCalculation({
       marketCap: fetchedData.marketCap, totalDebt: fetchedData.totalDebt,
       interestExpense: fetchedData.interestExpense, unleveredBeta: effectiveBeta, constants,
     });
   }, [fetchedData, businessType, singleBeta, effectiveBeta, constants]);
+  const calculation: WACCCalculation | null = waccResult?.calculation ?? null;
+  const waccWarnings: string[] = waccResult?.warnings ?? [];
 
   // Hybrid: bank Ke
   const bankKeCalc: WACCCalculation | null = useMemo(() => {
@@ -230,7 +235,7 @@ export default function Step7WACC() {
   }, [businessType, hybridBankBeta, constants]);
 
   // Hybrid: industrial WACC
-  const industrialWaccCalc: WACCCalculation | null = useMemo(() => {
+  const industrialWaccResult = useMemo(() => {
     if (businessType !== "hybrid") return null;
     if (!fetchedData || fetchedData.marketCap <= 0) return null;
     return fullWACCCalculation({
@@ -239,6 +244,8 @@ export default function Step7WACC() {
       unleveredBeta: hybridIndustrialWeightedBeta, constants,
     });
   }, [businessType, fetchedData, hybridIndustrialWeightedBeta, constants]);
+  const industrialWaccCalc: WACCCalculation | null = industrialWaccResult?.calculation ?? null;
+  const industrialWaccWarnings: string[] = industrialWaccResult?.warnings ?? [];
 
   const hasCalculation = businessType === "hybrid"
     ? (bankKeCalc !== null && industrialWaccCalc !== null)
@@ -286,6 +293,8 @@ export default function Step7WACC() {
         hybridSegments, hybridBankBeta,
         bankKeCalculation: bankKeCalc, industrialWaccCalculation: industrialWaccCalc,
         saved: true,
+        fcfMargin, terminalGrowth, bankFcfMargin, industrialFcfMargin,
+        fetchedAt,
       },
     });
   };
@@ -302,6 +311,26 @@ export default function Step7WACC() {
 
   const activeValuation = businessType === "hybrid" ? sotpValuation : standardValuation;
   const upside = activeValuation?.impliedUpsidePct ?? null;
+
+  // ── WACC sensitivity grid (beta ±0.1 × ERP ±0.5%) ──────────────────────────
+  const waccSensitivity = useMemo(() => {
+    if (!calculation || businessType === "financial" || businessType === "hybrid") return null;
+    if (!fetchedData || fetchedData.marketCap <= 0) return null;
+    const betaDeltas = [-0.1, 0, 0.1];
+    const erpDeltas = [-0.005, 0, 0.005];
+    return betaDeltas.map((db) =>
+      erpDeltas.map((de) => {
+        const r = fullWACCCalculation({
+          marketCap: fetchedData.marketCap,
+          totalDebt: fetchedData.totalDebt,
+          interestExpense: fetchedData.interestExpense,
+          unleveredBeta: effectiveBeta + db,
+          constants: { ...constants, impliedERP: constants.impliedERP + de },
+        });
+        return r?.calculation.wacc ?? null;
+      }),
+    );
+  }, [calculation, businessType, fetchedData, effectiveBeta, constants]);
 
   // ==========================================================================
   // Render
@@ -419,7 +448,14 @@ export default function Step7WACC() {
             <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">
               <BarChart3 size={16} /> Market Data
             </h3>
-            {fetchedData && <span className="text-xs text-zinc-500">{fetchedData.companyName}</span>}
+            <div className="flex items-center gap-3">
+              {fetchedData && <span className="text-xs text-zinc-400 font-medium">{fetchedData.companyName}</span>}
+              {fetchedAt && (
+                <span className="text-xs text-zinc-600" title={fetchedAt}>
+                  Fetched {new Date(fetchedAt).toLocaleDateString()}
+                </span>
+              )}
+            </div>
           </div>
 
           {!hasTicker && (
@@ -766,6 +802,53 @@ export default function Step7WACC() {
                 }
               </p>
             </div>
+
+            {/* Validation warnings from sanity checks */}
+            {waccWarnings.length > 0 && (
+              <div className="space-y-1.5">
+                {waccWarnings.map((w, i) => (
+                  <div key={i} className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" /> {w}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* WACC Sensitivity: unlevered beta ±0.1 × ERP ±0.5% */}
+            {waccSensitivity && (
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  WACC Sensitivity — Beta ±0.1 × ERP ±0.5%
+                </h4>
+                <div className="overflow-x-auto rounded-lg border border-zinc-800">
+                  <table className="w-full text-xs">
+                    <thead className="bg-zinc-800 text-zinc-400">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">β \ ERP</th>
+                        <th className="px-3 py-2 text-center font-medium">{pct(constants.impliedERP - 0.005, 1)} ERP</th>
+                        <th className="px-3 py-2 text-center font-medium">{pct(constants.impliedERP, 1)} ERP (base)</th>
+                        <th className="px-3 py-2 text-center font-medium">{pct(constants.impliedERP + 0.005, 1)} ERP</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/50">
+                      {waccSensitivity.map((row, ri) => {
+                        const betaLabel = ri === 0 ? `β ${(effectiveBeta - 0.1).toFixed(2)} (−0.1)` : ri === 1 ? `β ${effectiveBeta.toFixed(2)} (base)` : `β ${(effectiveBeta + 0.1).toFixed(2)} (+0.1)`;
+                        return (
+                          <tr key={ri} className={ri === 1 ? "bg-zinc-800/30" : ""}>
+                            <td className="px-3 py-2 font-medium text-zinc-300">{betaLabel}</td>
+                            {row.map((val, ci) => (
+                              <td key={ci} className={`px-3 py-2 text-center font-mono ${ri === 1 && ci === 1 ? "font-bold text-emerald-400" : "text-zinc-300"}`}>
+                                {val !== null ? pct(val) : "—"}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -796,6 +879,15 @@ export default function Step7WACC() {
                 {!industrialWaccCalc && <p className="text-xs text-zinc-500">Add industrial segments with estimated values above</p>}
               </div>
             </div>
+            {industrialWaccWarnings.length > 0 && (
+              <div className="space-y-1.5">
+                {industrialWaccWarnings.map((w, i) => (
+                  <div key={i} className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" /> {w}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         )}
 
@@ -832,12 +924,49 @@ function StandardDashboard({ val, businessType, fcfMargin, setFcfMargin, termina
 }) {
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <DashboardCard label="DCF Equity Value" value={fmtM(val.equityValueUsdM)} highlight />
         <DashboardCard label="Enterprise Value" value={fmtM(val.enterpriseValueUsdM)} />
         <DashboardCard label="Market Cap" value={val.marketCapUsdM ? fmtM(val.marketCapUsdM) : "N/A"} />
         <DashboardCard label={businessType === "financial" ? "Ke" : "WACC"} value={val.wacc ? fmtPct(val.wacc) : "N/A"} />
       </div>
+
+      {/* Per-share intrinsic value + decision signal */}
+      {val.intrinsicValuePerShare !== null && (
+        <div className="flex flex-wrap items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-950 px-4 py-3">
+          <div>
+            <p className="text-xs text-zinc-500">Intrinsic Value / Share</p>
+            <p className="mt-0.5 text-lg font-bold tabular-nums text-zinc-100">
+              ${val.intrinsicValuePerShare.toFixed(2)}
+            </p>
+          </div>
+          {val.currentPrice !== null && (
+            <div>
+              <p className="text-xs text-zinc-500">Current Price</p>
+              <p className="mt-0.5 text-lg font-semibold tabular-nums text-zinc-300">
+                ${val.currentPrice.toFixed(2)}
+              </p>
+            </div>
+          )}
+          <div>
+            <p className="text-xs text-zinc-500">Implied Upside</p>
+            <p className={`mt-0.5 text-lg font-bold tabular-nums ${val.impliedUpsidePct !== null && val.impliedUpsidePct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {fmtUpside(val.impliedUpsidePct)}
+            </p>
+          </div>
+          <div className="ml-auto">
+            <span className={`rounded-full border px-3 py-1 text-sm font-bold ${
+              val.decision.action === "BUY" ? "border-emerald-600/50 bg-emerald-950/40 text-emerald-300"
+              : val.decision.action === "WATCH" ? "border-amber-600/50 bg-amber-950/40 text-amber-300"
+              : val.decision.action === "AVOID" ? "border-red-600/50 bg-red-950/40 text-red-300"
+              : "border-zinc-700 bg-zinc-900 text-zinc-500"
+            }`}>
+              {val.decision.action}
+            </span>
+            <p className="mt-1 text-xs text-zinc-500">{val.decision.summary}</p>
+          </div>
+        </div>
+      )}
       <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <ForecastTable rows={val.forecastRows} terminalValueUsdM={val.terminalValueUsdM} terminalPvUsdM={val.terminalPresentValueUsdM} />
         <AssumptionsPanel fcfMargin={fcfMargin} setFcfMargin={setFcfMargin} terminalGrowth={terminalGrowth} setTerminalGrowth={setTerminalGrowth}
@@ -896,14 +1025,14 @@ function SotpDashboard({ val, bankFcfMargin, setBankFcfMargin, industrialFcfMarg
           <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-amber-300">
             <SlidersHorizontal size={14} /> Bank Assumptions
           </h4>
-          <AssumptionSlider label="Bank FCFE Margin" value={bankFcfMargin} min={0.10} max={0.30} step={0.005} onChange={setBankFcfMargin} />
+          <AssumptionSlider label="Bank FCFE Margin" value={bankFcfMargin} min={0.05} max={0.35} step={0.005} onChange={setBankFcfMargin} />
           <p className="text-xs text-zinc-600">FCFE / NII (net income proxy). Banks typically 15–25%.</p>
         </div>
         <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
           <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-emerald-300">
             <SlidersHorizontal size={14} /> Industrial Assumptions
           </h4>
-          <AssumptionSlider label="Industrial FCF Margin" value={industrialFcfMargin} min={0.10} max={0.40} step={0.005} onChange={setIndustrialFcfMargin} />
+          <AssumptionSlider label="Industrial FCF Margin" value={industrialFcfMargin} min={0.05} max={0.50} step={0.005} onChange={setIndustrialFcfMargin} />
           <AssumptionSlider label="Terminal Growth (both)" value={terminalGrowth} min={0.01} max={0.04} step={0.001} onChange={setTerminalGrowth} />
         </div>
       </div>
@@ -1014,7 +1143,7 @@ function AssumptionsPanel({ fcfMargin, setFcfMargin, terminalGrowth, setTerminal
       <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
         <SlidersHorizontal size={15} /> Assumptions
       </h4>
-      <AssumptionSlider label="FCF Margin" value={fcfMargin} min={0.15} max={0.35} step={0.005} onChange={setFcfMargin} />
+      <AssumptionSlider label="FCF Margin" value={fcfMargin} min={0.05} max={0.50} step={0.005} onChange={setFcfMargin} />
       <AssumptionSlider label="Terminal Growth" value={terminalGrowth} min={0.01} max={0.04} step={0.001} onChange={setTerminalGrowth} />
       <div className="rounded-lg bg-zinc-900 px-3 py-2 text-xs text-zinc-400">{netDebtNote}</div>
     </div>

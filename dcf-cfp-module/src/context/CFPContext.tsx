@@ -96,6 +96,11 @@ export const initialCFPState: CFPState = {
     industrialWaccCalculation: null,
     calculation: null,
     saved: false,
+    fcfMargin: 0.25,
+    terminalGrowth: 0.025,
+    bankFcfMargin: 0.20,
+    industrialFcfMargin: 0.25,
+    fetchedAt: null,
   },
 };
 
