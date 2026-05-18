@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Check,
   ArrowRight,
+  Plus,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import StepShell from "./StepShell";
@@ -48,6 +49,9 @@ export default function Step1Profile() {
   const [segmentNames, setSegmentNames] = useState<Record<string, string>>({});
   const [businessLineNames, setBusinessLineNames] = useState<Record<string, string>>({});
   const [businessLineTargets, setBusinessLineTargets] = useState<Record<string, string>>({});
+  const [userAddedSegments, setUserAddedSegments] = useState<string[]>([]);
+  const [addSegmentInput, setAddSegmentInput] = useState("");
+  const [showAddSegmentForm, setShowAddSegmentForm] = useState(false);
 
   // ---------- Settings (centralized API key) ----------
   const { settings, activeApiKey } = useSettings();
@@ -90,6 +94,9 @@ export default function Step1Profile() {
         ),
       ),
     );
+    setUserAddedSegments([]);
+    setAddSegmentInput("");
+    setShowAddSegmentForm(false);
   }, [review]);
 
   // ------------------------------------------------------------------
@@ -172,6 +179,14 @@ export default function Step1Profile() {
     );
 
     const approvedArchitecture = projectStructuredStep1ToArchitecture(approvedStructuredResult);
+    // Inject user-added segments (empty business lines — segments the LLM merged but user wants separate)
+    const validUserSegments = userAddedSegments.map((s) => s.trim()).filter(Boolean);
+    if (validUserSegments.length > 0) {
+      approvedArchitecture.architecture = [
+        ...approvedArchitecture.architecture,
+        ...validUserSegments.map((name) => ({ segment: name, businessLines: [] })),
+      ];
+    }
     // B6: use immutable helper instead of post-hoc mutation
     const approvedReview = markStep1ReviewApproved(buildStep1ReviewState(approvedStructuredResult));
 
@@ -194,6 +209,7 @@ export default function Step1Profile() {
     state.profile.step1StructuredResult,
     state.profile.ticker,
     tickerInput,
+    userAddedSegments,
   ]);
 
   // ------------------------------------------------------------------
@@ -429,6 +445,97 @@ export default function Step1Profile() {
                         </label>
                       </div>
                     ))}
+
+                    {/* User-added segments */}
+                    {userAddedSegments.map((name, i) => (
+                      <div
+                        key={`user-seg-${i}`}
+                        className="grid gap-3 rounded-lg border border-blue-800/40 bg-blue-950/20 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+                      >
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0">
+                            <p className="text-xs uppercase tracking-wide text-blue-400">User-added segment</p>
+                            <p className="mt-1 text-xs text-zinc-500">Not from LLM — will appear as an empty segment in Step 5</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <label className="min-w-0 flex-1 text-sm text-zinc-300">
+                            Segment name
+                            <input
+                              type="text"
+                              value={name}
+                              onChange={(e) =>
+                                setUserAddedSegments((prev) =>
+                                  prev.map((s, j) => (j === i ? e.target.value : s)),
+                                )
+                              }
+                              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setUserAddedSegments((prev) => prev.filter((_, j) => j !== i))}
+                            className="mt-6 shrink-0 rounded p-1.5 text-zinc-500 hover:text-red-400"
+                            title="Remove segment"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Add segment controls */}
+                    {showAddSegmentForm ? (
+                      <div className="flex gap-2 rounded-lg border border-zinc-700 bg-zinc-900/50 p-3">
+                        <input
+                          type="text"
+                          autoFocus
+                          placeholder="e.g. Royalty Revenue"
+                          value={addSegmentInput}
+                          onChange={(e) => setAddSegmentInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && addSegmentInput.trim()) {
+                              setUserAddedSegments((prev) => [...prev, addSegmentInput.trim()]);
+                              setAddSegmentInput("");
+                              setShowAddSegmentForm(false);
+                            }
+                            if (e.key === "Escape") {
+                              setAddSegmentInput("");
+                              setShowAddSegmentForm(false);
+                            }
+                          }}
+                          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (addSegmentInput.trim()) {
+                              setUserAddedSegments((prev) => [...prev, addSegmentInput.trim()]);
+                              setAddSegmentInput("");
+                              setShowAddSegmentForm(false);
+                            }
+                          }}
+                          className="shrink-0 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500"
+                        >
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setAddSegmentInput(""); setShowAddSegmentForm(false); }}
+                          className="shrink-0 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowAddSegmentForm(true)}
+                        className="flex items-center gap-1.5 self-start rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-blue-600/50 hover:text-blue-400"
+                      >
+                        <Plus size={13} /> Add Segment
+                      </button>
+                    )}
                   </div>
 
                   <div className="space-y-3">
@@ -483,6 +590,11 @@ export default function Step1Profile() {
                                 value={segmentNames[segment.id] ?? segment.suggestedName}
                               >
                                 {segmentNames[segment.id] ?? segment.suggestedName}
+                              </option>
+                            ))}
+                            {userAddedSegments.filter(Boolean).map((name, i) => (
+                              <option key={`user-seg-opt-${i}`} value={name}>
+                                {name} (user-added)
                               </option>
                             ))}
                           </select>
@@ -550,6 +662,9 @@ export default function Step1Profile() {
                 if (tenQInputRef.current) tenQInputRef.current.value = "";
                 setTickerInput("");
                 setErrorMsg(null);
+                setUserAddedSegments([]);
+                setAddSegmentInput("");
+                setShowAddSegmentForm(false);
               }}
               className="flex items-center gap-2 rounded-lg border border-zinc-700 px-5 py-2.5 text-sm text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
             >

@@ -971,7 +971,7 @@ export default function Step3Competition() {
                       </summary>
                       <div className="mt-2 space-y-1.5 pl-4">
                         {forceClaims.map(({ label, claim }) => (
-                          <div key={claim!.claim_id} className="rounded bg-zinc-950 px-3 py-2 text-xs">
+                          <div key={label} className="rounded bg-zinc-950 px-3 py-2 text-xs">
                             <span className="font-medium text-zinc-400">{label}: </span>
                             <span className="text-zinc-500 italic">&ldquo;{claim!.source_snippet}&rdquo;</span>
                             <span className={`ml-2 rounded px-1 py-0.5 text-[10px] font-semibold ${

@@ -307,6 +307,45 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
         };
       })
     : assumptions;
+
+  // Auto-inject synthetic placeholder assumptions for any assumption_id referenced in
+  // forecast rows but missing from the assumptions array. This prevents Zod superRefine
+  // from rejecting artifacts where the model uses ids like "baseline_anchor" without
+  // defining them — the placeholder is flagged NEEDS_REVIEW so analysts can review.
+  const definedAssumptionIds = new Set(
+    Array.isArray(normalizedAssumptions)
+      ? normalizedAssumptions
+          .filter((a) => a && typeof a === "object" && !Array.isArray(a))
+          .map((a) => (a as Record<string, unknown>).id as string)
+          .filter(Boolean)
+      : [],
+  );
+  const referencedIds = new Set<string>();
+  if (Array.isArray(normalizedForecastTable)) {
+    for (const row of normalizedForecastTable) {
+      if (row && typeof row === "object" && Array.isArray((row as Record<string, unknown>).assumption_ids)) {
+        for (const id of (row as Record<string, unknown>).assumption_ids as string[]) {
+          if (typeof id === "string" && id && !definedAssumptionIds.has(id)) {
+            referencedIds.add(id);
+          }
+        }
+      }
+    }
+  }
+  const syntheticAssumptions = Array.from(referencedIds).map((id) => ({
+    id,
+    statement: `Auto-generated placeholder for undeclared assumption "${id}". Review required.`,
+    basis_claim_ids: [],
+    driver_quality: "WEAK",
+    driver_eligibility_source: "MODEL_OMITTED — review and replace before downstream use.",
+    arithmetic_trace: "N/A — assumption was referenced by model but not defined.",
+    management_override_required: true,
+  }));
+  const finalAssumptions =
+    syntheticAssumptions.length > 0
+      ? [...(Array.isArray(normalizedAssumptions) ? normalizedAssumptions : []), ...syntheticAssumptions]
+      : normalizedAssumptions;
+
   const weakSensitivity = machineRecord.weak_inference_sensitivity ?? machineRecord.weakInferenceSensitivity;
   const normalizedWeakSensitivity = Array.isArray(weakSensitivity)
     ? weakSensitivity.map((entry) => {
@@ -359,12 +398,13 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
   const omittedNextAction =
     !machineRecord.next_action && !machineRecord.nextAction;
   const hasCompositeDriverQuality = compositeDriverQualityWarnings.length > 0;
+  const hasSyntheticAssumptions = syntheticAssumptions.length > 0;
   const normalizedReviewSummary =
     reviewSummary && typeof reviewSummary === "object" && !Array.isArray(reviewSummary)
       ? {
           ...(reviewSummary as Record<string, unknown>),
           warnings:
-            omittedWorkflowStatus || omittedNextAction || hasCompositeDriverQuality
+            omittedWorkflowStatus || omittedNextAction || hasCompositeDriverQuality || hasSyntheticAssumptions
               ? Array.from(new Set([
                   ...(((reviewSummary as Record<string, unknown>).warnings as unknown[]) ?? []),
                   ...(omittedWorkflowStatus || omittedNextAction
@@ -372,6 +412,9 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
                     : []),
                   ...(hasCompositeDriverQuality
                     ? ["MODEL_COMPOSITE_DRIVER_QUALITY: Composite driver quality labels were conservatively mapped to WEAK and require review."]
+                    : []),
+                  ...(hasSyntheticAssumptions
+                    ? [`MODEL_UNDECLARED_ASSUMPTIONS: Placeholder assumptions auto-injected for ids: ${Array.from(referencedIds).join(", ")}. Replace before downstream use.`]
                     : []),
                 ]))
               : (reviewSummary as Record<string, unknown>).warnings,
@@ -386,14 +429,14 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
     machine_artifact: {
       ...machineRecord,
       forecast_mode: machineRecord.forecast_mode ?? machineRecord.forecastMode,
-      assumptions: normalizedAssumptions,
+      assumptions: finalAssumptions,
       forecast_table: normalizedForecastTable,
       weak_inference_sensitivity: normalizedWeakSensitivity ?? [],
       confidence_summary: normalizedConfidence,
-      workflow_status: hasCompositeDriverQuality
+      workflow_status: (hasCompositeDriverQuality || hasSyntheticAssumptions)
         ? "NEEDS_REVIEW"
         : machineRecord.workflow_status ?? machineRecord.workflowStatus ?? "NEEDS_REVIEW",
-      next_action: hasCompositeDriverQuality
+      next_action: (hasCompositeDriverQuality || hasSyntheticAssumptions)
         ? "HUMAN_REVIEW_MAJOR_ASSUMPTION"
         : machineRecord.next_action ?? machineRecord.nextAction ?? "HUMAN_REVIEW_MAJOR_ASSUMPTION",
     },
