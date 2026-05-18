@@ -1,80 +1,139 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, resolveApiKey } from "@/lib/llm-service";
+import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import {
+  GEMINI_STEP4_SYNERGY_RESPONSE_SCHEMA,
+  parseStep4Synergy,
+  projectStep4SynergyToPath,
+  STEP4_SYNERGY_RESPONSE_SCHEMA,
+} from "@/lib/step4-schema";
 import type { LLMProvider } from "@/types/cfp";
-import type { ReviseSynergiesResponse, CapabilityPenetrationPath } from "@/types/cfp";
+import type { ReviseSynergiesResponse } from "@/types/cfp";
 
 // =============================================================================
 // POST /api/revise-synergies
 // =============================================================================
 
-function parsePathObject(raw: string): CapabilityPenetrationPath | null {
-  const tryParse = (str: string) => {
-    try {
-      const p = JSON.parse(str);
-      if (p && typeof p === "object" && p.sourceBusiness) return p;
-    } catch { /* skip */ }
-    return null;
-  };
-
-  let result = tryParse(raw.trim());
-  if (result) return result;
-
-  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
-  let match: RegExpExecArray | null;
-  while ((match = fenceRegex.exec(raw)) !== null) {
-    result = tryParse(match[1].trim());
-    if (result) return result;
-  }
-
-  const objMatch = raw.match(/\{[\s\S]*\}/);
-  if (objMatch) {
-    result = tryParse(objMatch[0]);
-    if (result) return result;
-  }
-
-  return null;
-}
+const REVISE_SYNERGIES_SYSTEM_PROMPT = [
+  "You are refining a single Step 4 v5.5 synergy entry for a DCF workflow.",
+  "Return only a compact structured JSON object matching the provided schema.",
+  "Use materiality compression: only update fields that the user feedback explicitly addresses.",
+  "Preserve synergy_id, basis_claim_ids, and source_ids where the data is unchanged.",
+  "Apply Review Prompt V2: but-for test, reciprocity test, projection rule.",
+  "If evidence is insufficient after revision, lower driver_eligibility and set human_review_required=true.",
+  "Do not treat management targets or hypothetical future outcomes as verified proof.",
+  "BANK SYNERGIES: For banking/financial segments, evaluate cross-sell via the Financial Services Productivity Loop.",
+  "If synergy relies on shared regulatory infrastructure (bank charter), classify as fully_verified_synergy and note the moat.",
+  "No markdown, commentary, or prose outside the structured response.",
+].join(" ");
 
 export async function POST(req: NextRequest): Promise<NextResponse<ReviseSynergiesResponse>> {
   try {
     const body = await req.json();
-    const { pathData, userFeedback, apiKey: runtimeKey, llmProvider = "claude" as LLMProvider } = body;
+    const {
+      pathData,
+      structuredSynergy,
+      userFeedback,
+      apiKey: runtimeKey,
+      llmProvider = "claude" as LLMProvider,
+    } = body;
 
     if (!pathData || !userFeedback) {
-      return NextResponse.json({ path: pathData, error: "Path data and feedback are required." }, { status: 400 });
+      return NextResponse.json(
+        { path: pathData, error: "Path data and feedback are required." },
+        { status: 400 },
+      );
     }
 
     const { apiKey, needsKey } = resolveApiKey(llmProvider, runtimeKey);
     if (needsKey) {
-      return NextResponse.json({ path: pathData, error: "No API key found for the selected provider.", requiresApiKey: true }, { status: 401 });
+      return NextResponse.json(
+        { path: pathData, error: "No API key found for the selected provider.", requiresApiKey: true },
+        { status: 401 },
+      );
     }
 
-    const prompt = `Refine this capability penetration analysis based on user feedback. Keep the exact same JSON schema. Current Analysis: ${JSON.stringify(pathData)}. Feedback: ${userFeedback}.
-Review Prompt V2 logic tests:
-- Preserve or update synergyClassification and reviewRationale using the but-for test and reciprocity test.
-- If the relationship is only adjacent profit with no functional interdependency, classify it as Adjacent Revenue.
-- Do not treat management targets or hypothetical future outcomes as verified proof.
-Return ONLY the updated JSON object. Do not modify the existing impactScore unless the user explicitly asks to change it.
+    const currentSynergy = structuredSynergy ?? {
+      synergy_id: `synergy:legacy:${String(pathData.sourceBusiness ?? "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      source_business: pathData.sourceBusiness,
+      core_capability: pathData.coreCapability,
+      recipient_business: pathData.recipientBusiness,
+      mechanism: pathData.mechanism,
+      product_impact: pathData.productImpact,
+      competitor_constraint: pathData.competitorConstraint,
+      financial_signal: {
+        type: pathData.financialSignal?.type ?? "Revenue Enablement",
+        evidence: pathData.financialSignal?.evidence ?? "",
+        status: pathData.financialSignal?.status ?? "product-only",
+        claim_id: "legacy:claim",
+        source_ids: ["legacy:source"],
+      },
+      flywheel: {
+        is_flywheel: pathData.flywheel?.isFlywheel ?? false,
+        loop_description: pathData.flywheel?.loopDescription ?? "",
+      },
+      integration_verdict: "PARTIAL",
+      differentiation_verdict: "PARTIAL",
+      causality_verdict: "PARTIAL",
+      classification: "context_only",
+      driver_eligibility: "CONTEXT_ONLY",
+      basis_claim_ids: ["legacy:claim"],
+      financial_metric_link: "",
+      impact_score: pathData.impactScore ?? 0,
+      human_review_required: true,
+      review_rationale: pathData.reviewRationale ?? "Legacy synergy revised without full source grounding.",
+    };
 
-Finance & Banking synergy guidance (apply when the segment involves lending, banking, deposits, payments, or financial products):
-- Traditional CapEx sharing or manufacturing synergies do not apply to banking segments.
-- Evaluate cross-sell synergies via the Financial Services Productivity Loop: a customer acquired in one product (e.g., personal loans) becomes a lower-CAC acquisition for adjacent products (e.g., investing, checking, insurance).
-- Quantify cross-sell lift using disclosed multi-product attach rates, members-per-product metrics, or product-per-member data from official filings.
-- If the synergy relies on shared regulatory infrastructure (e.g., bank charter enabling deposit + lending under one entity), classify it as Core Integration and note the regulatory moat in reviewRationale.`;
+    const prompt = [
+      "Refine this Step 4 v5.5 synergy entry based on user feedback.",
+      "Current structured synergy:",
+      JSON.stringify(currentSynergy, null, 2),
+      "User feedback:",
+      userFeedback,
+      "Task:",
+      "- Update only fields affected by the user feedback.",
+      "- Preserve synergy_id, basis_claim_ids, and source grounding where unchanged.",
+      "- Re-evaluate driver_eligibility after revision: FULL only for proven integration + differentiation + causality.",
+      "- Set human_review_required=true if any verdict is PARTIAL or evidence relies on inference.",
+      "- Do NOT modify impact_score unless the user explicitly asks.",
+      "",
+      "Finance & Banking guidance (apply when segment involves lending, banking, deposits, or payments):",
+      "- Traditional CapEx sharing does not apply to bank segments.",
+      "- Evaluate cross-sell via the Financial Services Productivity Loop (multi-product attach rates, CAC reduction).",
+      "- If synergy relies on bank charter (regulatory moat), classify fully_verified_synergy and document in review_rationale.",
+      "- Preserve step5_revenue_ceiling consistency — do not infer new revenue ceilings from this single synergy.",
+    ].join("\n");
 
-    const result = await callLLM({ provider: llmProvider, apiKey, prompt, maxTokens: 4096 });
-    const rawText = result.text;
+    const result = await callLLM({
+      provider: llmProvider,
+      apiKey,
+      systemPrompt: REVISE_SYNERGIES_SYSTEM_PROMPT,
+      prompt,
+      maxTokens: 4096,
+      responseSchema:
+        llmProvider === "gemini"
+          ? GEMINI_STEP4_SYNERGY_RESPONSE_SCHEMA
+          : STEP4_SYNERGY_RESPONSE_SCHEMA,
+      responseToolName: "submit_step4_synergy_revision",
+      responseToolDescription:
+        "Submit the revised Step 4 synergy entry preserving source grounding and driver eligibility.",
+    });
 
-    const path = parsePathObject(rawText);
+    const revisedStructured = parseStep4Synergy(extractStructuredPayload(result, llmProvider));
+    const path = {
+      ...projectStep4SynergyToPath(revisedStructured),
+      impactScore: pathData.impactScore,
+    };
 
-    if (!path) {
-      return NextResponse.json({ path: pathData, error: "Model did not return valid JSON." }, { status: 422 });
-    }
-
-    return NextResponse.json({ path });
+    return NextResponse.json({ path, structuredSynergy: revisedStructured });
   } catch (err: unknown) {
     console.error("[revise-synergies] Error:", err);
-    const message = err instanceof Error ? err.message : "An unexpected error occurred.";
-    return NextResponse.json({ path: null as unknown as CapabilityPenetrationPath, error: message }, { status: 500 });
+    let message = err instanceof Error ? err.message : "An unexpected error occurred.";
+    if (message.startsWith("[") || message.startsWith("{")) {
+      message = "The revision response didn't match the expected format. Please try again.";
+    }
+    return NextResponse.json(
+      { path: null as never, error: message },
+      { status: 500 },
+    );
   }
 }

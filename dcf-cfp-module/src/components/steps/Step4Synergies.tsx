@@ -14,7 +14,7 @@ import type {
   CapabilityPenetrationPath, AnalyzeSynergiesResponse, ReviseSynergiesResponse,
   CapitalAllocationData, CapitalCheckpoints,
   AnalyzeCapitalResponse, ReviseCapitalResponse,
-  Step4ReviewState,
+  Step4ReviewState, Step4WorkflowStatus,
   Step4StructuredResult,
 } from "@/types/cfp";
 
@@ -85,9 +85,9 @@ function buildTextReport(
       l.push("");
     }
     l.push("  CHECKPOINTS:");
-    l.push(`     CapEx Runway:          ${capital.checkpoints.capexRunway}`);
-    l.push(`     Subsidiary Margin:     ${capital.checkpoints.subsidiaryMargin}`);
-    l.push(`     Investment Efficiency: ${capital.checkpoints.investmentEfficiency}`);
+    l.push(`     CapEx Runway:       ${capital.checkpoints.capexRunway}`);
+    l.push(`     Scale Economics:    ${capital.checkpoints.scaleEconomics}`);
+    l.push(`     Guidance Alignment: ${capital.checkpoints.guidanceAlignment}`);
   }
 
   l.push(""); l.push(div); l.push("  END OF REPORT"); l.push(div);
@@ -175,19 +175,20 @@ function SourceGrounding({ sources }: { sources: Step4ReviewState["synergies"][n
   );
 }
 
+function workflowBadge(status: Step4WorkflowStatus) {
+  if (status === "can_continue") return { cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400", label: "Ready for Step 5" };
+  if (status === "blocked") return { cls: "border-red-500/30 bg-red-500/10 text-red-400", label: "Blocked — Fix before proceeding" };
+  return { cls: "border-amber-500/30 bg-amber-500/10 text-amber-300", label: "Review required" };
+}
+
 function ReviewSummaryPanel({ review }: { review: Step4ReviewState }) {
+  const badge = workflowBadge(review.workflowStatus);
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm font-semibold text-zinc-100">Step 4 Review Gate</p>
-        <span
-          className={`rounded-full border px-2 py-0.5 text-xs ${
-            review.workflowStatus === "can_continue"
-              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-              : "border-amber-500/30 bg-amber-500/10 text-amber-300"
-          }`}
-        >
-          {review.workflowStatus === "can_continue" ? "Ready for Step 5" : "Review required"}
+        <span className={`rounded-full border px-2 py-0.5 text-xs ${badge.cls}`}>
+          {badge.label}
         </span>
       </div>
       <p className="mt-1 text-sm text-zinc-400">{review.summary.oneLine}</p>
@@ -280,16 +281,59 @@ export default function Step4Synergies() {
     const fb = chatInput.trim(); if (!fb || isLoading) return;
     setChatHistory(h => [...h, { role: "user", text: fb }]); setChatInput(""); setErrorMsg(null); setIsLoading(true);
     try {
+      const structuredSynergy = step4Structured?.synergy_registry[synIdx] ?? null;
       const res = await fetch("/api/revise-synergies", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pathData: paths[synIdx], userFeedback: fb, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
+        body: JSON.stringify({ pathData: paths[synIdx], structuredSynergy, userFeedback: fb, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: ReviseSynergiesResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
       const updated = { ...d.path, impactScore: paths[synIdx].impactScore };
       setPaths(p => p.map((x, i) => i === synIdx ? updated : x));
+
+      // Sync step4Review so review panel reflects the revised synergy (B1 fix)
+      if (d.structuredSynergy) {
+        const sc = d.structuredSynergy;
+        setStep4Review(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            synergies: prev.synergies.map((syn, i) => {
+              if (i !== synIdx) return syn;
+              return {
+                ...syn,
+                integrationVerdict: sc.integration_verdict,
+                differentiationVerdict: sc.differentiation_verdict,
+                causalityVerdict: sc.causality_verdict,
+                classification: sc.classification,
+                driverEligibility: sc.driver_eligibility,
+                humanReviewRequired: sc.human_review_required,
+                basisClaimIds: sc.basis_claim_ids,
+                editable: {
+                  mechanism: sc.mechanism,
+                  productImpact: sc.product_impact,
+                  competitorConstraint: sc.competitor_constraint,
+                  financialMetricLink: sc.financial_metric_link,
+                  reviewRationale: sc.review_rationale,
+                },
+              };
+            }),
+          };
+        });
+        // Keep structuredResult in sync for future revisions
+        if (step4Structured) {
+          setStep4Structured(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              synergy_registry: prev.synergy_registry.map((s, i) => i === synIdx ? sc : s),
+            };
+          });
+        }
+      }
+
       setChatHistory(h => [...h, { role: "ai", text: "Updated." }]);
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (e: unknown) { const m = e instanceof Error ? e.message : "Failed."; setErrorMsg(m); setChatHistory(h => [...h, { role: "ai", text: `Error: ${m}` }]); } finally { setIsLoading(false); }
-  }, [chatInput, paths, synIdx, activeApiKey, settings.llmProvider, isLoading]);
+  }, [chatInput, paths, synIdx, step4Structured, activeApiKey, settings.llmProvider, isLoading]);
 
   const approveSynergy = () => {
     setSynApproved(p => p.map((v, i) => i === synIdx ? true : v)); resetChat();
@@ -499,7 +543,12 @@ export default function Step4Synergies() {
                   <div className="grid gap-2 text-xs text-zinc-500 sm:grid-cols-3">
                     <span><span className="text-zinc-400">Integration:</span> {curSynergyReview.integrationVerdict}</span>
                     <span><span className="text-zinc-400">Causality:</span> {curSynergyReview.causalityVerdict}</span>
-                    <span><span className="text-zinc-400">Driver:</span> {curSynergyReview.driverEligibility}</span>
+                    <span>
+                      <span className="text-zinc-400">Driver Eligibility: </span>
+                      <span className={`font-semibold ${curSynergyReview.driverEligibility === "FULL" ? "text-emerald-400" : curSynergyReview.driverEligibility === "NOT_ALLOWED" ? "text-red-400" : curSynergyReview.driverEligibility === "CONTEXT_ONLY" ? "text-zinc-400" : "text-amber-400"}`}>
+                        {curSynergyReview.driverEligibility}
+                      </span>
+                    </span>
                   </div>
                 )}
                 {curSynergyReview && <SourceGrounding sources={curSynergyReview.sources} />}
@@ -513,9 +562,17 @@ export default function Step4Synergies() {
               </div>
               <ChatBox history={chatHistory} input={chatInput} setInput={setChatInput} onSend={reviseSynergy} isLoading={isLoading} endRef={chatEndRef} />
               {errorMsg && <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300"><AlertCircle size={16} className="mt-0.5 shrink-0" /> {errorMsg}</div>}
-              <button onClick={approveSynergy} disabled={isLoading} className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">
-                <CheckCircle2 size={16} /> Approve &amp; {synIdx < paths.length - 1 ? "Next" : "Continue to Capital"} {synIdx < paths.length - 1 && <ArrowRight size={14} />}
-              </button>
+              <div className="flex gap-3">
+                {synIdx > 0 && (
+                  <button onClick={() => { setSynIdx(synIdx - 1); resetChat(); }} disabled={isLoading}
+                    className="flex items-center gap-2 rounded-lg border border-zinc-700 px-4 py-3 text-sm font-medium text-zinc-300 hover:border-zinc-600 hover:text-zinc-100 disabled:opacity-50">
+                    Previous
+                  </button>
+                )}
+                <button onClick={approveSynergy} disabled={isLoading} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">
+                  <CheckCircle2 size={16} /> Approve &amp; {synIdx < paths.length - 1 ? "Next" : "Continue to Capital"} {synIdx < paths.length - 1 && <ArrowRight size={14} />}
+                </button>
+              </div>
             </div>
           )}
 
@@ -640,6 +697,14 @@ export default function Step4Synergies() {
                     <div className="border-t border-zinc-800 px-4 py-3 text-xs text-zinc-400 space-y-1">
                       <p><span className="text-zinc-500">Capability:</span> {p.coreCapability}</p>
                       <p><span className="text-zinc-500">Review:</span> {p.synergyClassification ?? "Not classified"}</p>
+                      {p.driverEligibility && (
+                        <p>
+                          <span className="text-zinc-500">Driver Eligibility: </span>
+                          <span className={`font-semibold ${p.driverEligibility === "FULL" ? "text-emerald-400" : p.driverEligibility === "NOT_ALLOWED" ? "text-red-400" : p.driverEligibility === "CONTEXT_ONLY" ? "text-zinc-400" : "text-amber-400"}`}>
+                            {p.driverEligibility}
+                          </span>
+                        </p>
+                      )}
                       {p.reviewRationale && <p><span className="text-zinc-500">Rationale:</span> {p.reviewRationale}</p>}
                       <p><span className="text-zinc-500">Financial:</span> {p.financialSignal.type} — {p.financialSignal.status}</p>
                       <p><span className="text-zinc-500">Flywheel:</span> {p.flywheel.isFlywheel ? `Yes — ${p.flywheel.loopDescription}` : "No"}</p>
@@ -669,6 +734,25 @@ export default function Step4Synergies() {
                     ))}
                   </div>
                 </>
+              )}
+
+              {/* Step 5 Revenue Ceiling */}
+              {step4Review?.capitalAllocation?.step5RevenueCeiling && (
+                <div className={`rounded-xl border p-4 ${step4Review.capitalAllocation.step5RevenueCeiling.applies ? "border-amber-700/40 bg-amber-950/20" : "border-zinc-800 bg-zinc-950"}`}>
+                  <div className="flex items-center gap-2">
+                    <TrendingUp size={16} className={step4Review.capitalAllocation.step5RevenueCeiling.applies ? "text-amber-400" : "text-zinc-500"} />
+                    <p className="text-sm font-semibold text-zinc-100">Step 5 Revenue Ceiling</p>
+                    <span className={`rounded-full border px-2 py-0.5 text-xs ${step4Review.capitalAllocation.step5RevenueCeiling.applies ? "border-amber-500/30 bg-amber-500/10 text-amber-400" : "border-zinc-700 bg-zinc-900 text-zinc-500"}`}>
+                      {step4Review.capitalAllocation.step5RevenueCeiling.applies ? "Applies" : "No ceiling"}
+                    </span>
+                    {step4Review.capitalAllocation.step5RevenueCeiling.ceiling_revenue_usd_m !== null && (
+                      <span className="ml-auto text-sm font-bold text-amber-300">
+                        ${step4Review.capitalAllocation.step5RevenueCeiling.ceiling_revenue_usd_m.toLocaleString()}M
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-400">{step4Review.capitalAllocation.step5RevenueCeiling.reason}</p>
+                </div>
               )}
 
               {/* Actions */}

@@ -85,9 +85,9 @@ function buildTextReport(
       l.push("");
     }
     l.push("  CHECKPOINTS:");
-    l.push(`     CapEx Runway:          ${capital.checkpoints.capexRunway}`);
-    l.push(`     Subsidiary Margin:     ${capital.checkpoints.subsidiaryMargin}`);
-    l.push(`     Investment Efficiency: ${capital.checkpoints.investmentEfficiency}`);
+    l.push(`     CapEx Runway:       ${capital.checkpoints.capexRunway}`);
+    l.push(`     Scale Economics:    ${capital.checkpoints.scaleEconomics}`);
+    l.push(`     Guidance Alignment: ${capital.checkpoints.guidanceAlignment}`);
   }
 
   l.push(""); l.push(div); l.push("  END OF REPORT"); l.push(div);

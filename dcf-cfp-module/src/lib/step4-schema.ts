@@ -4,6 +4,7 @@ import type {
   CapabilityPenetrationPath,
   CapitalAllocationData,
   Step4ReviewState,
+  Step4WorkflowStatus,
 } from "../types/cfp.ts";
 
 /** Truncates to maxLen instead of hard-failing — same pattern as step2-bank-schema.ts */
@@ -251,8 +252,21 @@ export const Step4StructuredSchema = z
 
 export type Step4StructuredResult = z.infer<typeof Step4StructuredSchema>;
 export type Step4SynergyStructured = z.infer<typeof Step4SynergySchema>;
+export type Step4CapitalMetricStructured = z.infer<typeof CapitalMetricSchema>;
 
 const generatedSchema = zodToJsonSchema(Step4StructuredSchema, "Step4StructuredResult");
+
+const generatedSynergySchema = zodToJsonSchema(Step4SynergySchema, "Step4SynergyStructured");
+export const STEP4_SYNERGY_RESPONSE_SCHEMA =
+  "definitions" in generatedSynergySchema && generatedSynergySchema.definitions
+    ? generatedSynergySchema.definitions.Step4SynergyStructured
+    : generatedSynergySchema;
+
+const generatedCapitalMetricSchema = zodToJsonSchema(CapitalMetricSchema, "Step4CapitalMetricStructured");
+export const STEP4_CAPITAL_METRIC_RESPONSE_SCHEMA =
+  "definitions" in generatedCapitalMetricSchema && generatedCapitalMetricSchema.definitions
+    ? generatedCapitalMetricSchema.definitions.Step4CapitalMetricStructured
+    : generatedCapitalMetricSchema;
 
 export const STEP4_RESPONSE_SCHEMA =
   "definitions" in generatedSchema && generatedSchema.definitions
@@ -347,6 +361,14 @@ function sanitizeSchemaForGemini(value: unknown): unknown {
 
 export const GEMINI_STEP4_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
   STEP4_RESPONSE_SCHEMA,
+) as Record<string, unknown>;
+
+export const GEMINI_STEP4_SYNERGY_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
+  STEP4_SYNERGY_RESPONSE_SCHEMA,
+) as Record<string, unknown>;
+
+export const GEMINI_STEP4_CAPITAL_METRIC_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
+  STEP4_CAPITAL_METRIC_RESPONSE_SCHEMA,
 ) as Record<string, unknown>;
 
 function normalizeStep4StructuredPayload(payload: unknown): unknown {
@@ -518,6 +540,14 @@ export function parseStep4StructuredResult(payload: unknown): Step4StructuredRes
   return Step4StructuredSchema.parse(normalizeStep4StructuredPayload(payload));
 }
 
+export function parseStep4Synergy(payload: unknown): Step4SynergyStructured {
+  return Step4SynergySchema.parse(payload);
+}
+
+export function parseStep4CapitalMetric(payload: unknown): Step4CapitalMetricStructured {
+  return CapitalMetricSchema.parse(payload);
+}
+
 function classificationForPath(
   synergy: Step4StructuredResult["synergy_registry"][number],
 ): CapabilityPenetrationPath["synergyClassification"] {
@@ -528,10 +558,10 @@ function classificationForPath(
   return "Material Synergy";
 }
 
-export function projectStep4StructuredToPaths(
-  result: Step4StructuredResult,
-): CapabilityPenetrationPath[] {
-  return result.synergy_registry.map((synergy) => ({
+export function projectStep4SynergyToPath(
+  synergy: Step4StructuredResult["synergy_registry"][number],
+): CapabilityPenetrationPath {
+  return {
     sourceBusiness: synergy.source_business,
     coreCapability: synergy.core_capability,
     recipientBusiness: synergy.recipient_business,
@@ -550,7 +580,14 @@ export function projectStep4StructuredToPaths(
     impactScore: synergy.impact_score,
     synergyClassification: classificationForPath(synergy),
     reviewRationale: synergy.review_rationale,
-  }));
+    driverEligibility: synergy.driver_eligibility,
+  };
+}
+
+export function projectStep4StructuredToPaths(
+  result: Step4StructuredResult,
+): CapabilityPenetrationPath[] {
+  return result.synergy_registry.map((synergy) => projectStep4SynergyToPath(synergy));
 }
 
 export function projectStep4StructuredToCapital(
@@ -567,21 +604,34 @@ export function projectStep4StructuredToCapital(
     })),
     checkpoints: {
       capexRunway: result.capital_allocation.feasibility_checkpoints.capex_runway,
-      subsidiaryMargin: result.capital_allocation.feasibility_checkpoints.scale_economics,
-      investmentEfficiency: result.capital_allocation.feasibility_checkpoints.guidance_alignment,
+      scaleEconomics: result.capital_allocation.feasibility_checkpoints.scale_economics,
+      guidanceAlignment: result.capital_allocation.feasibility_checkpoints.guidance_alignment,
     },
   };
 }
 
-export function buildStep4ReviewState(result: Step4StructuredResult): Step4ReviewState {
-  const sourceById = new Map(result.sources.map((source) => [source.source_id, source]));
+const HARD_STOP_CODES_S4 = new Set(["UNSUPPORTED_SYNERGY_FORECASTABLE", "CAPITAL_BLOCKED"]);
+
+function deriveStep4WorkflowStatus(result: Step4StructuredResult): Step4WorkflowStatus {
+  const hasHardStop =
+    result.validation_warnings.some(
+      (w) => w.severity === "high" && HARD_STOP_CODES_S4.has(w.code),
+    ) || result.capital_allocation.workflow_status === "BLOCKED";
+  if (hasHardStop) return "blocked";
+
   const needsReview =
     result.synergy_registry.some((synergy) => synergy.human_review_required) ||
-    result.capital_allocation.workflow_status !== "READY" ||
+    result.capital_allocation.workflow_status === "NEEDS_REVIEW" ||
     result.validation_warnings.some((warning) => warning.severity === "high");
 
+  return needsReview ? "needs_review" : "can_continue";
+}
+
+export function buildStep4ReviewState(result: Step4StructuredResult): Step4ReviewState {
+  const sourceById = new Map(result.sources.map((source) => [source.source_id, source]));
+
   return {
-    workflowStatus: needsReview ? "needs_review" : "can_continue",
+    workflowStatus: deriveStep4WorkflowStatus(result),
     approved: false,
     approvedAt: null,
     summary: {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import {
   buildStep4ReviewState,
   GEMINI_STEP4_RESPONSE_SCHEMA,
@@ -17,7 +17,7 @@ import type { AnalyzeCapitalResponse, CapitalAllocationData } from "@/types/cfp"
 
 const emptyCapital: CapitalAllocationData = {
   investmentMatrix: [],
-  checkpoints: { capexRunway: "", subsidiaryMargin: "", investmentEfficiency: "" },
+  checkpoints: { capexRunway: "", scaleEconomics: "", guidanceAlignment: "" },
 };
 
 const STEP4_CAPITAL_SYSTEM_PROMPT = [
@@ -78,23 +78,6 @@ function buildStep4CapitalPrompt(inputs: {
     "  Document the ALM assessment in validation_warnings and human review fields.",
     "- BANK NEWS TOPICS: Extract and apply material signals from news: credit default rate changes, student loan policy shifts, Fed rate trajectory, 10-year Treasury yield trend, deposit inflows/outflows, capital ratio disclosures, and regulatory enforcement actions.",
   ].join("\n");
-}
-
-function extractStructuredPayload(result: {
-  text: string;
-  structuredData?: unknown;
-  finishReason?: string;
-  finishMessage?: string;
-}, provider: LLMProvider): unknown {
-  if (result.structuredData && typeof result.structuredData === "object") {
-    return result.structuredData;
-  }
-
-  return parseStructuredJsonText(result.text, {
-    provider,
-    finishReason: result.finishReason,
-    finishMessage: result.finishMessage,
-  });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapitalResponse>> {

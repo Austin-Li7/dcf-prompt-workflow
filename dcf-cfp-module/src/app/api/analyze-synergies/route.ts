@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import {
   buildStep4ReviewState,
   GEMINI_STEP4_RESPONSE_SCHEMA,
@@ -65,23 +65,6 @@ function buildStep4Prompt(inputs: {
   ].join("\n");
 }
 
-function extractStructuredPayload(result: {
-  text: string;
-  structuredData?: unknown;
-  finishReason?: string;
-  finishMessage?: string;
-}, provider: LLMProvider): unknown {
-  if (result.structuredData && typeof result.structuredData === "object") {
-    return result.structuredData;
-  }
-
-  return parseStructuredJsonText(result.text, {
-    provider,
-    finishReason: result.finishReason,
-    finishMessage: result.finishMessage,
-  });
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynergiesResponse>> {
   try {
     const body = await req.json();
@@ -114,7 +97,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynerg
     const paths = projectStep4StructuredToPaths(structuredResult);
     const capital = projectStep4StructuredToCapital(structuredResult);
     const step4Review = buildStep4ReviewState(structuredResult);
-    if (paths.length === 0) {
+
+    // Single-segment companies legitimately have zero synergy paths — the v5.5
+    // spec instructs the model to set workflow_status=READY and return an empty
+    // synergy_registry. Only fail hard when paths are absent AND the result does
+    // not indicate it's intentionally empty.
+    if (paths.length === 0 && structuredResult.capital_allocation.workflow_status !== "READY") {
       return NextResponse.json(
         {
           paths: [],

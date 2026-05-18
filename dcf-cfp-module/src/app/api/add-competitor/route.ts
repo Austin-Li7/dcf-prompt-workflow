@@ -1,15 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import {
   GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA,
   parseStep3Category,
+  projectStep3CategoryToLegacy,
   STEP3_CATEGORY_RESPONSE_SCHEMA,
 } from "@/lib/step3-schema";
 import type {
   AddCompetitorResponse,
-  CategoryCompetitionEntry,
   LLMProvider,
-  Step3StructuredCategory,
 } from "@/types/cfp";
 
 // =============================================================================
@@ -98,38 +97,6 @@ function buildPrompt(
   return lines.join("\n");
 }
 
-function projectStructuredToLegacy(cat: Step3StructuredCategory): CategoryCompetitionEntry {
-  return {
-    category: cat.category,
-    primaryCompetitor: cat.primary_competitor,
-    competitiveStatus: cat.competitive_status,
-    basisForPairing: cat.basis_for_pairing,
-    forces: {
-      rivalry: { rating: cat.forces.rivalry.rating, justification: cat.forces.rivalry.justification },
-      newEntrants: { rating: cat.forces.new_entrants.rating, justification: cat.forces.new_entrants.justification },
-      suppliers: { rating: cat.forces.suppliers.rating, justification: cat.forces.suppliers.justification },
-      buyers: { rating: cat.forces.buyers.rating, justification: cat.forces.buyers.justification },
-      substitutes: { rating: cat.forces.substitutes.rating, justification: cat.forces.substitutes.justification },
-    },
-    verificationNote: cat.verification_note ?? undefined,
-    sourceQuality: cat.source_quality,
-    confidence: cat.confidence,
-  };
-}
-
-function extractStructuredPayload(
-  result: { text: string; structuredData?: unknown; finishReason?: string; finishMessage?: string },
-  provider: LLMProvider,
-): unknown {
-  if (result.structuredData && typeof result.structuredData === "object") {
-    return result.structuredData;
-  }
-  return parseStructuredJsonText(result.text, {
-    provider,
-    finishReason: result.finishReason,
-    finishMessage: result.finishMessage,
-  });
-}
 
 export async function POST(req: NextRequest): Promise<NextResponse<AddCompetitorResponse>> {
   try {
@@ -207,7 +174,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AddCompetitor
     });
 
     const structuredCategory = parseStep3Category(extractStructuredPayload(result, llmProvider));
-    const categoryEntry = projectStructuredToLegacy(structuredCategory);
+    const categoryEntry = projectStep3CategoryToLegacy(structuredCategory);
 
     return NextResponse.json({ category: categoryEntry, structuredCategory });
   } catch (err: unknown) {

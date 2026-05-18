@@ -549,6 +549,8 @@ export interface AnnualSummary {
 
 export type ForceRating = "Low" | "Medium" | "High";
 
+export type Step3WorkflowStatus = "needs_review" | "can_continue" | "blocked";
+
 export interface ForceDetail {
   rating: ForceRating;
   justification: string;
@@ -571,6 +573,8 @@ export interface CategoryCompetitionEntry {
   verificationNote?: string;
   sourceQuality?: "Official" | "External" | "Mixed" | "Unverified";
   confidence?: "High" | "Medium" | "Low";
+  materiality?: "HIGH" | "MEDIUM" | "LOW";
+  pairingStatus?: "VALIDATED" | "PROVISIONAL" | "LOW_EVIDENCE";
 }
 
 export type Step3EvidenceLevel =
@@ -616,6 +620,7 @@ export interface Step3StructuredCategory {
   category: string;
   mapped_from_step1_ids: string[];
   materiality: "HIGH" | "MEDIUM" | "LOW";
+  pairing_status: "VALIDATED" | "PROVISIONAL" | "LOW_EVIDENCE";
   primary_competitor: string;
   competitive_status: "Leader" | "Challenger" | "Unclear";
   basis_for_pairing: string;
@@ -676,7 +681,7 @@ export interface Step3ReviewCategory {
 }
 
 export interface Step3ReviewState {
-  workflowStatus: Step1WorkflowStatus;
+  workflowStatus: Step3WorkflowStatus;
   approved: boolean;
   approvedAt: string | null;
   summary: Step1ReviewSummary;
@@ -756,6 +761,7 @@ export interface CapabilityPenetrationPath {
   impactScore: number; // -5 to +5
   synergyClassification?: "Material Synergy" | "Adjacent Revenue" | "Disputed";
   reviewRationale?: string;
+  driverEligibility?: "FULL" | "CAPPED_3PP" | "CAPPED_2PP" | "CONTEXT_ONLY" | "NOT_ALLOWED";
 }
 
 /** Shape returned by POST /api/analyze-synergies */
@@ -771,6 +777,7 @@ export interface AnalyzeSynergiesResponse {
 /** Shape returned by POST /api/revise-synergies */
 export interface ReviseSynergiesResponse {
   path: CapabilityPenetrationPath;
+  structuredSynergy?: Step4StructuredResult["synergy_registry"][number] | null;
   error?: string;
   requiresApiKey?: boolean;
 }
@@ -790,8 +797,8 @@ export interface InvestmentMatrixEntry {
 
 export interface CapitalCheckpoints {
   capexRunway: string;
-  subsidiaryMargin: string;
-  investmentEfficiency: string;
+  scaleEconomics: string;
+  guidanceAlignment: string;
 }
 
 export interface CapitalAllocationData {
@@ -854,8 +861,10 @@ export interface Step4ReviewCapitalMetric {
   };
 }
 
+export type Step4WorkflowStatus = "needs_review" | "can_continue" | "blocked";
+
 export interface Step4ReviewState {
-  workflowStatus: "needs_review" | "can_continue";
+  workflowStatus: Step4WorkflowStatus;
   approved: boolean;
   approvedAt: string | null;
   summary: Step1ReviewSummary;
@@ -975,6 +984,7 @@ export interface AnalyzeCapitalResponse {
 /** Shape returned by POST /api/revise-capital */
 export interface ReviseCapitalResponse {
   entry: InvestmentMatrixEntry;
+  structuredMetric?: Step4StructuredResult["capital_allocation"]["capital_metrics"][number] | null;
   error?: string;
   requiresApiKey?: boolean;
 }

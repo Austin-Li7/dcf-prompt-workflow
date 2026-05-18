@@ -135,7 +135,8 @@ export default function Step3Competition() {
   const [addFormCompetitor, setAddFormCompetitor] = useState("");
   const [addFormCategory, setAddFormCategory] = useState("");
   const [isAddLoading, setIsAddLoading] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
+  const [addFormError, setAddFormError] = useState<string | null>(null);
+  const [reanalyseError, setReanalyseError] = useState<string | null>(null);
 
   // Tracks original competitor name per index — used to detect edits needing re-analysis
   const originalCompetitorNamesRef = useRef<Record<number, string>>({});
@@ -289,7 +290,7 @@ export default function Step3Competition() {
   const handleReanalyse = useCallback(async () => {
     if (isLoading || isAddLoading) return;
     setIsAddLoading(true);
-    setAddError(null);
+    setReanalyseError(null);
 
     try {
       const res = await fetch("/api/add-competitor", {
@@ -316,11 +317,37 @@ export default function Step3Competition() {
 
       setCategories((prev) => prev.map((c, i) => (i === currentIndex ? data.category! : c)));
       if (data.structuredCategory) {
+        const sc = data.structuredCategory;
         setStructuredResult((prev) =>
           prev
-            ? { ...prev, categories: prev.categories.map((c, i) => (i === currentIndex ? data.structuredCategory! : c)) }
+            ? { ...prev, categories: prev.categories.map((c, i) => (i === currentIndex ? sc : c)) }
             : prev,
         );
+        setStep3Review((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            categories: prev.categories.map((cat, i) => {
+              if (i !== currentIndex) return cat;
+              return {
+                ...cat,
+                humanReviewRequired: sc.human_review_required,
+                sourceQuality: sc.source_quality,
+                confidence: sc.confidence,
+                materiality: sc.materiality,
+                verificationNote: sc.verification_note,
+                basisClaimIds: sc.basis_claim_ids,
+                sourceIds: sc.source_ids,
+                editable: {
+                  primaryCompetitor: sc.primary_competitor,
+                  competitiveStatus: sc.competitive_status,
+                  basisForPairing: sc.basis_for_pairing,
+                },
+                forces: sc.forces,
+              };
+            }),
+          };
+        });
       }
       // Mark as clean — re-analyse button disappears
       originalCompetitorNamesRef.current[currentIndex] = data.category.primaryCompetitor;
@@ -328,7 +355,7 @@ export default function Step3Competition() {
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Re-analysis failed.";
-      setAddError(msg);
+      setReanalyseError(msg);
     } finally {
       setIsAddLoading(false);
     }
@@ -342,11 +369,11 @@ export default function Step3Competition() {
     const trimmedCompetitor = addFormCompetitor.trim();
     const trimmedCategory = addFormCategory.trim();
 
-    if (!trimmedCompetitor) { setAddError("Competitor name is required."); return; }
-    if (addFormContext?.mode === "category" && !trimmedCategory) { setAddError("Category name is required."); return; }
+    if (!trimmedCompetitor) { setAddFormError("Competitor name is required."); return; }
+    if (addFormContext?.mode === "category" && !trimmedCategory) { setAddFormError("Category name is required."); return; }
 
     setIsAddLoading(true);
-    setAddError(null);
+    setAddFormError(null);
 
     const targetCategory =
       addFormContext?.mode === "category"
@@ -402,7 +429,7 @@ export default function Step3Competition() {
       setAddFormCategory("");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to add competitor.";
-      setAddError(msg);
+      setAddFormError(msg);
     } finally {
       setIsAddLoading(false);
     }
@@ -415,7 +442,7 @@ export default function Step3Competition() {
   const handleFinalizedReanalyse = useCallback(async () => {
     if (finalizedReanalyseIndex === null || !finalizedReanalyseName.trim() || isFinalizedReanalysing) return;
     setIsFinalizedReanalysing(true);
-    setAddError(null);
+    setReanalyseError(null);
 
     const idx = finalizedReanalyseIndex;
     try {
@@ -443,16 +470,42 @@ export default function Step3Competition() {
 
       setCategories((prev) => prev.map((c, i) => (i === idx ? data.category! : c)));
       if (data.structuredCategory) {
+        const sc = data.structuredCategory;
         setStructuredResult((prev) =>
-          prev ? { ...prev, categories: prev.categories.map((c, i) => (i === idx ? data.structuredCategory! : c)) } : prev,
+          prev ? { ...prev, categories: prev.categories.map((c, i) => (i === idx ? sc : c)) } : prev,
         );
+        setStep3Review((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            categories: prev.categories.map((cat, i) => {
+              if (i !== idx) return cat;
+              return {
+                ...cat,
+                humanReviewRequired: sc.human_review_required,
+                sourceQuality: sc.source_quality,
+                confidence: sc.confidence,
+                materiality: sc.materiality,
+                verificationNote: sc.verification_note,
+                basisClaimIds: sc.basis_claim_ids,
+                sourceIds: sc.source_ids,
+                editable: {
+                  primaryCompetitor: sc.primary_competitor,
+                  competitiveStatus: sc.competitive_status,
+                  basisForPairing: sc.basis_for_pairing,
+                },
+                forces: sc.forces,
+              };
+            }),
+          };
+        });
       }
       originalCompetitorNamesRef.current[idx] = data.category.primaryCompetitor;
       setFinalizedReanalyseIndex(null);
       setFinalizedReanalyseName("");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Re-analysis failed.";
-      setAddError(msg);
+      setReanalyseError(msg);
     } finally {
       setIsFinalizedReanalysing(false);
     }
@@ -538,7 +591,7 @@ export default function Step3Competition() {
   );
 
   // ------------------------------------------------------------------
-  // Approve current category & advance
+  // Approve current category & advance / go back
   // ------------------------------------------------------------------
   const handleApprove = () => {
     setApprovedFlags((prev) => prev.map((v, i) => (i === currentIndex ? true : v)));
@@ -549,9 +602,16 @@ export default function Step3Competition() {
     if (currentIndex < categories.length - 1) {
       setCurrentIndex(currentIndex + 1);
     } else {
-      // All approved
       setPhase("finalized");
     }
+  };
+
+  const handlePrevious = () => {
+    if (currentIndex === 0) return;
+    setChatHistory([]);
+    setChatInput("");
+    setErrorMsg(null);
+    setCurrentIndex(currentIndex - 1);
   };
 
   // ------------------------------------------------------------------
@@ -561,7 +621,7 @@ export default function Step3Competition() {
     const approvedReview = step3Review
       ? {
           ...step3Review,
-          workflowStatus: "can_continue" as const,
+          workflowStatus: "can_continue" as "can_continue",
           approved: true,
           approvedAt: new Date().toISOString(),
         }
@@ -637,9 +697,9 @@ export default function Step3Competition() {
         autoFocus
         className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
       />
-      {addError && (
+      {addFormError && (
         <p className="flex items-center gap-1.5 text-xs text-red-400">
-          <AlertCircle size={13} /> {addError}
+          <AlertCircle size={13} /> {addFormError}
         </p>
       )}
       <div className="flex gap-2">
@@ -652,7 +712,7 @@ export default function Step3Competition() {
           {isAddLoading ? "Analysing…" : "Analyse & Add"}
         </button>
         <button
-          onClick={() => { setAddFormContext(null); setAddError(null); setAddFormCompetitor(""); setAddFormCategory(""); }}
+          onClick={() => { setAddFormContext(null); setAddFormError(null); setAddFormCompetitor(""); setAddFormCategory(""); }}
           className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200"
         >
           Cancel
@@ -724,10 +784,16 @@ export default function Step3Competition() {
                       className={`rounded-full px-3 py-1 text-xs font-semibold ${
                         step3Review.workflowStatus === "can_continue"
                           ? "bg-emerald-600/15 text-emerald-300"
+                          : step3Review.workflowStatus === "blocked"
+                          ? "bg-red-600/15 text-red-300"
                           : "bg-amber-600/15 text-amber-300"
                       }`}
                     >
-                      {step3Review.workflowStatus === "can_continue" ? "Ready for Step 4" : "Review required"}
+                      {step3Review.workflowStatus === "can_continue"
+                        ? "Ready for Step 4"
+                        : step3Review.workflowStatus === "blocked"
+                        ? "Blocked — Fix before proceeding"
+                        : "Review required"}
                     </span>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -760,7 +826,29 @@ export default function Step3Competition() {
 
               {/* Category card */}
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-5">
-                <h4 className="text-lg font-semibold text-zinc-100">{current.category}</h4>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-lg font-semibold text-zinc-100">{current.category}</h4>
+                  {current.materiality && (
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      current.materiality === "HIGH"
+                        ? "bg-blue-500/15 text-blue-300"
+                        : current.materiality === "MEDIUM"
+                        ? "bg-amber-500/15 text-amber-300"
+                        : "bg-zinc-500/15 text-zinc-400"
+                    }`}>
+                      {current.materiality} Materiality
+                    </span>
+                  )}
+                  {current.pairingStatus && current.pairingStatus !== "PROVISIONAL" && (
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      current.pairingStatus === "VALIDATED"
+                        ? "bg-emerald-500/15 text-emerald-300"
+                        : "bg-red-500/15 text-red-300"
+                    }`}>
+                      {current.pairingStatus === "VALIDATED" ? "Pairing Validated" : "Low Evidence"}
+                    </span>
+                  )}
+                </div>
                 <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
                   <label className="block">
                     <span className="text-xs text-zinc-500">Primary competitor</span>
@@ -862,19 +950,55 @@ export default function Step3Competition() {
                     );
                   })}
                 </div>
+
+                {/* Evidence / claims section */}
+                {structuredResult && (() => {
+                  const sc = structuredResult.categories[currentIndex];
+                  if (!sc) return null;
+                  const claimMap = new Map(structuredResult.claims.map((c) => [c.claim_id, c]));
+                  const forceClaims = FORCE_LABELS.map(({ key, label }) => {
+                    const forceKey = key === "newEntrants" ? "new_entrants" : key;
+                    const force = sc.forces[forceKey as keyof typeof sc.forces];
+                    const claim = force ? claimMap.get(force.claim_id) : undefined;
+                    return { label, claim };
+                  }).filter((entry) => entry.claim?.source_snippet);
+                  if (forceClaims.length === 0) return null;
+                  return (
+                    <details className="mt-3 group">
+                      <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-300 flex items-center gap-1">
+                        <ChevronRight size={12} className="transition-transform group-open:rotate-90" />
+                        Evidence snippets
+                      </summary>
+                      <div className="mt-2 space-y-1.5 pl-4">
+                        {forceClaims.map(({ label, claim }) => (
+                          <div key={claim!.claim_id} className="rounded bg-zinc-950 px-3 py-2 text-xs">
+                            <span className="font-medium text-zinc-400">{label}: </span>
+                            <span className="text-zinc-500 italic">&ldquo;{claim!.source_snippet}&rdquo;</span>
+                            <span className={`ml-2 rounded px-1 py-0.5 text-[10px] font-semibold ${
+                              claim!.evidence_level === "DISCLOSED" ? "bg-emerald-900/40 text-emerald-400" :
+                              claim!.evidence_level === "STRONG_INFERENCE" ? "bg-blue-900/40 text-blue-400" :
+                              claim!.evidence_level === "WEAK_INFERENCE" ? "bg-amber-900/40 text-amber-400" :
+                              "bg-red-900/40 text-red-400"
+                            }`}>{claim!.evidence_level}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  );
+                })()}
               </div>
 
               {/* Add competitor / add new category */}
               <div className="flex flex-wrap gap-2">
                 <button
-                  onClick={() => { setAddFormContext({ mode: "competitor", targetIndex: currentIndex }); setAddFormCompetitor(""); setAddError(null); }}
+                  onClick={() => { setAddFormContext({ mode: "competitor", targetIndex: currentIndex }); setAddFormCompetitor(""); setAddFormError(null); }}
                   disabled={isLoading || isAddLoading}
                   className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-blue-600/50 hover:text-blue-400 disabled:opacity-40"
                 >
                   <Plus size={13} /> Add Competitor for This Category
                 </button>
                 <button
-                  onClick={() => { setAddFormContext({ mode: "category" }); setAddFormCompetitor(""); setAddFormCategory(""); setAddError(null); }}
+                  onClick={() => { setAddFormContext({ mode: "category" }); setAddFormCompetitor(""); setAddFormCategory(""); setAddFormError(null); }}
                   disabled={isLoading || isAddLoading}
                   className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-emerald-600/50 hover:text-emerald-400 disabled:opacity-40"
                 >
@@ -920,23 +1044,39 @@ export default function Step3Competition() {
                 </button>
               </div>
 
-              {/* Error */}
+              {/* Errors */}
               {errorMsg && (
                 <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
                   <AlertCircle size={16} className="mt-0.5 shrink-0" /> {errorMsg}
                 </div>
               )}
+              {reanalyseError && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
+                  <AlertCircle size={16} className="mt-0.5 shrink-0" /> {reanalyseError}
+                </div>
+              )}
 
-              {/* Approve button */}
-              <button
-                onClick={handleApprove}
-                disabled={isLoading}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-              >
-                <CheckCircle2 size={16} />
-                I Agree — Approve &amp; {currentIndex < categories.length - 1 ? "Next" : "Finalize"}
-                {currentIndex < categories.length - 1 && <ArrowRight size={14} />}
-              </button>
+              {/* Navigation buttons */}
+              <div className="flex gap-2">
+                {currentIndex > 0 && (
+                  <button
+                    onClick={handlePrevious}
+                    disabled={isLoading}
+                    className="flex items-center gap-2 rounded-lg border border-zinc-700 px-5 py-3 text-sm font-medium text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 disabled:opacity-50"
+                  >
+                    ← Previous
+                  </button>
+                )}
+                <button
+                  onClick={handleApprove}
+                  disabled={isLoading}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  <CheckCircle2 size={16} />
+                  I Agree — Approve &amp; {currentIndex < categories.length - 1 ? "Next" : "Finalize"}
+                  {currentIndex < categories.length - 1 && <ArrowRight size={14} />}
+                </button>
+              </div>
             </div>
           )}
 
@@ -974,6 +1114,13 @@ export default function Step3Competition() {
                     <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-900">
                       <ChevronRight size={14} className="shrink-0 text-zinc-500 transition-transform group-open:rotate-90" />
                       <span className="flex-1 truncate">{cat.category}</span>
+                      {cat.materiality && (
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
+                          cat.materiality === "HIGH" ? "bg-blue-500/15 text-blue-300" :
+                          cat.materiality === "MEDIUM" ? "bg-amber-500/15 text-amber-300" :
+                          "bg-zinc-500/15 text-zinc-400"
+                        }`}>{cat.materiality}</span>
+                      )}
                       {pendingApprovalIndices.has(i) && (
                         <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
                           Pending Review
@@ -986,7 +1133,7 @@ export default function Step3Competition() {
                           e.preventDefault();
                           setAddFormContext({ mode: "competitor", targetIndex: i });
                           setAddFormCompetitor("");
-                          setAddError(null);
+                          setAddFormError(null);
                         }}
                         title="Add another competitor for this category"
                         className="shrink-0 rounded p-1 text-zinc-500 hover:text-blue-400"
@@ -1002,7 +1149,7 @@ export default function Step3Competition() {
                           } else {
                             setFinalizedReanalyseIndex(i);
                             setFinalizedReanalyseName(cat.primaryCompetitor);
-                            setAddError(null);
+                            setReanalyseError(null);
                           }
                         }}
                         title="Re-analyse with a different competitor"
@@ -1040,9 +1187,9 @@ export default function Step3Competition() {
                             Cancel
                           </button>
                         </div>
-                        {addError && finalizedReanalyseIndex === i && (
+                        {reanalyseError && finalizedReanalyseIndex === i && (
                           <p className="flex items-center gap-1.5 text-xs text-red-400">
-                            <AlertCircle size={13} /> {addError}
+                            <AlertCircle size={13} /> {reanalyseError}
                           </p>
                         )}
                       </div>
@@ -1096,7 +1243,7 @@ export default function Step3Competition() {
               {/* Add new category — button + form */}
               <div className="flex flex-wrap gap-2">
                 <button
-                  onClick={() => { setAddFormContext({ mode: "category" }); setAddFormCompetitor(""); setAddFormCategory(""); setAddError(null); }}
+                  onClick={() => { setAddFormContext({ mode: "category" }); setAddFormCompetitor(""); setAddFormCategory(""); setAddFormError(null); }}
                   disabled={isAddLoading || isFinalizedReanalysing}
                   className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-emerald-600/50 hover:text-emerald-400 disabled:opacity-40"
                 >
@@ -1132,6 +1279,10 @@ export default function Step3Competition() {
                     setApprovedFlags([]);
                     setCurrentIndex(0);
                     setChatHistory([]);
+                    setPendingApprovalIndices(new Set());
+                    setAddFormContext(null);
+                    setAddFormError(null);
+                    setReanalyseError(null);
                     setPhase("generate");
                   }}
                   className="flex items-center gap-2 rounded-lg border border-zinc-700 px-5 py-2.5 text-sm text-zinc-400 hover:border-red-700/50 hover:text-red-400"
