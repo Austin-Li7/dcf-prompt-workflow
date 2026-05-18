@@ -29,8 +29,16 @@ const SourceSchema = z.object({
 const ClaimSchema = z.object({
   claim_id: z.string().min(1),
   text: z.string().min(1),
-  source_snippet: compactText(180).nullable(),
-  source_location: z.string().min(1).nullable(),
+  // S4: LLM may send "" instead of null — preprocess empty string → null before schema runs
+  source_snippet: z.preprocess(
+    (v) => (v === "" ? null : v),
+    compactText(180).nullable(),
+  ),
+  // S5: same guard as source_snippet
+  source_location: z.preprocess(
+    (v) => (v === "" ? null : v),
+    z.string().min(1).nullable(),
+  ),
   evidence_level: EvidenceLevelSchema,
   basis_claim_ids: z.array(z.string().min(1)).optional(),
 });
@@ -55,7 +63,8 @@ const AnalysisOfferingSchema = z.object({
   raw_name_variants: compactStringList(2).default([]),
   mapped_from_reported_node_ids: z.array(z.string().min(1)).min(1),
   products: compactStringList(3).default([]),
-  customer_type: z.string().min(1),
+  // S6: LLM omits this for obvious B2B/B2C companies — default keeps type as string
+  customer_type: z.string().min(1).default("unspecified"),
   claim_id: z.string().min(1),
   evidence_level: EvidenceLevelSchema,
 });
@@ -103,11 +112,11 @@ export const Step1StructuredSchema = z
     }),
     analysis_view: z.object({
       segments: z.array(AnalysisSegmentSchema),
-      excluded_items: z.array(ExcludedItemSchema),
-      canonical_name_registry: z.record(z.string().min(1), z.string().min(1)),
+      excluded_items: z.array(ExcludedItemSchema).default([]),         // S1
+      canonical_name_registry: z.record(z.string().min(1), z.string().min(1)).default({}), // S2
     }),
     claims: z.array(ClaimSchema),
-    sources: z.array(SourceSchema),
+    sources: z.array(SourceSchema).default([]),                        // S3
   })
   .superRefine((payload, ctx) => {
     const claimIds = new Set(payload.claims.map((claim) => claim.claim_id));

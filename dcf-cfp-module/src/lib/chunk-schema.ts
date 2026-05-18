@@ -28,7 +28,7 @@ export const ChunkSummarySchema = z.object({
   chunk_id: z.string(),
   rows: z.array(ChunkRowSchema),
   /** Any data quality issues noticed in this chunk. */
-  anomalies: z.array(z.string().max(200)).default([]),
+  anomalies: z.array(z.string().transform((s) => s.slice(0, 500))).default([]),
 });
 
 export type ChunkRow = z.infer<typeof ChunkRowSchema>;
@@ -50,6 +50,9 @@ function sanitizeForGemini(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeForGemini);
   if (!value || typeof value !== "object") return value;
   const rec = value as Record<string, unknown>;
+
+  let hadAnyOfNull = false; // track if anyOf contained a null type
+
   const entries = Object.entries(rec)
     .filter(
       ([k]) =>
@@ -61,16 +64,16 @@ function sanitizeForGemini(value: unknown): unknown {
         return [k, nonNull[0] ?? "string"] as const;
       }
       if (k === "anyOf" && Array.isArray(v)) {
+        const hasNull = (v as unknown[]).some(
+          (o) => o && typeof o === "object" && (o as Record<string, unknown>).type === "null",
+        );
         const nonNull = (v as unknown[])
           .filter(
             (o) =>
-              !(
-                o &&
-                typeof o === "object" &&
-                (o as Record<string, unknown>).type === "null"
-              ),
+              !(o && typeof o === "object" && (o as Record<string, unknown>).type === "null"),
           )
           .map(sanitizeForGemini);
+        if (hasNull) hadAnyOfNull = true;
         if (nonNull.length === 1)
           return ["type", (nonNull[0] as Record<string, unknown>).type ?? "string"] as const;
         return [k, nonNull] as const;
@@ -78,7 +81,10 @@ function sanitizeForGemini(value: unknown): unknown {
       return [k, sanitizeForGemini(v)] as const;
     });
   const out = Object.fromEntries(entries) as Record<string, unknown>;
-  if (Array.isArray(rec.type) && (rec.type as string[]).includes("null")) out.nullable = true;
+  // Mark nullable when original had anyOf-with-null OR type array containing null
+  if (hadAnyOfNull || (Array.isArray(rec.type) && (rec.type as string[]).includes("null"))) {
+    out.nullable = true;
+  }
   if (Array.isArray(out.required))
     out.required = (out.required as unknown[]).filter((e) => typeof e === "string");
   return out;
@@ -115,7 +121,7 @@ export const BankChunkRowSchema = z.object({
 export const BankChunkSummarySchema = z.object({
   chunk_id: z.string(),
   rows: z.array(BankChunkRowSchema),
-  anomalies: z.array(z.string().max(200)).default([]),
+  anomalies: z.array(z.string().transform((s) => s.slice(0, 500))).default([]),
 });
 
 export type BankChunkRow = z.infer<typeof BankChunkRowSchema>;
@@ -130,4 +136,44 @@ export const BANK_CHUNK_SUMMARY_SCHEMA: Record<string, unknown> =
 
 export const GEMINI_BANK_CHUNK_SUMMARY_SCHEMA = sanitizeForGemini(
   BANK_CHUNK_SUMMARY_SCHEMA,
+) as Record<string, unknown>;
+
+// ---------------------------------------------------------------------------
+// Industrial mode — Map-phase schemas (revenue/margin/capex/headcount)
+// ---------------------------------------------------------------------------
+
+export const IndustrialChunkRowSchema = z.object({
+  fiscal_year: z.number().int().min(2000).max(2100),
+  quarter: z.enum(["Q1", "Q2", "Q3", "Q4"]),
+  segment: z.string().min(1),
+  revenue_usd_m: z.number().nullable(),
+  operating_income_usd_m: z.number().nullable(),
+  gross_profit_usd_m: z.number().nullable(),
+  capex_usd_m: z.number().nullable(),
+  depreciation_amortization_usd_m: z.number().nullable(),
+  /** Headcount as reported (integer, or null if not disclosed). */
+  headcount: z.number().int().nullable(),
+  /** Short excerpt proving where the number came from (max 160 chars). */
+  source_excerpt: z.string().max(160),
+  confidence: z.enum(["high", "medium", "low"]),
+});
+
+export const IndustrialChunkSummarySchema = z.object({
+  chunk_id: z.string(),
+  rows: z.array(IndustrialChunkRowSchema).default([]),
+  anomalies: z.array(z.string().transform((s) => s.slice(0, 500))).default([]),
+});
+
+export type IndustrialChunkRow = z.infer<typeof IndustrialChunkRowSchema>;
+export type IndustrialChunkSummary = z.infer<typeof IndustrialChunkSummarySchema>;
+
+const _industrialGenerated = zodToJsonSchema(IndustrialChunkSummarySchema, "IndustrialChunkSummary");
+
+export const INDUSTRIAL_CHUNK_SUMMARY_SCHEMA: Record<string, unknown> =
+  ("definitions" in _industrialGenerated && _industrialGenerated.definitions
+    ? _industrialGenerated.definitions.IndustrialChunkSummary
+    : _industrialGenerated) as Record<string, unknown>;
+
+export const GEMINI_INDUSTRIAL_CHUNK_SUMMARY_SCHEMA = sanitizeForGemini(
+  INDUSTRIAL_CHUNK_SUMMARY_SCHEMA,
 ) as Record<string, unknown>;

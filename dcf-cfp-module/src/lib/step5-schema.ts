@@ -404,7 +404,8 @@ export function parseStep5StructuredResult(payload: unknown): Step5StructuredRes
   return Step5StructuredSchema.parse(normalizeStep5StructuredPayload(payload));
 }
 
-function normalizedName(value: string): string {
+function normalizedName(value: string | undefined | null): string {
+  if (!value) return "";
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 

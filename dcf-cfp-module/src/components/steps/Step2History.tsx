@@ -43,6 +43,9 @@ import {
 import Step2FilingUploader, {
   type FilingUploaderResult,
 } from "./Step2FilingUploader";
+import Step2IndustrialUploader, {
+  type IndustrialUploaderResult,
+} from "./Step2IndustrialUploader";
 import {
   getIncompleteManifests,
   clearAllSessions,
@@ -50,8 +53,10 @@ import {
 } from "@/lib/extraction-state";
 import { projectStep2StructuredToRows } from "@/lib/step2-schema";
 import { projectStep2BankStructuredToRows } from "@/lib/step2-bank-schema";
+import { projectStep2IndustrialStructuredToRows } from "@/lib/step2-industrial-schema";
 import type { Step2BankStructuredResult } from "@/lib/step2-bank-schema";
 import type { Step2StructuredResult } from "@/lib/step2-schema";
+import type { Step2IndustrialStructuredResult } from "@/lib/step2-industrial-schema";
 import type { HistoricalExtractionRow, ExtractHistoryResponse, WorkflowMode } from "@/types/cfp";
 
 // =============================================================================
@@ -187,20 +192,23 @@ export default function Step2History() {
   const [stagingYears, setStagingYears] = useState<number[]>([]);
   const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
 
-  // ── Bank/finance mode detection for PDF uploader ────────────────────────────
+  // ── Company type detection for upload mode ───────────────────────────────────
   const companyTypeForPdf = state.profile.step1StructuredResult?.company_type;
   const isBankOrFinancial =
     companyTypeForPdf === "financial_bank" ||
     companyTypeForPdf === "financial_insurance" ||
-    companyTypeForPdf === "financial_other" ||
-    companyTypeForPdf === "hybrid";
-  const [showPdfUploader, setShowPdfUploader] = useState(isBankOrFinancial);
+    companyTypeForPdf === "financial_other";
+  const isHybrid = companyTypeForPdf === "hybrid";
+  // Industrial = default when no company_type or explicitly "industrial"
+  const isIndustrial = !companyTypeForPdf || companyTypeForPdf === "industrial";
 
-  // Auto-enable PDF mode when company_type is resolved to a financial/hybrid type
-  // (handles JSON-restore and any other path where context updates while Step 2 is mounted)
+  // PDF mode: industrial companies always use PDF uploader; bank/financial also use PDF uploader
+  const [showPdfUploader, setShowPdfUploader] = useState(true);
+
+  // Auto-enable PDF mode when company_type is resolved
   useEffect(() => {
-    if (isBankOrFinancial) setShowPdfUploader(true);
-  }, [isBankOrFinancial]);
+    setShowPdfUploader(true);
+  }, [companyTypeForPdf]);
 
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
@@ -456,18 +464,27 @@ export default function Step2History() {
     );
   };
 
-  // ── PDF uploader completion handler ─────────────────────────────────────────
+  // ── Bank PDF uploader completion handler ────────────────────────────────────
   const handlePdfUploaderComplete = useCallback(
     (result: FilingUploaderResult) => {
-      // Stage rows for review
       setStagingRows(result.rows);
       setStagingYears(result.stagingYears);
       setStructuredResults(result.fileResults.map((fr) => fr.structuredResult));
-
-      // Persist hints to context so they survive JSON save/reload
       dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
+      setTimeout(() => {
+        document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+    },
+    [dispatch],
+  );
 
-      // Scroll to staging section
+  // ── Industrial PDF uploader completion handler ───────────────────────────────
+  const handleIndustrialUploaderComplete = useCallback(
+    (result: IndustrialUploaderResult) => {
+      setStagingRows(result.rows);
+      setStagingYears(result.stagingYears);
+      setStructuredResults(result.fileResults.map((fr) => fr.structuredResult as Step2IndustrialStructuredResult));
+      dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
       setTimeout(() => {
         document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
       }, 100);
@@ -555,7 +572,7 @@ export default function Step2History() {
     <StepShell
       stepNumber={2}
       title="Historical Financials"
-      subtitle="Upload Excel, CSV, or text exports and let the AI map them to segment data."
+      subtitle="Upload 10-K and 10-Q PDFs — AI extracts segment financials per quarter. References Step 1 architecture."
     >
       {/* ── Architecture gate ──────────────────────────────────────────────── */}
       {!hasArchitecture && (
@@ -581,48 +598,21 @@ export default function Step2History() {
               <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
                 Build Historical Baseline
               </h3>
-              <div className="flex items-center gap-3">
-                {/* Mode toggle: only shown for bank/finance companies */}
-                {isBankOrFinancial && (
-                  <button
-                    type="button"
-                    onClick={() => setShowPdfUploader((v) => !v)}
-                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                      showPdfUploader
-                        ? "bg-blue-700/30 text-blue-300 hover:bg-blue-700/50"
-                        : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-                    }`}
-                    title={
-                      companyTypeForPdf === "hybrid"
-                        ? showPdfUploader
-                          ? "Switch to Dual Pipeline — runs bank + industrial extraction from uploaded files"
-                          : "Switch to PDF Mode — extracts bank segment metrics from 10-K/10-Q filings"
-                        : showPdfUploader
-                          ? "Switch to manual/spreadsheet upload"
-                          : "Switch to PDF multi-filing upload"
-                    }
-                  >
-                    {showPdfUploader
-                      ? "📄 PDF Mode"
-                      : companyTypeForPdf === "hybrid" ? "📊 Dual Pipeline" : "📊 Standard Mode"}
-                  </button>
-                )}
-                <span className="flex items-center gap-2 text-xs text-zinc-500">
-                  <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
-                    {confirmedYears.length}/{MAX_YEARS}
-                  </span>
-                  years confirmed
-                  {confirmedYears.length > 0 && (
-                    <span className="text-zinc-600">({confirmedYears.join(", ")})</span>
-                  )}
+              <span className="flex items-center gap-2 text-xs text-zinc-500">
+                <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
+                  {confirmedYears.length}/{MAX_YEARS}
                 </span>
-              </div>
+                years confirmed
+                {confirmedYears.length > 0 && (
+                  <span className="text-zinc-600">({confirmedYears.join(", ")})</span>
+                )}
+              </span>
             </div>
 
-            {/* ── PDF Multi-File Uploader (bank/hybrid bank segments) ───────── */}
-            {isBankOrFinancial && showPdfUploader && (
+            {/* ── Industrial PDF Uploader ─────────────────────────────────── */}
+            {(isIndustrial || isHybrid) && showPdfUploader && (
               <>
-                <Step2FilingUploader
+                <Step2IndustrialUploader
                   architecture={step1Input}
                   provider={settings.llmProvider}
                   apiKey={activeApiKey}
@@ -636,252 +626,80 @@ export default function Step2History() {
                     "Unknown Company"
                   }
                   seedHints={state.history.filingHints}
-                  onComplete={handlePdfUploaderComplete}
-                  onCancel={() => setShowPdfUploader(false)}
+                  onComplete={handleIndustrialUploaderComplete}
                 />
-                {/* Hybrid: warn that PDF mode covers bank segments only */}
-                {companyTypeForPdf === "hybrid" && (
-                  <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-400/80">
+                {/* Hybrid: note that bank segments also need separate extraction */}
+                {isHybrid && (
+                  <div className="flex items-start gap-2 rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-400/80">
                     <span className="shrink-0">⚡</span>
                     <span>
-                      Hybrid company detected. PDF mode extracts <strong className="text-amber-300">bank segment</strong> metrics only.{" "}
-                      <button
-                        type="button"
-                        className="underline underline-offset-2 hover:text-amber-300"
-                        onClick={() => setShowPdfUploader(false)}
-                      >
-                        Switch to Dual Pipeline
-                      </button>{" "}
-                      to also run industrial segment extraction from uploaded files.
+                      Hybrid company detected. Upload the same PDFs to the{" "}
+                      <strong className="text-blue-300">Bank Segments</strong> panel below to also extract NII-driven metrics.
                     </span>
                   </div>
                 )}
               </>
             )}
 
-            {/* WorkflowModePanel — always visible for non-industrial companies in both modes */}
-            {state.profile.step1StructuredResult?.company_type &&
-              state.profile.step1StructuredResult.company_type !== "industrial" && (
-                <WorkflowModePanel
-                  companyType={state.profile.step1StructuredResult.company_type}
-                  segments={state.profile.step1StructuredResult.analysis_view.segments}
-                  onToggle={(segmentId, workflowMode) =>
-                    dispatch({ type: "UPDATE_SEGMENT_WORKFLOW_MODE", payload: { segmentId, workflowMode } })
-                  }
-                  disabled={isExtracting}
-                />
-              )}
-
-            {/* ── Standard upload form (hidden when PDF mode is active for bank) ── */}
-            {(!isBankOrFinancial || !showPdfUploader) && (
-              <>
-
-            {/* Year detection */}
-            <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
-              <div>
-                <p className="text-sm font-medium text-zinc-200">Detected fiscal years</p>
-                <p className="mt-1 text-xs text-zinc-500">
-                  Upload a full history file or complete DCF JSON and Step 2 will extract the
-                  latest five fiscal years into one DCF baseline.
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {detectedYears.length > 0 ? (
-                    detectedYears.map((year) => (
-                      <span
-                        key={year}
-                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          confirmedYears.includes(year)
-                            ? "bg-emerald-600/15 text-emerald-300"
-                            : "bg-blue-600/15 text-blue-300"
-                        }`}
-                      >
-                        FY {year}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-500">
-                      No years detected yet
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div>
-              <label htmlFor="target-year" className="mb-1.5 block text-sm font-medium text-zinc-300">
-                Optional single-year override
-              </label>
-              <input
-                id="target-year"
-                type="text"
-                inputMode="numeric"
-                placeholder="Leave blank for full baseline"
-                value={targetYear}
-                onChange={(e) => setTargetYear(e.target.value.replace(/\D/g, "").slice(0, 4))}
-                disabled={isExtracting || !canAddMoreYears}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
-              />
-              <p className="mt-1.5 text-xs text-zinc-600">
-                Use only when you want to re-run one fiscal year.
-              </p>
-              </div>
-            </div>
-
-            <DcfInputPackageSummary summary={dcfInputSummary} compact />
-
-            {/* File upload area */}
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-zinc-300">
-                Data Files
-                <span className="ml-2 text-xs font-normal text-zinc-500">
-                  .json · .xlsx · .csv · .txt (max {MAX_FILES})
-                </span>
-              </label>
-
-              {/* Drop zone */}
-              {dataFiles.length < MAX_FILES && (
-                <label
-                  htmlFor="data-files"
-                  className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-zinc-700 py-6 text-sm text-zinc-500 transition-colors hover:border-blue-500/50 hover:text-zinc-300 ${isExtracting ? "pointer-events-none opacity-50" : ""}`}
-                >
-                  <Upload size={22} className="text-zinc-600" />
-                  <span>
-                    Drag &amp; drop or{" "}
-                    <span className="text-blue-400 underline-offset-2 hover:underline">
-                      browse
-                    </span>
-                  </span>
-                  <span className="text-xs text-zinc-600">
-                    Complete DCF JSON, Excel exports, quarterly CSV, or pasted-as-txt
-                  </span>
-                  <input
-                    ref={fileInputRef}
-                    id="data-files"
-                    type="file"
-                    accept={ACCEPTED_MIME}
-                    multiple
-                    disabled={isExtracting}
-                    className="hidden"
-                    onChange={handleFileChange}
-                  />
-                </label>
-              )}
-
-              {/* File list */}
-              {dataFiles.length > 0 && (
-                <ul className="mt-2 space-y-1">
-                  {dataFiles.map((f, i) => (
-                    <li
-                      key={i}
-                      className="flex items-center gap-2 rounded-lg bg-zinc-900 px-3 py-1.5"
-                    >
-                      {fileIcon(f.name)}
-                      <span className="min-w-0 flex-1 truncate text-xs text-zinc-300">
-                        {f.name}
-                      </span>
-                      <span className="shrink-0 text-xs text-zinc-600">
-                        {(f.size / 1024).toFixed(0)} KB
-                      </span>
-                      {!isExtracting && (
-                        <button
-                          onClick={() => removeFile(i)}
-                          className="shrink-0 text-zinc-600 hover:text-red-400"
-                          aria-label={`Remove ${f.name}`}
-                        >
-                          <X size={14} />
-                        </button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            {/* Text notes textarea */}
-            <div>
-              <label htmlFor="text-notes" className="mb-1.5 block text-sm font-medium text-zinc-300">
-                Text Notes
-                <span className="ml-2 text-xs font-normal text-zinc-500">
-                  optional — paste raw data or context here
-                </span>
-              </label>
-              <textarea
-                id="text-notes"
-                rows={5}
-                placeholder={
-                  "Paste any raw financial text, copied table rows, or analyst notes here…\n\n" +
-                  "Example:\nQ1 2023 — Creative Cloud: $1,233M revenue, $456M operating income\n" +
-                  "Q2 2023 — Document Cloud: $741M revenue, $302M operating income"
+            {/* Hybrid: also show bank uploader for bank segments */}
+            {isHybrid && showPdfUploader && (
+              <Step2FilingUploader
+                architecture={step1Input}
+                provider={settings.llmProvider}
+                apiKey={activeApiKey}
+                companyName={
+                  (step1Input &&
+                    typeof step1Input === "object" &&
+                    "company_name" in (step1Input as object)
+                    ? String((step1Input as unknown as Record<string, unknown>).company_name ?? "")
+                    : null) ??
+                  state.profile.companyName ??
+                  "Unknown Company"
                 }
-                value={textNotes}
-                onChange={(e) => setTextNotes(e.target.value)}
+                seedHints={state.history.filingHints}
+                onComplete={(result) => {
+                  // Merge bank rows into staging (append to whatever industrial produced)
+                  setStagingRows((prev) => [...prev, ...result.rows]);
+                  setStagingYears((prev) => [
+                    ...new Set([...prev, ...result.stagingYears]),
+                  ].sort((a, b) => a - b));
+                  dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
+                }}
+              />
+            )}
+
+            {/* ── Bank/Financial PDF Uploader ─────────────────────────────── */}
+            {isBankOrFinancial && showPdfUploader && (
+              <Step2FilingUploader
+                architecture={step1Input}
+                provider={settings.llmProvider}
+                apiKey={activeApiKey}
+                companyName={
+                  (step1Input &&
+                    typeof step1Input === "object" &&
+                    "company_name" in (step1Input as object)
+                    ? String((step1Input as unknown as Record<string, unknown>).company_name ?? "")
+                    : null) ??
+                  state.profile.companyName ??
+                  "Unknown Company"
+                }
+                seedHints={state.history.filingHints}
+                onComplete={handlePdfUploaderComplete}
+              />
+            )}
+
+            {/* WorkflowModePanel — shown for hybrid companies */}
+            {isHybrid && state.profile.step1StructuredResult && (
+              <WorkflowModePanel
+                companyType={state.profile.step1StructuredResult.company_type!}
+                segments={state.profile.step1StructuredResult.analysis_view.segments}
+                onToggle={(segmentId, workflowMode) =>
+                  dispatch({ type: "UPDATE_SEGMENT_WORKFLOW_MODE", payload: { segmentId, workflowMode } })
+                }
                 disabled={isExtracting}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:opacity-50 font-mono leading-relaxed resize-y"
-              />
-            </div>
-
-            {/* Resume banner — shown when an incomplete session exists in IndexedDB */}
-            {incompleteSession && !isExtracting && (
-              <ResumeBanner
-                manifest={incompleteSession}
-                onResume={() => {
-                  setIncompleteSession(null);
-                  void handleExtract(incompleteSession.sessionId);
-                }}
-                onDiscard={async () => {
-                  const { deleteSession } = await import("@/lib/extraction-state");
-                  await deleteSession(incompleteSession.sessionId);
-                  setIncompleteSession(null);
-                }}
               />
             )}
 
-            {/* Pipeline progress */}
-            {isExtracting && pipelinePhase.phase !== "idle" && (
-              <PipelineProgressDisplay phase={pipelinePhase} />
-            )}
-
-            {/* Usage-exhausted banner */}
-            {pipelinePhase.phase === "usage-exhausted" && !isExtracting && (
-              <UsageExhaustedBanner
-                phase={pipelinePhase}
-                onAutoResume={() => {
-                  void handleExtract(pipelinePhase.sessionId);
-                }}
-                onSaveAndClose={() => {
-                  setPausedSessionId(pipelinePhase.sessionId);
-                  setPipelinePhase({ phase: "idle" });
-                }}
-              />
-            )}
-
-            {/* Error banner */}
-            {errorMsg && (
-              <div className="flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 p-3 text-sm text-red-300">
-                <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                {errorMsg}
-              </div>
-            )}
-
-            {/* Submit */}
-            <button
-              onClick={() => void handleExtract()}
-              disabled={isExtracting || !canAddMoreYears}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
-            >
-              {isExtracting ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  {extractingYear ? `Processing FY ${extractingYear}…` : "Running pipeline…"}
-                </>
-              ) : (
-                <>
-                  <Plus size={16} />
-                  Extract Full Historical Baseline
-                </>
-              )}
-            </button>
-
-            </> /* end standard-upload conditional */
-            )}
           </section>
 
           {/* ================================================================ */}
@@ -908,76 +726,88 @@ export default function Step2History() {
                     <tr>
                       <th className="px-3 py-2 font-medium">Qtr</th>
                       <th className="px-3 py-2 font-medium">Segment</th>
-                      <th className="px-3 py-2 font-medium">Category</th>
-                      <th className="px-3 py-2 font-medium">Product</th>
                       <th className="px-3 py-2 font-medium text-right">Revenue ($M)</th>
                       <th className="px-3 py-2 font-medium text-right">Op. Income ($M)</th>
-                      <th className="px-3 py-2 font-medium">Internal?</th>
+                      {stagingRows.some((r) => r.workflow_mode === "industrial") && (
+                        <>
+                          <th className="px-3 py-2 font-medium text-right">Gross Profit ($M)</th>
+                          <th className="px-3 py-2 font-medium text-right">CapEx ($M)</th>
+                          <th className="px-3 py-2 font-medium text-right">D&amp;A ($M)</th>
+                          <th className="px-3 py-2 font-medium text-right">Headcount</th>
+                        </>
+                      )}
                       <th className="px-3 py-2 font-medium">Source</th>
                       <th className="px-3 py-2 font-medium">Review Note</th>
-                      <th className="px-3 py-2 font-medium">Notes</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800">
-                    {stagingRows.map((row) => (
-                      <tr key={row.id} className="bg-zinc-900/50 hover:bg-zinc-800/50">
-                        <td className="px-3 py-1.5 text-zinc-300">{row.quarter}</td>
-                        <td className="px-3 py-1.5 text-zinc-300">{row.segment}</td>
-                        <td className="px-3 py-1.5 text-zinc-400">{row.productCategory}</td>
-                        <td className="px-3 py-1.5 text-zinc-400">{row.productName}</td>
-                        <td className="px-1 py-1">
-                          <input
-                            type="number"
-                            step="any"
-                            value={row.revenue ?? ""}
-                            onChange={(e) =>
-                              updateStagingCell(row.id, "revenue", parseNullableMetric(e.target.value))
-                            }
-                            placeholder="—"
-                            className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
-                          />
-                        </td>
-                        <td className="px-1 py-1">
-                          <input
-                            type="number"
-                            step="any"
-                            value={row.operatingIncome ?? ""}
-                            onChange={(e) =>
-                              updateStagingCell(
-                                row.id,
-                                "operatingIncome",
-                                parseNullableMetric(e.target.value),
-                              )
-                            }
-                            placeholder="—"
-                            className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
-                          />
-                        </td>
-                        <td className="px-3 py-1.5 text-zinc-400">
-                          {row.internalVerify ?? "No"}
-                        </td>
-                        <td
-                          className="max-w-[140px] truncate px-3 py-1.5 text-zinc-400"
-                          title={row.sourceLink && row.sourceLink !== "Not available"
-                            ? `${row.sourceName ?? "Not available"} — ${row.sourceLink}`
-                            : row.sourceName ?? "Not available"}
-                        >
-                          {row.sourceName ?? "Not available"}
-                        </td>
-                        <td
-                          className="max-w-[180px] truncate px-3 py-1.5 text-amber-300/80"
-                          title={row.reviewNote ?? row.reviewStatus ?? ""}
-                        >
-                          {row.reviewNote ?? row.reviewStatus ?? "External Verification Required"}
-                        </td>
-                        <td
-                          className="max-w-[140px] truncate px-3 py-1.5 text-zinc-500"
-                          title={row.notes}
-                        >
-                          {row.notes}
-                        </td>
-                      </tr>
-                    ))}
+                    {stagingRows.map((row) => {
+                      const hasIndustrialCols = stagingRows.some((r) => r.workflow_mode === "industrial");
+                      return (
+                        <tr key={row.id} className="bg-zinc-900/50 hover:bg-zinc-800/50">
+                          <td className="px-3 py-1.5 text-zinc-300">
+                            {row.fiscalYear} {row.quarter}
+                          </td>
+                          <td className="max-w-[140px] truncate px-3 py-1.5 text-zinc-300">{row.segment}</td>
+                          <td className="px-1 py-1">
+                            <input
+                              type="number"
+                              step="any"
+                              value={row.revenue ?? ""}
+                              onChange={(e) =>
+                                updateStagingCell(row.id, "revenue", parseNullableMetric(e.target.value))
+                              }
+                              placeholder="—"
+                              className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
+                            />
+                          </td>
+                          <td className="px-1 py-1">
+                            <input
+                              type="number"
+                              step="any"
+                              value={row.operatingIncome ?? ""}
+                              onChange={(e) =>
+                                updateStagingCell(
+                                  row.id,
+                                  "operatingIncome",
+                                  parseNullableMetric(e.target.value),
+                                )
+                              }
+                              placeholder="—"
+                              className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
+                            />
+                          </td>
+                          {hasIndustrialCols && (
+                            <>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {formatNullableMetric(row.gross_profit_usd_m ?? null)}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {formatNullableMetric(row.capex_usd_m ?? null)}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {formatNullableMetric(row.depreciation_amortization_usd_m ?? null)}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {row.headcount != null ? row.headcount.toLocaleString() : "—"}
+                              </td>
+                            </>
+                          )}
+                          <td
+                            className="max-w-[140px] truncate px-3 py-1.5 text-zinc-400"
+                            title={row.sourceName ?? "Not available"}
+                          >
+                            {row.sourceName ?? "Not available"}
+                          </td>
+                          <td
+                            className="max-w-[180px] truncate px-3 py-1.5 text-amber-300/80"
+                            title={row.reviewNote ?? row.reviewStatus ?? ""}
+                          >
+                            {row.reviewNote ?? row.reviewStatus ?? "External Verification Required"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

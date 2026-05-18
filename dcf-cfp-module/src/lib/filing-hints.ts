@@ -97,8 +97,12 @@ export interface FilingTypeHints {
 /** Root hints object stored in HistoricalData.filingHints and the JSON save. */
 export interface FilingHints {
   companyName: string;
+  /** Bank-mode hints (NII-driven metrics). */
   tenK: FilingTypeHints | null;
   tenQ: FilingTypeHints | null;
+  /** Industrial-mode hints (revenue/opIncome/grossProfit/capex/d&a/headcount). */
+  industrialTenK: FilingTypeHints | null;
+  industrialTenQ: FilingTypeHints | null;
 }
 
 // =============================================================================
@@ -276,59 +280,281 @@ export function buildQ4DerivedRow(
   };
 }
 
+// =============================================================================
+// Industrial metric classification
+// =============================================================================
+
+export type IndustrialMetricKey =
+  | "revenue_usd_m"
+  | "operating_income_usd_m"
+  | "gross_profit_usd_m"
+  | "capex_usd_m"
+  | "depreciation_amortization_usd_m"
+  | "headcount";
+
+export const INDUSTRIAL_METRIC_FLOW_TYPE: Record<IndustrialMetricKey, MetricFlowType> = {
+  // Income-statement flows (sum to annual)
+  revenue_usd_m: "flow",
+  operating_income_usd_m: "flow",
+  gross_profit_usd_m: "flow",
+  capex_usd_m: "flow",
+  depreciation_amortization_usd_m: "flow",
+  // Operational KPI — year-end stock
+  headcount: "stock",
+};
+
+export const ALL_INDUSTRIAL_METRICS = Object.keys(
+  INDUSTRIAL_METRIC_FLOW_TYPE,
+) as IndustrialMetricKey[];
+
+type IndustrialMetricRecord = Partial<Record<IndustrialMetricKey, number | null>>;
+
+/**
+ * Derive Q4 industrial metrics from annual and quarterly values.
+ *
+ * - Flow (revenue/opIncome/grossProfit/capex/d&a): Q4 = Annual − Q1 − Q2 − Q3
+ * - Stock (headcount): Q4 = Annual year-end value
+ */
+export function deriveIndustrialQ4Metrics(
+  annual: IndustrialMetricRecord,
+  q1: IndustrialMetricRecord,
+  q2: IndustrialMetricRecord,
+  q3: IndustrialMetricRecord,
+): { metrics: IndustrialMetricRecord; derivedFields: IndustrialMetricKey[]; missingFields: IndustrialMetricKey[] } {
+  const metrics: IndustrialMetricRecord = {};
+  const derivedFields: IndustrialMetricKey[] = [];
+  const missingFields: IndustrialMetricKey[] = [];
+
+  for (const key of ALL_INDUSTRIAL_METRICS) {
+    const flowType = INDUSTRIAL_METRIC_FLOW_TYPE[key];
+    const annualVal = annual[key] ?? null;
+
+    if (flowType === "flow") {
+      const q1v = q1[key] ?? null;
+      const q2v = q2[key] ?? null;
+      const q3v = q3[key] ?? null;
+
+      if (annualVal !== null && q1v !== null && q2v !== null && q3v !== null) {
+        metrics[key] = Math.round((annualVal - q1v - q2v - q3v) * 100) / 100;
+        derivedFields.push(key);
+      } else {
+        metrics[key] = null;
+        missingFields.push(key);
+      }
+    } else {
+      // stock: copy annual year-end value
+      metrics[key] = annualVal;
+      if (annualVal !== null) {
+        derivedFields.push(key);
+      } else {
+        missingFields.push(key);
+      }
+    }
+  }
+
+  return { metrics, derivedFields, missingFields };
+}
+
+/**
+ * Build a synthetic Q4 HistoricalExtractionRow for industrial mode.
+ */
+export function buildIndustrialQ4DerivedRow(
+  annualRow: HistoricalExtractionRow,
+  q1Row: HistoricalExtractionRow | null,
+  q2Row: HistoricalExtractionRow | null,
+  q3Row: HistoricalExtractionRow | null,
+  idGenerator: () => string,
+): HistoricalExtractionRow | null {
+  const toRecord = (row: HistoricalExtractionRow | null): IndustrialMetricRecord => {
+    if (!row) return {};
+    return {
+      revenue_usd_m: row.revenue ?? null,
+      operating_income_usd_m: row.operatingIncome ?? null,
+      gross_profit_usd_m: row.gross_profit_usd_m ?? null,
+      capex_usd_m: row.capex_usd_m ?? null,
+      depreciation_amortization_usd_m: row.depreciation_amortization_usd_m ?? null,
+      headcount: row.headcount ?? null,
+    };
+  };
+
+  const { metrics, derivedFields: df } = deriveIndustrialQ4Metrics(
+    toRecord(annualRow),
+    toRecord(q1Row),
+    toRecord(q2Row),
+    toRecord(q3Row),
+  );
+
+  if (df.length === 0) return null;
+
+  const hasQ1 = q1Row !== null;
+  const hasQ2 = q2Row !== null;
+  const hasQ3 = q3Row !== null;
+  const reviewNote =
+    hasQ1 && hasQ2 && hasQ3
+      ? "Q4 derived: Annual − Q1 − Q2 − Q3 for flow metrics; year-end snapshot for headcount."
+      : `Q4 partially derived (${[!hasQ1 && "Q1", !hasQ2 && "Q2", !hasQ3 && "Q3"].filter(Boolean).join(", ")} missing).`;
+
+  return {
+    id: idGenerator(),
+    fiscalYear: annualRow.fiscalYear,
+    quarter: "Q4",
+    segment: annualRow.segment,
+    productCategory: annualRow.productCategory,
+    productName: annualRow.productName,
+    revenue: metrics.revenue_usd_m ?? null,
+    yoyGrowth: 0,
+    operatingIncome: metrics.operating_income_usd_m ?? null,
+    notes: reviewNote,
+    reviewStatus: "Review Access Data",
+    internalVerify: "No",
+    sourceType: "Internal",
+    sourceName: "Derived",
+    reviewNote,
+    workflow_mode: "industrial",
+    gross_profit_usd_m: metrics.gross_profit_usd_m ?? null,
+    capex_usd_m: metrics.capex_usd_m ?? null,
+    depreciation_amortization_usd_m: metrics.depreciation_amortization_usd_m ?? null,
+    headcount: metrics.headcount ?? null,
+  };
+}
+
+/**
+ * Given all industrial rows in staging, resolve Q4 data and return a clean row set.
+ *
+ * Priority rule: 10-K annual row beats Q4 10-Q row for the same year+segment.
+ * - If both exist → keep the 10-K row, drop the Q4 10-Q row (no derivation needed).
+ * - If only 10-K annual row exists → derive Q4 = Annual − Q1 − Q2 − Q3.
+ * - If only Q4 10-Q row exists → use it directly (no derivation).
+ */
+export function injectIndustrialDerivedQ4Rows(
+  rows: HistoricalExtractionRow[],
+  idGenerator: () => string,
+): HistoricalExtractionRow[] {
+  // Separate index for 10-K annual rows and all other quarterly rows
+  const annualIdx = new Map<string, HistoricalExtractionRow>(); // key: year|segment
+  const quarterIdx = new Map<string, HistoricalExtractionRow>(); // key: year|segment|quarter
+
+  for (const row of rows) {
+    if (row.workflow_mode !== "industrial") continue;
+    if (row.quarter === "Q4" && row.isAnnualFiling) {
+      annualIdx.set(`${row.fiscalYear}|${row.segment}`, row);
+    } else {
+      quarterIdx.set(`${row.fiscalYear}|${row.segment}|${row.quarter}`, row);
+    }
+  }
+
+  // Year+segment pairs where the 10-K annual Q4 row supersedes the Q4 10-Q row
+  const annualSupersedes = new Set<string>();
+  for (const [annualKey] of annualIdx) {
+    const [yearStr, segment] = annualKey.split("|");
+    const year = Number(yearStr);
+    if (quarterIdx.has(`${year}|${segment}|Q4`)) {
+      annualSupersedes.add(`${year}|${segment}`);
+    }
+  }
+
+  const extra: HistoricalExtractionRow[] = [];
+
+  for (const [annualKey, annualRow] of annualIdx) {
+    const [yearStr, segment] = annualKey.split("|");
+    const year = Number(yearStr);
+
+    // If 10-K supersedes Q4 10-Q, skip derivation (10-K row is already in the output)
+    if (annualSupersedes.has(`${year}|${segment}`)) continue;
+    if (annualRow.sourceName === "Derived") continue;
+
+    const hasQ1 = quarterIdx.has(`${year}|${segment}|Q1`);
+    const hasQ2 = quarterIdx.has(`${year}|${segment}|Q2`);
+    const hasQ3 = quarterIdx.has(`${year}|${segment}|Q3`);
+    if (!hasQ1 && !hasQ2 && !hasQ3) continue;
+
+    const q1Row = quarterIdx.get(`${year}|${segment}|Q1`) ?? null;
+    const q2Row = quarterIdx.get(`${year}|${segment}|Q2`) ?? null;
+    const q3Row = quarterIdx.get(`${year}|${segment}|Q3`) ?? null;
+
+    const q4 = buildIndustrialQ4DerivedRow(annualRow, q1Row, q2Row, q3Row, idGenerator);
+    if (q4) extra.push(q4);
+  }
+
+  // Drop Q4 10-Q rows that are superseded by a 10-K annual row
+  const filteredRows = rows.filter((row) => {
+    if (row.workflow_mode !== "industrial") return true;
+    if (row.quarter === "Q4" && !row.isAnnualFiling) {
+      return !annualSupersedes.has(`${row.fiscalYear}|${row.segment}`);
+    }
+    return true;
+  });
+
+  return [...filteredRows, ...extra];
+}
+
 /**
  * Given all the bank rows in staging (one per year-period-segment),
  * add synthetic Q4 rows for every year+segment that has an annual row
  * but no explicit Q4 row.
  */
+/**
+ * Priority rule: 10-K annual row beats Q4 10-Q row for the same year+segment.
+ * - If both exist → keep 10-K row, drop Q4 10-Q row (no derivation needed).
+ * - If only 10-K annual row exists → derive Q4 = Annual − Q1 − Q2 − Q3.
+ * - If only Q4 10-Q row exists → use it directly.
+ */
 export function injectDerivedQ4Rows(
   rows: HistoricalExtractionRow[],
   idGenerator: () => string,
 ): HistoricalExtractionRow[] {
-  // Index rows: {year}{segment}{period} → row
-  const idx = new Map<string, HistoricalExtractionRow>();
+  const annualIdx = new Map<string, HistoricalExtractionRow>(); // key: year|segment
+  const quarterIdx = new Map<string, HistoricalExtractionRow>(); // key: year|segment|quarter
+
   for (const row of rows) {
     if (row.workflow_mode !== "bank") continue;
-    idx.set(`${row.fiscalYear}|${row.segment}|${row.quarter}`, row);
+    if (row.quarter === "Q4" && row.isAnnualFiling) {
+      annualIdx.set(`${row.fiscalYear}|${row.segment}`, row);
+    } else {
+      quarterIdx.set(`${row.fiscalYear}|${row.segment}|${row.quarter}`, row);
+    }
+  }
+
+  // Year+segment pairs where the 10-K annual Q4 row supersedes the Q4 10-Q row
+  const annualSupersedes = new Set<string>();
+  for (const [annualKey] of annualIdx) {
+    const [yearStr, segment] = annualKey.split("|");
+    const year = Number(yearStr);
+    if (quarterIdx.has(`${year}|${segment}|Q4`)) {
+      annualSupersedes.add(`${year}|${segment}`);
+    }
   }
 
   const extra: HistoricalExtractionRow[] = [];
 
-  // Collect all (year, segment) pairs that have an Annual row
-  // "Annual" rows from 10-K files are stored with quarter="Q4" by the reduce phase
-  // BUT their sourceName will contain "10-K". We use a looser heuristic:
-  // derive Q4 whenever year×segment has at least Q1 present but no explicit Q4 yet.
-  // Collect unique year|segment combos
-  const yearSegmentPairs = new Set<string>();
-  for (const key of idx.keys()) {
-    const parts = key.split("|");
-    yearSegmentPairs.add(`${parts[0]}|${parts[1]}`);
-  }
-
-  for (const pair of yearSegmentPairs) {
-    const [yearStr, segment] = pair.split("|");
+  for (const [annualKey, annualRow] of annualIdx) {
+    const [yearStr, segment] = annualKey.split("|");
     const year = Number(yearStr);
 
-    const annualRow = idx.get(`${year}|${segment}|Q4`) ?? null; // 10-K rows are Q4
-    const hasQ1 = idx.has(`${year}|${segment}|Q1`);
-    const hasQ2 = idx.has(`${year}|${segment}|Q2`);
-    const hasQ3 = idx.has(`${year}|${segment}|Q3`);
+    if (annualSupersedes.has(`${year}|${segment}`)) continue;
+    if (annualRow.sourceName === "Derived") continue;
 
-    // Only derive Q4 if:
-    // - there IS an annual (Q4) row (from 10-K)
-    // - AND at least one quarterly row exists
-    // - AND the Q4 row's sourceName does NOT contain "Derived" (not already derived)
-    if (!annualRow) continue;
+    const hasQ1 = quarterIdx.has(`${year}|${segment}|Q1`);
+    const hasQ2 = quarterIdx.has(`${year}|${segment}|Q2`);
+    const hasQ3 = quarterIdx.has(`${year}|${segment}|Q3`);
     if (!hasQ1 && !hasQ2 && !hasQ3) continue;
-    if (annualRow.sourceName === "Derived") continue; // already derived
 
-    const q1Row = idx.get(`${year}|${segment}|Q1`) ?? null;
-    const q2Row = idx.get(`${year}|${segment}|Q2`) ?? null;
-    const q3Row = idx.get(`${year}|${segment}|Q3`) ?? null;
+    const q1Row = quarterIdx.get(`${year}|${segment}|Q1`) ?? null;
+    const q2Row = quarterIdx.get(`${year}|${segment}|Q2`) ?? null;
+    const q3Row = quarterIdx.get(`${year}|${segment}|Q3`) ?? null;
 
     const q4 = buildQ4DerivedRow(annualRow, q1Row, q2Row, q3Row, idGenerator);
     if (q4) extra.push(q4);
   }
 
-  return [...rows, ...extra];
+  // Drop Q4 10-Q rows superseded by the 10-K annual row
+  const filteredRows = rows.filter((row) => {
+    if (row.workflow_mode !== "bank") return true;
+    if (row.quarter === "Q4" && !row.isAnnualFiling) {
+      return !annualSupersedes.has(`${row.fiscalYear}|${row.segment}`);
+    }
+    return true;
+  });
+
+  return [...filteredRows, ...extra];
 }

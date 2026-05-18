@@ -149,7 +149,10 @@ export type Step2BankStructuredResult = z.infer<typeof Step2BankStructuredSchema
  */
 export function projectStep2BankStructuredToRows(
   result: Step2BankStructuredResult,
+  filingType?: "10-K" | "10-Q",
 ): ExtractHistoryResponse["rows"] {
+  const isAnnualFiling = filingType === "10-K";
+
   return result.rows.map((row) => {
     const source = result.sources.find((s) => s.source_id === row.source_id);
     const verified = row.validation_status === "verified_source";
@@ -174,6 +177,7 @@ export function projectStep2BankStructuredToRows(
       reviewNote: row.review_note,
       // Bank-mode fields
       workflow_mode: "bank" as const,
+      isAnnualFiling,
       nii_usd_m: row.nii_usd_m,
       non_interest_income_usd_m: row.non_interest_income_usd_m,
       provision_for_credit_losses_usd_m: row.provision_for_credit_losses_usd_m,

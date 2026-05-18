@@ -140,7 +140,7 @@ export default function Step5Forecast() {
   const forecastMode = structuredResult?.machine_artifact.forecast_mode ?? null;
   const annualRows = useMemo(() => {
     if (!structuredResult || forecastMode !== "SEGMENT_ANNUAL") return [];
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const norm = (s: string | undefined | null) => (s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const tgt = norm(currentSegment);
     return structuredResult.machine_artifact.forecast_table.filter((row) => {
       const src = norm(row.segment);

@@ -462,9 +462,140 @@ export async function chunkFile(file: File, provider: LLMProvider): Promise<File
   }));
 }
 
+// =============================================================================
+// Targeted page selection (Step 1–guided relevance scoring)
+// =============================================================================
+
+const FINANCIAL_PAGE_KEYWORDS = [
+  "revenue", "net revenue", "total revenue",
+  "operating income", "operating loss",
+  "gross profit", "gross margin",
+  "capital expenditure", "capex",
+  "depreciation", "amortization",
+  "headcount", "employees", "employee",
+  "net income", "net loss",
+  "income statement", "statements of operations", "statements of income",
+  "consolidated statement", "condensed consolidated",
+  "segment information", "segment results", "segment revenue",
+  "selected financial data", "selected quarterly",
+  "three months ended", "six months ended", "nine months ended",
+  "twelve months ended", "year ended", "quarter ended",
+  "fiscal year", "fiscal quarter",
+];
+
+/** Walk any nested object and collect string values from "segment" and "name" keys. */
+function extractSegmentTerms(architecture: unknown): string[] {
+  const terms: string[] = [];
+  function walk(obj: unknown) {
+    if (!obj || typeof obj !== "object") return;
+    const o = obj as Record<string, unknown>;
+    if (typeof o.segment === "string" && o.segment.length >= 2)
+      terms.push(o.segment.toLowerCase());
+    if (typeof o.name === "string" && o.name.length >= 2)
+      terms.push(o.name.toLowerCase());
+    for (const v of Object.values(o)) {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") walk(v);
+    }
+  }
+  walk(architecture);
+  return [...new Set(terms)];
+}
+
+function scorePageRelevance(
+  pageText: string,
+  segmentTerms: string[],
+  targetYear?: number,
+): number {
+  const lower = pageText.toLowerCase();
+  let score = 0;
+
+  for (const term of segmentTerms) {
+    if (lower.includes(term)) score += 5;
+  }
+  for (const kw of FINANCIAL_PAGE_KEYWORDS) {
+    if (lower.includes(kw)) score += 2;
+  }
+  // Numeric density — financial tables pack many numbers on one page
+  const numCount = (pageText.match(/\b\d[\d,.]+\b/g) ?? []).length;
+  score += Math.min(numCount, 30);
+  // Fiscal year mention
+  if (targetYear && pageText.includes(String(targetYear))) score += 3;
+
+  return score;
+}
+
+/**
+ * Given full PDF text (with "--- Page N ---" markers), return a filtered version
+ * containing only the top `maxPages` most financially relevant pages plus their
+ * immediate neighbours for context.
+ *
+ * Falls back to the full text if no page markers are found.
+ */
+export function selectRelevantPages(
+  fullText: string,
+  architecture: unknown,
+  targetYear?: number,
+  maxPages = 40,
+): { text: string; selected: number; total: number } {
+  const PAGE_MARKER_RE = /--- Page (\d+) ---/g;
+  const pageStarts: Array<{ pageNum: number; start: number }> = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = PAGE_MARKER_RE.exec(fullText)) !== null) {
+    pageStarts.push({ pageNum: parseInt(match[1], 10), start: match.index });
+  }
+
+  if (pageStarts.length === 0) {
+    return { text: fullText, selected: 0, total: 0 };
+  }
+
+  const segmentTerms = extractSegmentTerms(architecture);
+
+  // Slice each page's text
+  const pages = pageStarts.map((entry, i) => {
+    const end =
+      i + 1 < pageStarts.length ? pageStarts[i + 1].start : fullText.length;
+    const text = fullText.slice(entry.start, end);
+    return {
+      pageNum: entry.pageNum,
+      text,
+      score: scorePageRelevance(text, segmentTerms, targetYear),
+    };
+  });
+
+  // Pick top-N by score, plus ±1 neighbours for context
+  const sorted = [...pages].sort((a, b) => b.score - a.score);
+  const selectedNums = new Set<number>();
+  for (const p of sorted.slice(0, maxPages)) {
+    selectedNums.add(p.pageNum);
+    if (p.pageNum > 1) selectedNums.add(p.pageNum - 1);
+    selectedNums.add(p.pageNum + 1);
+  }
+
+  const filtered = pages
+    .filter((p) => selectedNums.has(p.pageNum))
+    .map((p) => p.text)
+    .join("\n\n");
+
+  return {
+    text: filtered || fullText,
+    selected: selectedNums.size,
+    total: pages.length,
+  };
+}
+
+// =============================================================================
+// PDF text chunker
+// =============================================================================
+
 /**
  * Chunk pre-extracted PDF text (plain string) exactly like a .txt file.
  * Use this after server-side PDF parsing returns the raw text.
+ *
+ * When `architecture` is provided (Step 1 result), the text is first filtered
+ * to only the top financially relevant pages — dramatically reducing token usage
+ * for large filings (e.g. 500-page 10-Ks → ~50 targeted pages).
  *
  * A PDF-specific annotation header is prepended to every chunk so the LLM
  * knows it is reading extracted PDF text (not a spreadsheet or JSON file).
@@ -474,15 +605,37 @@ export function chunkPdfText(
   /** Original PDF filename, e.g. "JPM-10K-2024.pdf" */
   fileName: string,
   provider: LLMProvider,
+  /** Optional Step 1 architecture — enables targeted page selection */
+  architecture?: unknown,
+  /** Optional fiscal year — used to boost pages mentioning that year */
+  targetYear?: number,
 ): FileChunk[] {
   const maxTokens = getChunkTokenLimit(provider);
+
+  // Filter to relevant pages when architecture is available
+  let workingText = text.trim();
+  let pageNote = "";
+  if (architecture) {
+    const { text: filtered, selected, total } = selectRelevantPages(
+      workingText,
+      architecture,
+      targetYear,
+    );
+    if (total > 0 && selected < total) {
+      workingText = filtered;
+      pageNote = `// Targeted extraction: ${selected} of ${total} pages selected by relevance scoring.\n`;
+    }
+  }
+
   const annotation =
     `// SOURCE: Extracted text from ${fileName}\n` +
     `// FORMAT: Plain text extracted from a SEC PDF filing (10-K or 10-Q).\n` +
     `// Pages are delimited by "--- Page N ---" markers.\n` +
-    `// Extract all financial figures in USD millions (convert if stated in thousands or billions).\n\n`;
+    `// Extract all financial figures in USD millions (convert if stated in thousands or billions).\n` +
+    pageNote +
+    `\n`;
 
-  const rawChunks = splitText(text.trim(), maxTokens - estimateTokens(annotation));
+  const rawChunks = splitText(workingText, maxTokens - estimateTokens(annotation));
   return rawChunks.map((content, i) => ({
     sourceFile: fileName,
     chunkIndex: i,

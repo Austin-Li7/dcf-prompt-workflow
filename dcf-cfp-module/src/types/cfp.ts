@@ -326,6 +326,17 @@ export interface HistoricalExtractionRow {
   efficiency_ratio_pct?: number | null;
   return_on_avg_equity_pct?: number | null;
   total_assets_usd_m?: number | null;
+  // Industrial workflow fields (only populated for industrial-mode rows)
+  gross_profit_usd_m?: number | null;
+  capex_usd_m?: number | null;
+  depreciation_amortization_usd_m?: number | null;
+  headcount?: number | null;
+  /**
+   * True when this row was projected from a 10-K annual filing.
+   * Used by Q4 derivation: if a year+segment has both an annual row (isAnnualFiling=true)
+   * and an explicit Q4 10-Q row (isAnnualFiling=false/undefined), derivation is skipped.
+   */
+  isAnnualFiling?: boolean;
 }
 
 export type Step2EvidenceLevel =
