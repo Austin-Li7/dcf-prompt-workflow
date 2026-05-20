@@ -1218,6 +1218,36 @@ export interface TopEngine {
   explanation: string;
 }
 
+/** LLM-generated 5-year CAGR for one segment */
+export interface SegmentCagr {
+  segment: string;
+  cagr_pct: number;   // e.g. 14.2
+  explanation: string;
+}
+
+/**
+ * Deterministic historical margin data point, computed from Step 2 filings.
+ * gross_margin_pct = gross_profit / revenue × 100.
+ * opex_pct = (revenue − operating_income) / revenue × 100.
+ * Either field is null when the underlying Step 2 rows lack the data.
+ */
+export interface HistoricalMarginPoint {
+  fiscal_year: number;
+  gross_margin_pct: number | null;
+  opex_pct: number | null;
+}
+
+/**
+ * LLM-projected margin pair for one forecast year (FY+1 … FY+5).
+ * Both fields are adjustable by the user in the UI.
+ */
+export interface MarginProjection {
+  fiscal_year: string;      // "FY+1", "FY+2", …
+  gross_margin_pct: number;
+  opex_pct: number;
+  rationale: string | null;
+}
+
 export interface SummaryConclusion {
   revenueShift: string;
   ecosystemResilience: string;
@@ -1225,6 +1255,15 @@ export interface SummaryConclusion {
 
 export interface SummaryInsights {
   topEngines: TopEngine[];
+  /** 5-year CAGR for every segment — LLM-generated, adjustable */
+  segmentCagrs?: SegmentCagr[];
+  /**
+   * Historical gross margin and OpEx/revenue % — computed deterministically
+   * from Step 2 data before the LLM call. Not adjustable (source of truth).
+   */
+  historicalMargins?: HistoricalMarginPoint[];
+  /** FY+1–FY+5 projected gross margin and OpEx % — LLM-generated, adjustable */
+  marginProjections?: MarginProjection[];
   conclusion: SummaryConclusion;
 }
 

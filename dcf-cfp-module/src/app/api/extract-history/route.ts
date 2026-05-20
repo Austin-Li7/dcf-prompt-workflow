@@ -144,6 +144,9 @@ const INDUSTRIAL_CHUNK_SYSTEM_PROMPT = [
   "Extract segment-level metrics from SEC 10-K and 10-Q filings:",
   "revenue_usd_m, operating_income_usd_m, gross_profit_usd_m, capex_usd_m,",
   "depreciation_amortization_usd_m (D&A), and headcount (if disclosed).",
+  "For CapEx: look in Cash Flows from Investing Activities for 'Purchases of PP&E',",
+  "'Capital Expenditures', or 'Additions to Fixed Assets' — record as a positive USD million value.",
+  "For D&A: look in Cash Flows from Operating Activities.",
   "Return ALL fiscal years and quarters present. Use null for figures not explicitly stated.",
   "All monetary values in USD millions. Headcount as integer (whole number).",
   "Return only valid JSON matching the schema — no prose.",
@@ -158,6 +161,13 @@ const INDUSTRIAL_REDUCE_SYSTEM_PROMPT = [
   "depreciation_amortization_usd_m (D&A), and headcount per segment per quarter.",
   "Map rows to Step 1 canonical industrial segments. At least one metric must be non-null per row.",
   "Keep review_note under 100 characters. Keep sources.excerpt under 80 characters.",
+  // MD&A CapEx split (Task 1B)
+  "Also populate the top-level capex_mda_split object if the MD&A (Item 7 in 10-K, Item 2 in 10-Q)",
+  "explicitly states a maintenance vs. growth/expansion CapEx breakdown.",
+  "Search for keywords: 'maintenance', 'sustaining', 'growth', 'expansion', 'capital expenditures'.",
+  "Set maintenance_usd_m and growth_usd_m only when management explicitly states these figures — do NOT estimate.",
+  "Set guidance_note to any forward-looking CapEx guidance text (next quarter or fiscal year), max 320 chars.",
+  "If no explicit split or guidance is found, set capex_mda_split to null.",
   "No prose outside the structured response.",
 ].join(" ");
 

@@ -78,6 +78,29 @@ const ValidationWarningSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// MD&A CapEx split — company-level for the fiscal year (Task 1B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Captures the management-disclosed maintenance vs. growth CapEx split from
+ * Item 7 (10-K) or Item 2 (10-Q) MD&A narrative.  All fields are nullable —
+ * most companies do not explicitly disclose this breakdown.
+ */
+const CapExMdaSplitSchema = z.object({
+  /** Management-disclosed maintenance / sustaining CapEx for the year (USD millions) */
+  maintenance_usd_m: z.number().nullable(),
+  /** Management-disclosed growth / expansion CapEx for the year (USD millions) */
+  growth_usd_m: z.number().nullable(),
+  /** Forward-looking CapEx guidance text extracted from MD&A (max 320 chars) */
+  guidance_note: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+    z.string().max(320).nullable(),
+  ),
+  /** source_id of the MD&A section where this data was found */
+  source_id: z.string().min(1).nullable(),
+});
+
+// ---------------------------------------------------------------------------
 // Top-level result schema
 // ---------------------------------------------------------------------------
 
@@ -95,6 +118,11 @@ export const Step2IndustrialStructuredSchema = z.object({
     highlights: z.array(z.string()).default([]),
     warnings: z.array(z.string()).default([]),
   }),
+  /**
+   * MD&A management split between maintenance and growth CapEx.
+   * Null when management did not explicitly disclose the breakdown.
+   */
+  capex_mda_split: CapExMdaSplitSchema.nullable().default(null),
 });
 
 export type Step2IndustrialRow = z.infer<typeof Step2IndustrialRowSchema>;
@@ -194,6 +222,22 @@ export function normalizeIndustrialPayload(raw: unknown): unknown {
         ? row.mapped_from_step1_ids
         : [],
     }));
+  }
+
+  // Normalise capex_mda_split — treat missing/empty object as null
+  if (
+    "capex_mda_split" in normalized &&
+    normalized.capex_mda_split !== null &&
+    typeof normalized.capex_mda_split === "object"
+  ) {
+    const split = normalized.capex_mda_split as Record<string, unknown>;
+    const hasAnyValue =
+      split.maintenance_usd_m != null ||
+      split.growth_usd_m != null ||
+      (typeof split.guidance_note === "string" && split.guidance_note.trim().length > 0);
+    if (!hasAnyValue) {
+      normalized.capex_mda_split = null;
+    }
   }
 
   return normalized;

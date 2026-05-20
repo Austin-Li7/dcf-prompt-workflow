@@ -30,8 +30,12 @@ const STEP4_SYSTEM_PROMPT = [
   "Instead, evaluate cross-sell synergies via the Financial Services Productivity Loop: a customer acquired in one product (e.g., lending) becomes a lower-CAC acquisition for adjacent products (e.g., investing, banking, insurance).",
   "Quantify the cross-sell lift using disclosed multi-product attach rates, member lifetime value, or product-per-member metrics from official filings.",
   "BANK CAPITAL: For banking/financial segments, replace PP&E CapEx with regulatory capital deployment — Tier 1 capital ratio, CET1 ratio, and Risk-Weighted Asset (RWA) growth are the relevant capital metrics.",
-  "efficiency_score for bank capital entries must reflect ROATCE (Return on Average Tangible Common Equity).",
-  "Step 2 now supplies goodwill_usd_m, intangible_assets_usd_m, and preferred_equity_usd_m.",
+  // Industrial efficiency_score: driven by deterministic CapEx engine in analyze-capital (Step 4.5).
+  // At the synergy stage, use 0 as a neutral placeholder — the final score is set in analyze-capital.",
+  "For INDUSTRIAL segments: set efficiency_score=0 as placeholder here; the deterministic CapEx/D&A + Damodaran score is computed in Step 4.5 (analyze-capital).",
+  // Bank efficiency_score: still ROATCE-based
+  "For BANK segments: efficiency_score must reflect ROATCE (Return on Average Tangible Common Equity).",
+  "Step 2 supplies goodwill_usd_m, intangible_assets_usd_m, and preferred_equity_usd_m.",
   "Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m.",
   "Then ROATCE = net_income_usd_m / avg(TCE). Use ROAE (net_income / book_value_equity) only as fallback when TCE components are null.",
   "Include review_summary and validation_warnings suitable for a human review UI.",
@@ -85,7 +89,8 @@ function buildStep4Prompt(inputs: {
     "Finance & Banking rules (apply when any segment involves lending, deposits, payments, banking, or financial products):",
     "- CROSS-SELL SYNERGY: Evaluate the Financial Services Productivity Loop — a member acquired in lending becomes a lower-CAC target for investing, banking, and insurance products. Use disclosed multi-product attach rates or product-per-member metrics to quantify.",
     "- CAPITAL (NO CAPEX): Do not model PP&E CapEx for bank/financial segments. Instead use regulatory capital deployment: Tier 1 capital ratio, CET1 ratio, and RWA growth are the capital efficiency metrics.",
-    "- EFFICIENCY SCORE: For bank capital entries, compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m (all from Step 2 rows). ROATCE = net_income_usd_m / avg(TCE). A bank with ROATCE > cost of equity (~10–15%) earns a positive efficiency_score; below earns negative. Fall back to ROAE only if TCE components are null, and flag the fallback in review_note.",
+    "- EFFICIENCY SCORE (INDUSTRIAL): Set efficiency_score=0 as placeholder — the deterministic score (CapEx/D&A zone + Damodaran variance) is finalized in Step 4.5 (analyze-capital).",
+    "- EFFICIENCY SCORE (BANK): Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m (from Step 2 rows). ROATCE = net_income_usd_m / avg(TCE). A bank with ROATCE > cost of equity (~10–15%) earns a positive efficiency_score; below earns negative. Fall back to ROAE only if TCE components are null; flag in review_note.",
     "- REGULATORY MOAT AS SYNERGY: If a bank charter enables a segment to cross-sell under one regulated entity (reducing per-product compliance cost), classify this as a Core Integration synergy and cite the charter in the rationale.",
   ].join("\n");
 }

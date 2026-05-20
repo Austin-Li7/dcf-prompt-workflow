@@ -8,6 +8,7 @@ import {
   projectStep4StructuredToPaths,
   STEP4_RESPONSE_SCHEMA,
 } from "@/lib/step4-schema";
+import { computeCapExEfficiency, formatCapExEfficiency } from "@/lib/capex-efficiency";
 import type { LLMProvider, TrendAnalysisResult } from "@/types/cfp";
 import type { AnalyzeCapitalResponse, CapitalAllocationData } from "@/types/cfp";
 
@@ -32,10 +33,14 @@ const STEP4_CAPITAL_SYSTEM_PROMPT = [
   // Bank/finance-specific capital and risk guidance
   "BANK CAPITAL: For banking or financial services segments, PP&E CapEx is not the primary capital constraint.",
   "Use regulatory capital deployment metrics instead: Tier 1 capital ratio, Common Equity Tier 1 (CET1) ratio, and Risk-Weighted Asset (RWA) growth.",
-  "efficiency_score for bank capital entries must reflect ROATCE (Return on Average Tangible Common Equity).",
-  "Step 2 now supplies goodwill_usd_m, intangible_assets_usd_m, and preferred_equity_usd_m.",
+  // Industrial efficiency_score: now driven by deterministic backend analysis injected into the prompt.
+  "For INDUSTRIAL segments: efficiency_score is pre-computed by the backend CapEx efficiency engine (see BACKEND CAPEX EFFICIENCY ANALYSIS block below).",
+  "Use the deterministic baseline score provided. You may adjust ±1 only with specific project evidence. Document adjustments in review_note.",
+  // Bank efficiency_score: still LLM-computed via ROATCE
+  "For BANK segments: efficiency_score must reflect ROATCE (Return on Average Tangible Common Equity).",
+  "Step 2 supplies goodwill_usd_m, intangible_assets_usd_m, and preferred_equity_usd_m.",
   "Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m.",
-  "Then ROATCE = net_income_usd_m / avg(TCE). A positive efficiency_score means ROATCE above cost of equity (~10–15%); negative means capital destruction.",
+  "Then ROATCE = net_income_usd_m / avg(TCE). Positive score = ROATCE above cost of equity (~10–15%); negative = capital destruction.",
   "Use ROAE only as explicit fallback when TCE components are null; flag the fallback in review_note.",
   // SVB-style Asset-Liability Management (ALM) risk
   "INTEREST RATE / ALM RISK: When news mentions Federal Reserve rate decisions or the 10-year Treasury yield, assess the Asset-Liability Mismatch risk.",
@@ -76,6 +81,8 @@ function buildStep4CapitalPrompt(inputs: {
   recentNews: string;
   trendAnalysis?: TrendAnalysisResult | null;
 }): string {
+  const capexEfficiency = computeCapExEfficiency(inputs.step2Financials, inputs.step1Architecture);
+
   return [
     "Task: Produce the finalized Step 4 Synergy & Driver Eligibility plus Step 4.5 Capital Allocation structured result.",
     `Recent news / management commentary: ${inputs.recentNews}`,
@@ -85,16 +92,21 @@ function buildStep4CapitalPrompt(inputs: {
     JSON.stringify(inputs.step2Financials || {}, null, 2),
     "Current Step 4 synergy review input:",
     JSON.stringify(inputs.step4Synergies || [], null, 2),
+    formatCapExEfficiency(capexEfficiency),
     formatTrendCeilings(inputs.trendAnalysis),
     "Review Prompt V2 capital requirements:",
     "- Use PP&E purchases / capex-specific lines. If unavailable, mark capital workflow_status NEEDS_REVIEW or BLOCKED.",
-    "- Explain whether asset_light_exemption applies. If CapEx/Revenue evidence is insufficient, do not claim the exemption as verified.",
+    "- The backend CapEx efficiency analysis above (BACKEND CAPEX EFFICIENCY ANALYSIS block) already computes:",
+    "  (a) CapEx/D&A zone (Growth / Steady State / Underinvestment),",
+    "  (b) Damodaran industry variance flag (High Intensity / In-line / Asset-Light),",
+    "  (c) Deterministic efficiency_score baseline for industrial segments.",
+    "- Use asset_light_exemption=true ONLY when the backend analysis shows Asset-Light flag AND CapEx/Sales < 8% is confirmed.",
     "- Show whether Step 5 revenue ceiling applies, and include a null ceiling when no hard ceiling is supported.",
     "- Keep any source-grounding gaps in validation_warnings and human review fields.",
     "",
     "Finance & Banking capital rules (apply when any segment involves lending, deposits, payments, banking, or financial products):",
     "- REGULATORY CAPITAL: Replace PP&E CapEx analysis with Tier 1 capital ratio, CET1 ratio, and RWA growth as the primary capital deployment metrics.",
-    "- EFFICIENCY SCORE: Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m (from Step 2 rows). ROATCE = net_income_usd_m / avg(TCE). A bank with ROATCE above cost of equity (~10–15%) earns a positive efficiency_score; below earns negative. Fall back to ROAE only when TCE components are null; document the fallback.",
+    "- EFFICIENCY SCORE (BANK): Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m (from Step 2 rows). ROATCE = net_income_usd_m / avg(TCE). A bank with ROATCE above cost of equity (~10–15%) earns a positive efficiency_score; below earns negative. Fall back to ROAE only when TCE components are null; document the fallback.",
     "- ALM / INTEREST RATE RISK: If recent news mentions Fed rate changes or 10-year Treasury yield moves, assess Asset-Liability Mismatch (ALM) risk:",
     "  (a) Estimate the duration of the bond/securities portfolio vs. the average maturity of deposit liabilities.",
     "  (b) Compute the approximate unrealized loss per 100bps rise in the 10-year Treasury yield.",
