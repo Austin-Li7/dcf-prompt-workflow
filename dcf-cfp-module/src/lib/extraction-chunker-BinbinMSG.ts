@@ -21,6 +21,7 @@ import type { LLMProvider } from "@/types/cfp";
 const PROVIDER_TOKEN_TARGETS: Record<LLMProvider, number> = {
   gemini: 700_000, // 1M cap, leave headroom for response + system prompt
   claude: 150_000, // 200k cap
+  deepseek: 50_000, // 64k input cap; leave headroom for system prompt + response
 };
 
 /** Rough heuristic: 4 chars ≈ 1 token for English/financial text. */
