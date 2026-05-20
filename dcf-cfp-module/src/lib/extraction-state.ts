@@ -154,6 +154,35 @@ export async function updateManifest(
   return updated;
 }
 
+/** Update a single chunk's status; optionally increment completedChunks. Returns updated manifest. */
+export async function updateChunkStatus(
+  sessionId: string,
+  chunkKey: string,
+  status: ChunkStatus,
+  incrementCompleted = false,
+): Promise<PipelineManifest | undefined> {
+  const db = await openDB();
+  const tx = db.transaction("manifests", "readwrite");
+  const store = tx.objectStore("manifests");
+  const existing = await idbGet<PipelineManifest>(store, sessionId);
+  if (!existing) {
+    db.close();
+    return undefined;
+  }
+  const chunks = existing.chunks.map((c) =>
+    c.chunkKey === chunkKey ? { ...c, status } : c,
+  );
+  const updated: PipelineManifest = {
+    ...existing,
+    chunks,
+    completedChunks: incrementCompleted ? existing.completedChunks + 1 : existing.completedChunks,
+    updatedAt: Date.now(),
+  };
+  await idbPut(store, updated);
+  db.close();
+  return updated;
+}
+
 export async function getManifest(sessionId: string): Promise<PipelineManifest | undefined> {
   const db = await openDB();
   const tx = db.transaction("manifests", "readonly");

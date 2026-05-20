@@ -1,6 +1,7 @@
 /**
- * Damodaran January 2025 US Industry Unlevered Beta estimates.
+ * Damodaran US Industry Unlevered Beta estimates.
  * Source: pages.stern.nyu.edu/~adamodar — "Betas by Sector (US)"
+ * Last updated: January 2026. Refresh annually each January from Damodaran's site.
  *
  * For financial companies (banks, insurance) the "unlevered" beta published by
  * Damodaran is already the equity beta proxy — financial-firm leverage is
@@ -71,6 +72,19 @@ export const DAMODARAN_BETAS: DamodaranBetaEntry[] = [
   // ── Real Estate ────────────────────────────────────────────────────────────
   { industry: "Real Estate (REIT)",                unleveredBeta: 0.41 },
   { industry: "Real Estate (Development)",         unleveredBeta: 0.68 },
+
+  // ── Metals & Mining ────────────────────────────────────────────────────────
+  { industry: "Metals & Mining",                   unleveredBeta: 0.85 },
+  { industry: "Precious Metals",                   unleveredBeta: 0.93 },
+  { industry: "Steel",                             unleveredBeta: 0.79 },
+
+  // ── Shipping & Agriculture ─────────────────────────────────────────────────
+  { industry: "Shipping / Maritime",               unleveredBeta: 0.65 },
+  { industry: "Agricultural / Food Production",    unleveredBeta: 0.60 },
+
+  // ── Emerging Technology ────────────────────────────────────────────────────
+  { industry: "Cybersecurity",                     unleveredBeta: 0.98 },
+  { industry: "Data Center / Infrastructure",      unleveredBeta: 0.72 },
 ];
 
 // =============================================================================
@@ -176,6 +190,25 @@ const YF_INDUSTRY_MAP: Record<string, string> = {
   "REIT—Office":                              "Real Estate (REIT)",
   "Real Estate Development":                  "Real Estate (Development)",
   "Real Estate Services":                     "Real Estate (Development)",
+
+  // Metals & Mining
+  "Other Industrial Metals & Mining":         "Metals & Mining",
+  "Copper":                                   "Metals & Mining",
+  "Aluminum":                                 "Metals & Mining",
+  "Gold":                                     "Precious Metals",
+  "Silver":                                   "Precious Metals",
+  "Steel":                                    "Steel",
+  "Iron & Steel":                             "Steel",
+
+  // Shipping & Agriculture
+  "Marine Shipping":                          "Shipping / Maritime",
+  "Shipping":                                 "Shipping / Maritime",
+  "Farm Products":                            "Agricultural / Food Production",
+  "Agricultural Inputs":                      "Agricultural / Food Production",
+
+  // Emerging Technology
+  "Software—Security":                        "Cybersecurity",
+  "Internet Security":                        "Cybersecurity",
 };
 
 // =============================================================================
@@ -230,6 +263,22 @@ export function lookupDamodaranBeta(
   }
   if (lower.includes("internet") || lower.includes("e-commerce")) {
     const e = DAMODARAN_BETAS.find((x) => x.industry === "Internet / E-commerce")!;
+    return { beta: e.unleveredBeta, damodaranIndustry: e.industry };
+  }
+  if (lower.includes("mining") || lower.includes("copper") || lower.includes("aluminum")) {
+    const e = DAMODARAN_BETAS.find((x) => x.industry === "Metals & Mining")!;
+    return { beta: e.unleveredBeta, damodaranIndustry: e.industry };
+  }
+  if (lower.includes("gold") || lower.includes("silver") || lower.includes("precious")) {
+    const e = DAMODARAN_BETAS.find((x) => x.industry === "Precious Metals")!;
+    return { beta: e.unleveredBeta, damodaranIndustry: e.industry };
+  }
+  if (lower.includes("cybersecurity") || lower.includes("security software")) {
+    const e = DAMODARAN_BETAS.find((x) => x.industry === "Cybersecurity")!;
+    return { beta: e.unleveredBeta, damodaranIndustry: e.industry };
+  }
+  if (lower.includes("data center")) {
+    const e = DAMODARAN_BETAS.find((x) => x.industry === "Data Center / Infrastructure")!;
     return { beta: e.unleveredBeta, damodaranIndustry: e.industry };
   }
 

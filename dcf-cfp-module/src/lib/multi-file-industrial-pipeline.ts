@@ -1,48 +1,53 @@
 "use client";
 /**
- * multi-file-pipeline.ts
+ * multi-file-industrial-pipeline.ts
  *
- * Sequential multi-file extraction orchestrator for bank/finance mode.
+ * Sequential multi-file extraction orchestrator for industrial (non-financial) companies.
+ * Mirrors multi-file-pipeline.ts but uses industrial schemas and metrics.
  *
  * Flow per file:
  *   1. Parse PDF on server → plain text
- *   2. Chunk text (existing chunkPdfText helper)
- *   3. Map phase   — extract each chunk (with hints injected if available)
- *   4. Reduce phase — merge summaries → Step2BankStructuredResult
+ *   2. Chunk text
+ *   3. Map phase   — extract each chunk (revenue/opIncome/grossProfit/capex/d&a/headcount)
+ *   4. Reduce phase — merge summaries → Step2IndustrialStructuredResult
  *   5. Review phase — sanity-check result
  *   6. Generate hints (after first 10-K and first 10-Q)
- *   7. Update hints if later filing returns data from a different location
+ *   7. Update hints if later filing surfaces new table locations
  *
- * Produces one Step2BankStructuredResult per file.
- * Caller is responsible for projecting to HistoricalExtractionRow[] and
- * injecting derived Q4 rows via injectDerivedQ4Rows().
+ * Caller injects derived Q4 rows via injectIndustrialDerivedQ4Rows() after pipeline completes.
  */
 
-import type { LLMProvider, WorkflowMode } from "@/types/cfp";
-import type { BankChunkSummary } from "./chunk-schema";
-import type { Step2BankStructuredResult } from "./step2-bank-schema";
+import type { LLMProvider } from "@/types/cfp";
+import type { IndustrialChunkSummary } from "./chunk-schema";
+import type { Step2IndustrialStructuredResult } from "./step2-industrial-schema";
 import { chunkPdfText } from "./extraction-chunker";
-import { buildHintPromptSection, type FilingHints, type FilingTypeHints } from "./filing-hints";
+import {
+  buildHintPromptSection,
+  type FilingHints,
+  type FilingTypeHints,
+} from "./filing-hints";
 import type { DetectedFiling } from "./filing-detector";
 import {
-  saveManifest,
-  updateManifest,
-  getManifest,
-  getChunkResult,
-  saveChunkResult,
-  getSessionChunkResults,
-  deleteSession,
   saveMfFileResult,
   getMfFileResults,
   deleteMfSession,
-  type PipelineManifest,
 } from "./extraction-state";
+import {
+  RateLimitError,
+  UsageExhaustedError,
+  generateSessionId,
+  postJson,
+  runWithConcurrency,
+} from "./pipeline-core";
+
+// Re-export error sentinels so callers can catch them by reference
+export { RateLimitError, UsageExhaustedError };
 
 // =============================================================================
 // Public types
 // =============================================================================
 
-export type MultiFilePipelinePhase =
+export type IndustrialPipelinePhase =
   | { phase: "idle" }
   | { phase: "parsing-pdf"; fileIndex: number; totalFiles: number; fileName: string }
   | { phase: "chunking"; fileIndex: number; totalFiles: number; fileName: string }
@@ -92,125 +97,27 @@ export type MultiFilePipelinePhase =
   | { phase: "complete"; hints: FilingHints }
   | { phase: "error"; message: string };
 
-export interface PerFileResult {
+export interface IndustrialPerFileResult {
   filing: DetectedFiling;
-  structuredResult: Step2BankStructuredResult;
+  structuredResult: Step2IndustrialStructuredResult;
 }
 
-export interface MultiFilePipelineResult {
-  fileResults: PerFileResult[];
+export interface IndustrialPipelineResult {
+  fileResults: IndustrialPerFileResult[];
   hints: FilingHints;
   sessionId: string;
 }
 
-export interface MultiFilePipelineOptions {
-  filings: DetectedFiling[];               // already sorted chronologically
+export interface IndustrialPipelineOptions {
+  filings: DetectedFiling[];
   architecture: unknown;
   provider: LLMProvider;
   apiKey: string;
   companyName: string;
-  workflowMode?: WorkflowMode;             // defaults to "bank"
-  /** Existing hints to seed from (e.g. loaded from a JSON save). */
   seedHints?: FilingHints;
-  onProgress: (p: MultiFilePipelinePhase) => void;
-  /**
-   * Caller-supplied session ID for a fresh run.  If omitted, a new ID is
-   * generated internally.  Pass the same ID as `resumeSessionId` (not here)
-   * when you want to resume a failed run.
-   */
+  onProgress: (p: IndustrialPipelinePhase) => void;
   sessionId?: string;
-  /**
-   * Resume a previously interrupted run.  The pipeline loads any file results
-   * already saved in IndexedDB under this ID and skips those files.
-   */
   resumeSessionId?: string;
-}
-
-// =============================================================================
-// Error sentinels
-// =============================================================================
-
-class RateLimitError extends Error {
-  constructor() {
-    super("Rate limit reached (429/503).");
-    this.name = "RateLimitError";
-  }
-}
-
-class UsageExhaustedError extends Error {
-  constructor() {
-    super("Usage limit exhausted.");
-    this.name = "UsageExhaustedError";
-  }
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-function generateSessionId(): string {
-  return `mf${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-}
-
-const USAGE_EXHAUSTED_PATTERNS = [
-  /insufficient.{0,20}credit/i,
-  /usage.{0,20}limit/i,
-  /quota.{0,20}exceed/i,
-  /out.{0,10}of.{0,10}credit/i,
-  /billing/i,
-];
-
-function isUsageExhausted(body: unknown): boolean {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
-  return USAGE_EXHAUSTED_PATTERNS.some((re) => re.test(text));
-}
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const RATE_LIMIT_WAIT_MS = 60_000;
-const MAX_RETRY_ATTEMPTS = 3;
-
-async function postJson<T>(
-  path: string,
-  body: unknown,
-  onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<T> {
-  for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (res.status === 429 || res.status === 503) {
-      if (attempt < MAX_RETRY_ATTEMPTS) {
-        onRateLimit(RATE_LIMIT_WAIT_MS / 1000, attempt);
-        await sleep(RATE_LIMIT_WAIT_MS);
-        continue;
-      }
-      throw new RateLimitError();
-    }
-
-    const text = await res.text();
-    if (!text.trim()) {
-      throw new Error(`Server returned empty response (HTTP ${res.status}). Try again.`);
-    }
-
-    let data: T & { error?: string };
-    try {
-      data = JSON.parse(text) as T & { error?: string };
-    } catch {
-      throw new Error(`Server returned invalid JSON (HTTP ${res.status}): ${text.slice(0, 200)}`);
-    }
-
-    if (isUsageExhausted(data)) throw new UsageExhaustedError();
-
-    if (!res.ok) {
-      throw new Error((data as { error?: string }).error ?? `Server error ${res.status}`);
-    }
-
-    return data;
-  }
-  throw new RateLimitError();
 }
 
 // =============================================================================
@@ -248,7 +155,7 @@ async function parsePdfOnServer(
 // =============================================================================
 
 interface ChunkExtractionResponse {
-  summary?: BankChunkSummary;
+  summary?: IndustrialChunkSummary;
   error?: string;
 }
 
@@ -258,10 +165,10 @@ async function extractChunk(
   sourceFile: string,
   chunkIndex: number,
   totalChunks: number,
-  options: Pick<MultiFilePipelineOptions, "provider" | "apiKey" | "architecture">,
+  options: Pick<IndustrialPipelineOptions, "provider" | "apiKey" | "architecture">,
   hintsText: string | null,
   onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<BankChunkSummary> {
+): Promise<IndustrialChunkSummary> {
   const response = await postJson<ChunkExtractionResponse>(
     "/api/extract-history",
     {
@@ -271,7 +178,7 @@ async function extractChunk(
       architecture: options.architecture,
       provider: options.provider,
       apiKey: options.apiKey,
-      workflowMode: "bank",
+      workflowMode: "industrial-pdf",
       hintsText: hintsText ?? undefined,
     },
     onRateLimit,
@@ -280,7 +187,7 @@ async function extractChunk(
   if (!response.summary) {
     throw new Error(response.error ?? "No summary returned from extract-chunk.");
   }
-  return response.summary as BankChunkSummary;
+  return response.summary as IndustrialChunkSummary;
 }
 
 // =============================================================================
@@ -288,17 +195,17 @@ async function extractChunk(
 // =============================================================================
 
 interface ReduceResponse {
-  structuredResult?: Step2BankStructuredResult;
+  structuredResult?: Step2IndustrialStructuredResult;
   error?: string;
 }
 
 async function reduceChunks(
-  summaries: BankChunkSummary[],
+  summaries: IndustrialChunkSummary[],
   targetYear: number,
-  options: Pick<MultiFilePipelineOptions, "provider" | "apiKey" | "architecture" | "companyName">,
+  options: Pick<IndustrialPipelineOptions, "provider" | "apiKey" | "architecture" | "companyName">,
   hintsText: string | null,
   onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<Step2BankStructuredResult> {
+): Promise<Step2IndustrialStructuredResult> {
   const response = await postJson<ReduceResponse>(
     "/api/extract-history",
     {
@@ -309,7 +216,7 @@ async function reduceChunks(
       architecture: options.architecture,
       provider: options.provider,
       apiKey: options.apiKey,
-      workflowMode: "bank",
+      workflowMode: "industrial-pdf",
       hintsText: hintsText ?? undefined,
     },
     onRateLimit,
@@ -326,16 +233,16 @@ async function reduceChunks(
 // =============================================================================
 
 interface SanityReviewResponse {
-  structuredResult?: Step2BankStructuredResult;
+  structuredResult?: Step2IndustrialStructuredResult;
   error?: string;
 }
 
 async function sanityReview(
-  result: Step2BankStructuredResult,
+  result: Step2IndustrialStructuredResult,
   targetYear: number,
-  options: Pick<MultiFilePipelineOptions, "provider" | "apiKey" | "architecture">,
+  options: Pick<IndustrialPipelineOptions, "provider" | "apiKey" | "architecture">,
   onRateLimit: (retryIn: number, attempt: number) => void,
-): Promise<Step2BankStructuredResult> {
+): Promise<Step2IndustrialStructuredResult> {
   const response = await postJson<SanityReviewResponse>(
     "/api/extract-history",
     {
@@ -345,13 +252,13 @@ async function sanityReview(
       architecture: options.architecture,
       provider: options.provider,
       apiKey: options.apiKey,
-      workflowMode: "bank",
+      workflowMode: "industrial-pdf",
     },
     onRateLimit,
   );
 
   if (!response.structuredResult) {
-    console.warn("[multi-file-pipeline] Sanity review failed, using un-reviewed result:", response.error);
+    console.warn("[multi-file-industrial-pipeline] Sanity review failed, using un-reviewed result:", response.error);
     return result;
   }
   return response.structuredResult;
@@ -367,9 +274,9 @@ interface GenerateHintsResponse {
 }
 
 async function generateHints(
-  structuredResult: Step2BankStructuredResult,
+  structuredResult: Step2IndustrialStructuredResult,
   filing: DetectedFiling,
-  options: Pick<MultiFilePipelineOptions, "provider" | "apiKey" | "companyName">,
+  options: Pick<IndustrialPipelineOptions, "provider" | "apiKey" | "companyName">,
   onRateLimit: (retryIn: number, attempt: number) => void,
 ): Promise<FilingTypeHints | null> {
   try {
@@ -383,89 +290,56 @@ async function generateHints(
         companyName: options.companyName,
         provider: options.provider,
         apiKey: options.apiKey,
+        workflowMode: "industrial-pdf",
       },
       onRateLimit,
     );
     return response.hints ?? null;
   } catch (err) {
-    // Hints generation is non-fatal
-    console.warn("[multi-file-pipeline] Hints generation failed:", err);
+    console.warn("[multi-file-industrial-pipeline] Hints generation failed:", err);
     return null;
   }
-}
-
-// =============================================================================
-// Concurrency helper (max 3 concurrent chunk extractions)
-// =============================================================================
-
-async function runWithConcurrency<T>(
-  tasks: Array<() => Promise<T>>,
-  limit: number,
-): Promise<Array<T | Error>> {
-  const results: Array<T | Error> = new Array(tasks.length);
-  let nextIndex = 0;
-  const worker = async () => {
-    while (true) {
-      const index = nextIndex++;
-      if (index >= tasks.length) break;
-      try {
-        results[index] = await tasks[index]();
-      } catch (err) {
-        results[index] = err instanceof Error ? err : new Error(String(err));
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
-  return results;
 }
 
 // =============================================================================
 // Main pipeline
 // =============================================================================
 
-export async function runMultiFilePipeline(
-  options: MultiFilePipelineOptions,
-): Promise<MultiFilePipelineResult> {
+export async function runIndustrialPipeline(
+  options: IndustrialPipelineOptions,
+): Promise<IndustrialPipelineResult> {
   const { filings, provider, apiKey, companyName, onProgress, seedHints, resumeSessionId } = options;
 
   const sessionId = resumeSessionId ?? options.sessionId ?? generateSessionId();
-  const fileResults: PerFileResult[] = [];
+  const fileResults: IndustrialPerFileResult[] = [];
 
-  // Initialise hints (from seed or empty)
   const hints: FilingHints = seedHints
     ? { ...seedHints }
     : { companyName, tenK: null, tenQ: null, industrialTenK: null, industrialTenQ: null };
 
-  // ── Resume: load previously saved file results ───────────────────────────────
+  // ── Resume: load previously saved file results ──────────────────────────────
   const savedResults = resumeSessionId ? await getMfFileResults(resumeSessionId) : [];
-  const savedFileMap = new Map(
-    savedResults.map((r) => [r.chunkKey, r.result]),
-  );
+  const savedFileMap = new Map(savedResults.map((r) => [r.chunkKey, r.result]));
 
-  // Restore hints from the most-recently saved file that has hints
   if (savedResults.length > 0) {
-    const lastWithHints = [...savedResults]
-      .reverse()
-      .find((r) => r.result.hints !== null);
+    const lastWithHints = [...savedResults].reverse().find((r) => r.result.hints !== null);
     if (lastWithHints?.result.hints) {
       Object.assign(hints, lastWithHints.result.hints as Partial<FilingHints>);
     }
   }
 
-  // Pre-populate fileResults with already-completed files (preserves ordering)
   for (const filing of filings) {
     const saved = savedFileMap.get(filing.fileName);
     if (saved) {
       fileResults.push({
         filing,
-        structuredResult: saved.structuredResult as Step2BankStructuredResult,
+        structuredResult: saved.structuredResult as Step2IndustrialStructuredResult,
       });
     }
   }
 
-  // Track counts for rate-limit progress reporting
   let totalProcessedChunks = 0;
-  let totalChunksAllFiles = 0; // will be updated as we go
+  let totalChunksAllFiles = 0;
 
   const rateNotify = (retryIn: number, attempt: number) => {
     onProgress({
@@ -480,12 +354,10 @@ export async function runMultiFilePipeline(
   for (let fileIdx = 0; fileIdx < filings.length; fileIdx++) {
     const filing = filings[fileIdx];
     const totalFiles = filings.length;
-    const isBank10K = filing.filingType === "10-K";
+    const is10K = filing.filingType === "10-K";
     const filingType = filing.filingType;
 
-    // ── Skip already-completed files when resuming ────────────────────────────
     if (savedFileMap.has(filing.fileName)) {
-      // Report the file as already reviewed so the UI marks it complete
       onProgress({
         phase: "reviewing",
         fileIndex: fileIdx,
@@ -497,12 +369,7 @@ export async function runMultiFilePipeline(
     }
 
     // ── 1. Parse PDF ─────────────────────────────────────────────────────────
-    onProgress({
-      phase: "parsing-pdf",
-      fileIndex: fileIdx,
-      totalFiles,
-      fileName: filing.fileName,
-    });
+    onProgress({ phase: "parsing-pdf", fileIndex: fileIdx, totalFiles, fileName: filing.fileName });
 
     let pdfText: string;
     try {
@@ -515,22 +382,17 @@ export async function runMultiFilePipeline(
     }
 
     // ── 2. Chunk ─────────────────────────────────────────────────────────────
-    onProgress({
-      phase: "chunking",
-      fileIndex: fileIdx,
-      totalFiles,
-      fileName: filing.fileName,
-    });
+    onProgress({ phase: "chunking", fileIndex: fileIdx, totalFiles, fileName: filing.fileName });
 
     const chunks = chunkPdfText(pdfText, filing.fileName, provider, options.architecture, filing.year);
     totalChunksAllFiles += chunks.length;
 
-    // ── 3. Build hints string for prompt injection ───────────────────────────
-    const typeHints = isBank10K ? hints.tenK : hints.tenQ;
+    // ── 3. Build hints string ─────────────────────────────────────────────────
+    const typeHints = is10K ? hints.industrialTenK : hints.industrialTenQ;
     const hintsText = buildHintPromptSection(typeHints, filingType) || null;
 
-    // ── 4. Map phase (concurrency ≤ 3) ──────────────────────────────────────
-    const chunkSummaries: BankChunkSummary[] = new Array(chunks.length);
+    // ── 4. Map phase (concurrency ≤ 3) ───────────────────────────────────────
+    const chunkSummaries: IndustrialChunkSummary[] = new Array(chunks.length);
 
     const mapTasks = chunks.map((chunk, i) => async (): Promise<void> => {
       const chunkId = `${filing.fileName}__${i}`;
@@ -562,17 +424,15 @@ export async function runMultiFilePipeline(
 
     const mapResults = await runWithConcurrency(mapTasks, 3);
 
-    // Surface fatal errors
     let firstChunkError: string | null = null;
     for (const r of mapResults) {
       if (r instanceof RateLimitError || r instanceof UsageExhaustedError) throw r;
       if (r instanceof Error) {
         if (!firstChunkError) firstChunkError = r.message;
-        console.warn(`[multi-file-pipeline] Chunk error in ${filing.fileName}:`, r.message);
+        console.warn(`[multi-file-industrial-pipeline] Chunk error in ${filing.fileName}:`, r.message);
       }
     }
 
-    // Filter out failed chunks (undefined slots)
     const validSummaries = chunkSummaries.filter(Boolean);
     if (validSummaries.length === 0) {
       const reason = firstChunkError ? ` Reason: ${firstChunkError}` : "";
@@ -614,17 +474,16 @@ export async function runMultiFilePipeline(
 
     fileResults.push({ filing, structuredResult });
 
-    // ── Save completed file result to IDB (enables resume if later file fails) ─
+    // ── Save completed file result to IDB ────────────────────────────────────
     try {
       await saveMfFileResult(sessionId, filing.fileName, structuredResult, { ...hints });
     } catch (saveErr) {
-      // Non-fatal: if IDB save fails, resume won't skip this file but extraction continues
-      console.warn("[multi-file-pipeline] Could not save file result to IDB:", saveErr);
+      console.warn("[multi-file-industrial-pipeline] Could not save file result to IDB:", saveErr);
     }
 
-    // ── 7. Generate hints (first 10-K or first 10-Q) ─────────────────────────
-    const needsTenKHints = isBank10K && hints.tenK === null;
-    const needsTenQHints = !isBank10K && hints.tenQ === null;
+    // ── 7. Generate hints ────────────────────────────────────────────────────
+    const needsTenKHints = is10K && hints.industrialTenK === null;
+    const needsTenQHints = !is10K && hints.industrialTenQ === null;
 
     if (needsTenKHints || needsTenQHints) {
       onProgress({
@@ -643,17 +502,11 @@ export async function runMultiFilePipeline(
       );
 
       if (newHints) {
-        if (isBank10K) {
-          hints.tenK = newHints;
-        } else {
-          hints.tenQ = newHints;
-        }
+        if (is10K) hints.industrialTenK = newHints;
+        else hints.industrialTenQ = newHints;
       }
     } else if (typeHints && typeHints.version > 0) {
-      // ── 8. Update hints if a later file surfaces different locations ────────
-      // Light check: if this file's sources reference sections not in current hints,
-      // bump the hints version and note the update. Full regeneration is too expensive;
-      // instead we just track that an update happened and let the user know.
+      // Update hints if later filing surfaces new table sections
       const knownSections = new Set(
         Object.values(typeHints.metricLocations).map((h) => h?.section ?? ""),
       );
@@ -663,7 +516,6 @@ export async function runMultiFilePipeline(
       );
 
       if (hasNewSection) {
-        // Regenerate hints so subsequent files benefit from updated locations
         onProgress({
           phase: "generating-hints",
           fileIndex: fileIdx,
@@ -685,11 +537,8 @@ export async function runMultiFilePipeline(
             version: typeHints.version + 1,
             lastUpdatedByFile: filing.fileName,
           };
-          if (isBank10K) {
-            hints.tenK = updated;
-          } else {
-            hints.tenQ = updated;
-          }
+          if (is10K) hints.industrialTenK = updated;
+          else hints.industrialTenQ = updated;
         }
       }
     }
@@ -697,11 +546,10 @@ export async function runMultiFilePipeline(
 
   onProgress({ phase: "complete", hints });
 
-  // Clean up per-file IDB records now that the full run succeeded
   try {
     await deleteMfSession(sessionId);
   } catch {
-    // Non-fatal — stale records will be ignored on next run
+    // Non-fatal
   }
 
   return { fileResults, hints, sessionId };

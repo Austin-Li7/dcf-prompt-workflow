@@ -35,6 +35,7 @@ import {
 } from "@/lib/chunk-schema";
 import type { LLMProvider, ExtractHistoryResponse, ContinuityBridge } from "@/types/cfp";
 import type { Step2StructuredResult } from "@/lib/step2-schema";
+import { validateAllBridgeWeights, WeightValidationError } from "@/lib/continuity-bridge-validation";
 
 // =============================================================================
 // Shared helpers
@@ -591,8 +592,21 @@ async function handleAnalyzeContinuity(body: Record<string, unknown>): Promise<N
 
     const parsed = ContinuityAnalysisRawSchema.parse(payload);
     const bridges: ContinuityBridge[] = parsed.continuity_events.map(rawEventToBridge);
+
+    // Strict weight integrity check — reject before returning if any split has
+    // weights that don't sum to 100%. This prevents revenue leakage or double-
+    // counting from propagating into Steps 5–8.
+    validateAllBridgeWeights(bridges);
+
     return NextResponse.json({ bridges });
   } catch (err) {
+    if (err instanceof WeightValidationError) {
+      console.error("[extract-history/analyze-continuity] Weight validation failed:", err.message);
+      return NextResponse.json(
+        { error: err.message, code: "WEIGHT_VALIDATION_ERROR" },
+        { status: 422 },
+      );
+    }
     console.warn("[extract-history/analyze-continuity] Parse failed (non-fatal):", err);
     return NextResponse.json({ bridges: [] });
   }

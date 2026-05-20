@@ -17,7 +17,7 @@ import {
   buildStep5WeakSensitivityRows,
   getStep5StructuredResults,
 } from "@/lib/aggregate-forecast";
-import type { AggregatedRow, SummaryInsights, GenerateSummaryResponse } from "@/types/cfp";
+import type { AggregatedRow, SummaryInsights, AnyInsights, GenerateSummaryResponse } from "@/types/cfp";
 
 // =============================================================================
 // Helpers
@@ -51,7 +51,7 @@ export default function Step6Summary() {
   const { settings, activeApiKey } = useSettings();
 
   // ---- AI insights ----
-  const [insights, setInsights] = useState<SummaryInsights | null>(state.summary.insights);
+  const [insights, setInsights] = useState<AnyInsights | null>(state.summary.insights);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -70,6 +70,7 @@ export default function Step6Summary() {
           step5ReviewWarnings: reviewWarningRows,
           step3Competition: state.competition,
           step4Complete: state.synergies,
+          liquidityRiskRating: state.wacc.liquidityAssessment?.rating ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),
@@ -99,7 +100,7 @@ export default function Step6Summary() {
       "FY5 ($M)": r.fy5,
       "5Y CAGR (%)": r.cagr,
     }));
-    if (insights) {
+    if (insights && 'topEngines' in insights) {
       execRows.push({});
       execRows.push({ Segment: "TOP GROWTH ENGINES" });
       for (const eng of insights.topEngines) {
@@ -322,7 +323,7 @@ export default function Step6Summary() {
           )}
 
           {/* ===== AI NARRATIVE ===== */}
-          {insights && (
+          {insights && 'topEngines' in insights && (
             <section className="space-y-6">
               {/* Top 3 Growth Engines */}
               <div>

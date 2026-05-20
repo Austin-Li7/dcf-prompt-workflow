@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import {
   GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA,
   parseStep3Category,
+  projectStep3CategoryToLegacy,
   STEP3_CATEGORY_RESPONSE_SCHEMA,
 } from "@/lib/step3-schema";
-import type { LLMProvider } from "@/types/cfp";
 import type {
   CategoryCompetitionEntry,
+  LLMProvider,
   ReviseCompetitionResponse,
-  Step3StructuredCategory,
 } from "@/types/cfp";
 
 // =============================================================================
@@ -21,58 +21,20 @@ import type {
 //   - apiKey         (string, optional)
 // =============================================================================
 
-function projectStructuredCategoryToLegacy(
-  category: Step3StructuredCategory,
-): CategoryCompetitionEntry {
-  return {
-    category: category.category,
-    primaryCompetitor: category.primary_competitor,
-    competitiveStatus: category.competitive_status,
-    basisForPairing: category.basis_for_pairing,
-    forces: {
-      rivalry: {
-        rating: category.forces.rivalry.rating,
-        justification: category.forces.rivalry.justification,
-      },
-      newEntrants: {
-        rating: category.forces.new_entrants.rating,
-        justification: category.forces.new_entrants.justification,
-      },
-      suppliers: {
-        rating: category.forces.suppliers.rating,
-        justification: category.forces.suppliers.justification,
-      },
-      buyers: {
-        rating: category.forces.buyers.rating,
-        justification: category.forces.buyers.justification,
-      },
-      substitutes: {
-        rating: category.forces.substitutes.rating,
-        justification: category.forces.substitutes.justification,
-      },
-    },
-    verificationNote: category.verification_note ?? undefined,
-    sourceQuality: category.source_quality,
-    confidence: category.confidence,
-  };
-}
-
-function extractStructuredPayload(result: {
-  text: string;
-  structuredData?: unknown;
-  finishReason?: string;
-  finishMessage?: string;
-}, provider: LLMProvider): unknown {
-  if (result.structuredData && typeof result.structuredData === "object") {
-    return result.structuredData;
-  }
-
-  return parseStructuredJsonText(result.text, {
-    provider,
-    finishReason: result.finishReason,
-    finishMessage: result.finishMessage,
-  });
-}
+const REVISE_SYSTEM_PROMPT = [
+  "You are producing a revised Step 3 v5.5 competitive landscape category for a DCF workflow.",
+  "Return only a compact structured JSON object matching the provided schema.",
+  'The schema_version field (if present) must be exactly "v5.5".',
+  "Use materiality compression: only update fields that the user feedback explicitly addresses.",
+  "Every competitor pairing must be grounded in direct segment overlap, revenue scale, or verified market position.",
+  "If evidence is weak or overlap is partial, lower confidence and set human_review_required=true.",
+  "Every force must cite claim_id and source_ids — preserve existing IDs where the data is unchanged.",
+  "REGULATORY ENVIRONMENT: For chartered bank/lender segments, a national bank charter is a structural moat — weight Threat of New Entrants LOW.",
+  "Flag if competitors lack charter access and must rely on bank-sponsor (BaaS) arrangements.",
+  "NEW TECHNOLOGY IMPACT: For lending, payments, or deposit-taking segments, DeFi platforms and stablecoins may lower switching costs and introduce non-bank substitutes.",
+  "BANK SUPPLIER POWER: When capital supply includes crypto assets, tokenized securities, or stablecoins, depositor bargaining power increases — rate Suppliers MEDIUM or HIGH.",
+  "No markdown, commentary, or prose outside the structured response.",
+].join(" ");
 
 export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompetitionResponse>> {
   try {
@@ -148,6 +110,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
     const result = await callLLM({
       provider: llmProvider,
       apiKey,
+      systemPrompt: REVISE_SYSTEM_PROMPT,
       prompt,
       maxTokens: 4096,
       responseSchema:
@@ -162,14 +125,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
     const revisedStructuredCategory = parseStep3Category(
       extractStructuredPayload(result, llmProvider),
     );
-    const category = projectStructuredCategoryToLegacy(revisedStructuredCategory);
-
-    if (!category) {
-      return NextResponse.json(
-        { category: categoryData, error: "The model did not return a valid JSON object. Please try again." },
-        { status: 422 },
-      );
-    }
+    const category = projectStep3CategoryToLegacy(revisedStructuredCategory);
 
     return NextResponse.json({ category, structuredCategory: revisedStructuredCategory });
   } catch (err: unknown) {

@@ -342,6 +342,11 @@ async function analyzeContinuity(
     );
     return response.bridges ?? [];
   } catch (err) {
+    // Weight validation errors are fatal — revenue leakage or double-counting
+    // would silently corrupt Steps 5–8. Re-throw so the pipeline surfaces the error.
+    if (err instanceof Error && (err.message.includes("Weight leak") || err.message.includes("WEIGHT_VALIDATION_ERROR"))) {
+      throw err;
+    }
     console.warn("[pipeline] Continuity analysis failed (non-fatal):", err);
     return [];
   }

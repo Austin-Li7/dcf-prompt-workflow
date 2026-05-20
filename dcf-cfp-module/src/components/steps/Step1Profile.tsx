@@ -12,15 +12,19 @@ import {
   AlertTriangle,
   Check,
   ArrowRight,
+  Plus,
+  GitBranch,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
-import { applyStep1ApprovalEdits, buildStep1ReviewState } from "@/lib/step1-review";
+import { applyStep1ApprovalEdits, buildStep1ReviewState, markStep1ReviewApproved } from "@/lib/step1-review";
 import { projectStructuredStep1ToArchitecture } from "@/lib/step1-schema";
 import type {
   AnalyzeCompanyResponse,
+  BusinessArchitecture,
+  CompanyType,
   Step1OmissionReviewEntry,
   Step1ReportedNodeReviewEntry,
   Step1ValidationMatrixRow,
@@ -29,7 +33,6 @@ import type {
 // =============================================================================
 // Step 1 — Company Profile: SEC Filing Upload, Analysis, and Review Gate
 // =============================================================================
-const MAX_VISIBLE_VALIDATION_ROWS = 6;
 const MAX_VISIBLE_REPORTED_NODES = 8;
 const MAX_VISIBLE_OMISSION_ROWS = 4;
 const MAX_VISIBLE_PRODUCTS = 2;
@@ -44,9 +47,13 @@ export default function Step1Profile() {
   const [tenQFile, setTenQFile] = useState<File | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [tickerInput, setTickerInput] = useState(state.profile.ticker || "");
   const [segmentNames, setSegmentNames] = useState<Record<string, string>>({});
   const [businessLineNames, setBusinessLineNames] = useState<Record<string, string>>({});
   const [businessLineTargets, setBusinessLineTargets] = useState<Record<string, string>>({});
+  const [userAddedSegments, setUserAddedSegments] = useState<string[]>([]);
+  const [addSegmentInput, setAddSegmentInput] = useState("");
+  const [showAddSegmentForm, setShowAddSegmentForm] = useState(false);
 
   // ---------- Settings (centralized API key) ----------
   const { settings, activeApiKey } = useSettings();
@@ -57,6 +64,10 @@ export default function Step1Profile() {
 
   // Has analysis result been received?
   const hasResult = state.profile.rawAnalysisMarkdown.length > 0;
+
+  useEffect(() => {
+    setTickerInput(state.profile.ticker || "");
+  }, [state.profile.ticker]);
 
   useEffect(() => {
     if (!review) {
@@ -85,6 +96,9 @@ export default function Step1Profile() {
         ),
       ),
     );
+    setUserAddedSegments([]);
+    setAddSegmentInput("");
+    setShowAddSegmentForm(false);
   }, [review]);
 
   // ------------------------------------------------------------------
@@ -146,6 +160,7 @@ export default function Step1Profile() {
 
   const handleApproveReview = useCallback(() => {
     if (!state.profile.step1StructuredResult || !review) return;
+    if (review.approved) return; // B3: no-op if already approved
 
     const approvedStructuredResult = applyStep1ApprovalEdits(
       state.profile.step1StructuredResult,
@@ -165,20 +180,22 @@ export default function Step1Profile() {
       },
     );
 
-    const approvedArchitecture =
-      projectStructuredStep1ToArchitecture(approvedStructuredResult);
-    const approvedReview = buildStep1ReviewState(approvedStructuredResult);
-    approvedReview.workflowStatus = "can_continue";
-    approvedReview.approved = true;
-    approvedReview.approvedAt = new Date().toISOString();
-    approvedReview.summary.highlights = [
-      "Step 1 architecture review approved for downstream use.",
-      ...approvedReview.summary.highlights,
-    ];
+    const approvedArchitecture = projectStructuredStep1ToArchitecture(approvedStructuredResult);
+    // Inject user-added segments (empty business lines — segments the LLM merged but user wants separate)
+    const validUserSegments = userAddedSegments.map((s) => s.trim()).filter(Boolean);
+    if (validUserSegments.length > 0) {
+      approvedArchitecture.architecture = [
+        ...approvedArchitecture.architecture,
+        ...validUserSegments.map((name) => ({ segment: name, businessLines: [] })),
+      ];
+    }
+    // B6: use immutable helper instead of post-hoc mutation
+    const approvedReview = markStep1ReviewApproved(buildStep1ReviewState(approvedStructuredResult));
 
     dispatch({
       type: "UPDATE_PROFILE",
       payload: {
+        ticker: tickerInput.trim() || state.profile.ticker, // U6: persist user-confirmed ticker
         step1StructuredResult: approvedStructuredResult,
         architectureJson: approvedArchitecture,
         step1Review: approvedReview,
@@ -192,6 +209,9 @@ export default function Step1Profile() {
     review,
     segmentNames,
     state.profile.step1StructuredResult,
+    state.profile.ticker,
+    tickerInput,
+    userAddedSegments,
   ]);
 
   // ------------------------------------------------------------------
@@ -325,6 +345,33 @@ export default function Step1Profile() {
             />
           </div>
 
+          <div className="flex items-center gap-3">
+            <label htmlFor="ticker-input" className="shrink-0 text-sm text-zinc-400">
+              Ticker
+            </label>
+            <input
+              id="ticker-input"
+              type="text"
+              value={tickerInput}
+              onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
+              placeholder="e.g. AAPL"
+              className="w-28 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            />
+            {state.profile.step1StructuredResult?.ticker && (
+              <span className="text-xs text-zinc-500">Inferred by Claude — confirm or correct before approving</span>
+            )}
+            {!state.profile.step1StructuredResult?.ticker && (
+              <span className="text-xs text-amber-400">Ticker not inferred — enter manually for WACC step</span>
+            )}
+          </div>
+
+          <LineageNote
+            approved={state.profile.step1Review?.approved ?? false}
+            companyType={state.profile.step1StructuredResult?.company_type}
+            ticker={tickerInput || state.profile.ticker || null}
+            architecture={state.profile.architectureJson}
+          />
+
           {review && (
             <section className="space-y-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -407,6 +454,97 @@ export default function Step1Profile() {
                         </label>
                       </div>
                     ))}
+
+                    {/* User-added segments */}
+                    {userAddedSegments.map((name, i) => (
+                      <div
+                        key={`user-seg-${i}`}
+                        className="grid gap-3 rounded-lg border border-blue-800/40 bg-blue-950/20 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+                      >
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0">
+                            <p className="text-xs uppercase tracking-wide text-blue-400">User-added segment</p>
+                            <p className="mt-1 text-xs text-zinc-500">Not from LLM — will appear as an empty segment in Step 5</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <label className="min-w-0 flex-1 text-sm text-zinc-300">
+                            Segment name
+                            <input
+                              type="text"
+                              value={name}
+                              onChange={(e) =>
+                                setUserAddedSegments((prev) =>
+                                  prev.map((s, j) => (j === i ? e.target.value : s)),
+                                )
+                              }
+                              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setUserAddedSegments((prev) => prev.filter((_, j) => j !== i))}
+                            className="mt-6 shrink-0 rounded p-1.5 text-zinc-500 hover:text-red-400"
+                            title="Remove segment"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Add segment controls */}
+                    {showAddSegmentForm ? (
+                      <div className="flex gap-2 rounded-lg border border-zinc-700 bg-zinc-900/50 p-3">
+                        <input
+                          type="text"
+                          autoFocus
+                          placeholder="e.g. Royalty Revenue"
+                          value={addSegmentInput}
+                          onChange={(e) => setAddSegmentInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && addSegmentInput.trim()) {
+                              setUserAddedSegments((prev) => [...prev, addSegmentInput.trim()]);
+                              setAddSegmentInput("");
+                              setShowAddSegmentForm(false);
+                            }
+                            if (e.key === "Escape") {
+                              setAddSegmentInput("");
+                              setShowAddSegmentForm(false);
+                            }
+                          }}
+                          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (addSegmentInput.trim()) {
+                              setUserAddedSegments((prev) => [...prev, addSegmentInput.trim()]);
+                              setAddSegmentInput("");
+                              setShowAddSegmentForm(false);
+                            }
+                          }}
+                          className="shrink-0 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500"
+                        >
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setAddSegmentInput(""); setShowAddSegmentForm(false); }}
+                          className="shrink-0 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowAddSegmentForm(true)}
+                        className="flex items-center gap-1.5 self-start rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-blue-600/50 hover:text-blue-400"
+                      >
+                        <Plus size={13} /> Add Segment
+                      </button>
+                    )}
                   </div>
 
                   <div className="space-y-3">
@@ -461,6 +599,11 @@ export default function Step1Profile() {
                                 value={segmentNames[segment.id] ?? segment.suggestedName}
                               >
                                 {segmentNames[segment.id] ?? segment.suggestedName}
+                              </option>
+                            ))}
+                            {userAddedSegments.filter(Boolean).map((name, i) => (
+                              <option key={`user-seg-opt-${i}`} value={name}>
+                                {name} (user-added)
                               </option>
                             ))}
                           </select>
@@ -521,7 +664,16 @@ export default function Step1Profile() {
                     step1Review: null,
                   },
                 });
+                setCompanyName("");
+                setTenKFile(null);
+                setTenQFile(null);
+                if (tenKInputRef.current) tenKInputRef.current.value = "";
+                if (tenQInputRef.current) tenQInputRef.current.value = "";
+                setTickerInput("");
                 setErrorMsg(null);
+                setUserAddedSegments([]);
+                setAddSegmentInput("");
+                setShowAddSegmentForm(false);
               }}
               className="flex items-center gap-2 rounded-lg border border-zinc-700 px-5 py-2.5 text-sm text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
             >
@@ -549,52 +701,44 @@ export default function Step1Profile() {
 function ValidationMatrix({ rows }: { rows: Step1ValidationMatrixRow[] }) {
   if (rows.length === 0) return null;
 
-  const visibleRows = rows.slice(0, MAX_VISIBLE_VALIDATION_ROWS);
-  const hiddenRowCount = rows.length - visibleRows.length;
-
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950">
       <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-zinc-300 hover:text-zinc-100">
         Validation matrix ({rows.length})
         <span className="ml-2 text-xs font-normal text-zinc-500">source-tier evidence audit</span>
       </summary>
-      <div className="space-y-3 border-t border-zinc-800 p-4">
-      <div className="overflow-x-auto rounded-lg border border-zinc-800">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-zinc-900 text-zinc-500">
-            <tr>
-              <th className="px-3 py-2 font-medium">Segment</th>
-              <th className="px-3 py-2 font-medium">Item</th>
-              <th className="px-3 py-2 font-medium">Type</th>
-              <th className="px-3 py-2 font-medium">Source</th>
-              <th className="px-3 py-2 font-medium">Status</th>
-              <th className="px-3 py-2 font-medium">Action</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-800 bg-zinc-950/70 text-zinc-300">
-            {visibleRows.map((row) => (
-              <tr key={row.id}>
-                <td className="px-3 py-2 text-zinc-400">{row.segment}</td>
-                <td className="px-3 py-2 text-zinc-200">{row.item}</td>
-                <td className="px-3 py-2">{row.validationType}</td>
-                <td className="px-3 py-2">
-                  <span className="text-zinc-300">{row.sourceTier}</span>
-                  <span className="block max-w-40 truncate text-zinc-500" title={row.sourceReference}>
-                    {row.sourceReference}
-                  </span>
-                </td>
-                <td className="px-3 py-2">{row.validationStatus}</td>
-                <td className="px-3 py-2">{row.recommendedAction}</td>
+      <div className="border-t border-zinc-800 p-4">
+        <div className="overflow-x-auto rounded-lg border border-zinc-800">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-zinc-900 text-zinc-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Segment</th>
+                <th className="px-3 py-2 font-medium">Item</th>
+                <th className="px-3 py-2 font-medium">Type</th>
+                <th className="px-3 py-2 font-medium">Source</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {hiddenRowCount > 0 && (
-        <p className="text-xs text-zinc-500">
-          {hiddenRowCount} more validation row(s) are available in the structured JSON.
-        </p>
-      )}
+            </thead>
+            <tbody className="divide-y divide-zinc-800 bg-zinc-950/70 text-zinc-300">
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  <td className="px-3 py-2 text-zinc-400">{row.segment}</td>
+                  <td className="px-3 py-2 text-zinc-200">{row.item}</td>
+                  <td className="px-3 py-2">{row.validationType}</td>
+                  <td className="px-3 py-2">
+                    <span className="text-zinc-300">{row.sourceTier}</span>
+                    <span className="block max-w-40 truncate text-zinc-500" title={row.sourceReference}>
+                      {row.sourceReference}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2">{row.validationStatus}</td>
+                  <td className="px-3 py-2">{row.recommendedAction}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </details>
   );
@@ -668,15 +812,21 @@ function OmissionReviewCard({ item }: { item: Step1OmissionReviewEntry }) {
   );
 }
 
+const DEPTH_INDENT: Record<number, string> = {
+  0: "ml-0",
+  1: "ml-4",
+  2: "ml-8",
+  3: "ml-12",
+  4: "ml-16",
+};
+
 function ReportedNodeCard({ node }: { node: Step1ReportedNodeReviewEntry }) {
   const visibleProducts = node.products.slice(0, MAX_VISIBLE_PRODUCTS);
   const hiddenProductCount = node.products.length - visibleProducts.length;
+  const indentClass = DEPTH_INDENT[Math.min(node.depth, 4)] ?? "ml-16";
 
   return (
-    <div
-      className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3"
-      style={{ marginLeft: `${node.depth * 16}px` }}
-    >
+    <div className={`rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 ${indentClass}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <p className="text-sm font-medium text-zinc-100">{node.label}</p>
@@ -703,6 +853,137 @@ function ReportedNodeCard({ node }: { node: Step1ReportedNodeReviewEntry }) {
           {hiddenProductCount > 0 ? ` +${hiddenProductCount} more` : ""}
         </p>
       )}
+    </div>
+  );
+}
+
+// =============================================================================
+// Data Lineage Note
+// =============================================================================
+
+function LineageNote({
+  approved,
+  companyType,
+  ticker,
+  architecture,
+}: {
+  approved: boolean;
+  companyType?: CompanyType;
+  ticker: string | null;
+  architecture: BusinessArchitecture | null;
+}) {
+  const segments = architecture?.architecture ?? [];
+
+  const pipelineLabel =
+    companyType === "financial_bank" || companyType === "financial_insurance" || companyType === "financial_other"
+      ? "FCFE / Ke (financial pipeline)"
+      : companyType === "hybrid"
+      ? "Hybrid — FCFF/WACC + FCFE/Ke (SOTP)"
+      : "FCFF / WACC (industrial pipeline)";
+
+  return (
+    <section
+      className={`rounded-lg border p-4 ${
+        approved
+          ? "border-emerald-700/40 bg-emerald-950/10"
+          : "border-zinc-700/60 bg-zinc-900/40"
+      }`}
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <GitBranch size={15} className={approved ? "text-emerald-400" : "text-zinc-400"} />
+        <span className={`text-xs font-semibold uppercase tracking-wide ${approved ? "text-emerald-300" : "text-zinc-300"}`}>
+          Data Lineage — What This Step Locks In
+        </span>
+        <span
+          className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${
+            approved
+              ? "bg-emerald-600/20 text-emerald-300"
+              : "bg-zinc-700/50 text-zinc-400"
+          }`}
+        >
+          {approved ? "Locked · flowing to Steps 2–8" : "Pending approval"}
+        </span>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        {/* Pipeline */}
+        <LineageCard
+          label="DCF Pipeline"
+          sublabel="Determines Steps 5–8 valuation mode"
+          approved={approved}
+        >
+          {companyType ? (
+            <span className="font-mono text-xs text-zinc-200">{pipelineLabel}</span>
+          ) : (
+            <span className="text-xs text-zinc-500">Awaiting analysis</span>
+          )}
+        </LineageCard>
+
+        {/* Segments */}
+        <LineageCard
+          label="Canonical Segments"
+          sublabel="Row identifiers for Steps 2–6 forecasting"
+          approved={approved}
+        >
+          {segments.length > 0 ? (
+            <ul className="space-y-0.5">
+              {segments.slice(0, 5).map((a) => (
+                <li key={a.segment} className="truncate font-mono text-xs text-zinc-200">
+                  {a.segment}
+                </li>
+              ))}
+              {segments.length > 5 && (
+                <li className="text-xs text-zinc-500">+{segments.length - 5} more</li>
+              )}
+            </ul>
+          ) : (
+            <span className="text-xs text-zinc-500">Awaiting approval</span>
+          )}
+        </LineageCard>
+
+        {/* Ticker */}
+        <LineageCard
+          label="Ticker"
+          sublabel="Market data seed for Step 7 WACC fetch"
+          approved={approved}
+        >
+          {ticker ? (
+            <span className="font-mono text-sm font-semibold text-zinc-100">{ticker}</span>
+          ) : (
+            <span className="text-xs text-amber-400">Not set — enter above before approving</span>
+          )}
+        </LineageCard>
+      </div>
+
+      {!approved && (
+        <p className="mt-3 text-xs text-zinc-500">
+          These values are set in stone when you click <span className="text-zinc-300">Approve Step 1</span>. If segment names or the pipeline type are wrong, every downstream step will produce mismatched outputs.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function LineageCard({
+  label,
+  sublabel,
+  approved,
+  children,
+}: {
+  label: string;
+  sublabel: string;
+  approved: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-3 ${
+        approved ? "border-emerald-800/30 bg-emerald-950/20" : "border-zinc-800 bg-zinc-950/50"
+      }`}
+    >
+      <p className="mb-0.5 text-xs font-medium text-zinc-300">{label}</p>
+      <p className="mb-2 text-xs text-zinc-500">{sublabel}</p>
+      {children}
     </div>
   );
 }
@@ -782,8 +1063,6 @@ function FileUploadCard({
 // =============================================================================
 // Finance Mode Indicator badge
 // =============================================================================
-
-import type { CompanyType } from "@/types/cfp";
 
 function FinanceModeIndicator({ companyType }: { companyType?: CompanyType }) {
   if (!companyType || companyType === "industrial") return null;

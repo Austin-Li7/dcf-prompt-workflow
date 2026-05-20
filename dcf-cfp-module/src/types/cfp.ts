@@ -319,6 +319,9 @@ export interface HistoricalExtractionRow {
   provision_for_credit_losses_usd_m?: number | null;
   net_income_usd_m?: number | null;
   book_value_equity_usd_m?: number | null;
+  goodwill_usd_m?: number | null;
+  intangible_assets_usd_m?: number | null;
+  preferred_equity_usd_m?: number | null;
   total_rwa_usd_m?: number | null;
   tier1_capital_ratio_pct?: number | null;
   cet1_ratio_pct?: number | null;
@@ -326,6 +329,25 @@ export interface HistoricalExtractionRow {
   efficiency_ratio_pct?: number | null;
   return_on_avg_equity_pct?: number | null;
   total_assets_usd_m?: number | null;
+  // Liquidity fields (bank mode, annual balance-sheet rows)
+  total_loans_usd_m?: number | null;
+  total_deposits_usd_m?: number | null;
+  retail_insured_deposits_usd_m?: number | null;
+  wholesale_uninsured_deposits_usd_m?: number | null;
+  cash_and_hqla_usd_m?: number | null;
+  htm_bonds_usd_m?: number | null;
+  unrealized_losses_htm_usd_m?: number | null;
+  // Industrial workflow fields (only populated for industrial-mode rows)
+  gross_profit_usd_m?: number | null;
+  capex_usd_m?: number | null;
+  depreciation_amortization_usd_m?: number | null;
+  headcount?: number | null;
+  /**
+   * True when this row was projected from a 10-K annual filing.
+   * Used by Q4 derivation: if a year+segment has both an annual row (isAnnualFiling=true)
+   * and an explicit Q4 10-Q row (isAnnualFiling=false/undefined), derivation is skipped.
+   */
+  isAnnualFiling?: boolean;
 }
 
 export type Step2EvidenceLevel =
@@ -404,6 +426,9 @@ export interface Step2BankHistoricalRow {
   provision_for_credit_losses_usd_m: number | null;
   net_income_usd_m: number | null;
   book_value_equity_usd_m: number | null;
+  goodwill_usd_m: number | null;
+  intangible_assets_usd_m: number | null;
+  preferred_equity_usd_m: number | null;
   total_rwa_usd_m: number | null;
   tier1_capital_ratio_pct: number | null;
   cet1_ratio_pct: number | null;
@@ -411,6 +436,14 @@ export interface Step2BankHistoricalRow {
   efficiency_ratio_pct: number | null;
   return_on_avg_equity_pct: number | null;
   total_assets_usd_m: number | null;
+  // Liquidity fields
+  total_loans_usd_m: number | null;
+  total_deposits_usd_m: number | null;
+  retail_insured_deposits_usd_m: number | null;
+  wholesale_uninsured_deposits_usd_m: number | null;
+  cash_and_hqla_usd_m: number | null;
+  htm_bonds_usd_m: number | null;
+  unrealized_losses_htm_usd_m: number | null;
   mapped_from_step1_ids: string[];
   source_id: string;
   evidence_level: Step2EvidenceLevel;
@@ -511,6 +544,43 @@ export interface FilingHints {
   tenQ: FilingTypeHints | null;
 }
 
+// ---------------------------------------------------------------------------
+// Step 2 – Trend Analysis  (logistic S-curve regression, backend-computed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Logistic regression result for one segment.
+ * Generated deterministically by /api/trend-analysis — no LLM involved.
+ */
+export interface SegmentTrendResult {
+  /** Mathematical plateau / carrying capacity from the logistic fit (USD M). Null when fit failed. */
+  calculated_plateau_ceiling_usd_m: number | null;
+  /** True when the last observed value is ≥80% of the modeled plateau — saturation is the binding constraint. */
+  is_plateau_detected: boolean;
+  /** Discrete growth rate the model predicts from last observed year → next year (%). Null when insufficient data. */
+  modeled_next_year_growth_limit_pct: number | null;
+  /** Year of maximum growth rate on the logistic curve (may be future). Null when fit failed. */
+  inflection_year: number | null;
+  /** Year from which the plateau model should govern forecasts (user override or auto-detected inflection). */
+  steady_growth_start_year: number;
+  data_points_used: number;
+  /** R² of the logistic fit (0–1). Null when fit fell back to CAGR. */
+  fit_quality_r2: number | null;
+  fit_ok: boolean;
+  review_note: string;
+}
+
+/** Full trend analysis result stored in CFPState after /api/trend-analysis completes. */
+export interface TrendAnalysisResult {
+  /** Per-segment logistic regression outputs, keyed by segment name. */
+  segments: Record<string, SegmentTrendResult>;
+  /** Median inflection year across all segments (auto-detected). Null when no fits succeeded. */
+  auto_detected_steady_growth_year: number | null;
+  /** User-supplied override for steady growth start year (null = use auto-detected). */
+  user_override_steady_growth_year: number | null;
+  analysis_timestamp: string;
+}
+
 /** The master history kept in global context (confirmed rows across years). */
 export interface HistoricalData {
   rows: HistoricalExtractionRow[];
@@ -519,6 +589,8 @@ export interface HistoricalData {
   continuity_bridges?: ContinuityBridge[]; // segment restructuring audit records
   /** Filing structure hints from bank mode PDF extraction — persisted for future year uploads. */
   filingHints?: FilingHints;
+  /** Backend logistic regression outputs — generated after Step 2 extraction completes. */
+  trendAnalysis?: TrendAnalysisResult;
 }
 
 // Kept for backward-compat — used by the export API
@@ -549,6 +621,8 @@ export interface AnnualSummary {
 
 export type ForceRating = "Low" | "Medium" | "High";
 
+export type Step3WorkflowStatus = "needs_review" | "can_continue" | "blocked";
+
 export interface ForceDetail {
   rating: ForceRating;
   justification: string;
@@ -571,6 +645,8 @@ export interface CategoryCompetitionEntry {
   verificationNote?: string;
   sourceQuality?: "Official" | "External" | "Mixed" | "Unverified";
   confidence?: "High" | "Medium" | "Low";
+  materiality?: "HIGH" | "MEDIUM" | "LOW";
+  pairingStatus?: "VALIDATED" | "PROVISIONAL" | "LOW_EVIDENCE";
 }
 
 export type Step3EvidenceLevel =
@@ -616,6 +692,7 @@ export interface Step3StructuredCategory {
   category: string;
   mapped_from_step1_ids: string[];
   materiality: "HIGH" | "MEDIUM" | "LOW";
+  pairing_status: "VALIDATED" | "PROVISIONAL" | "LOW_EVIDENCE";
   primary_competitor: string;
   competitive_status: "Leader" | "Challenger" | "Unclear";
   basis_for_pairing: string;
@@ -676,7 +753,7 @@ export interface Step3ReviewCategory {
 }
 
 export interface Step3ReviewState {
-  workflowStatus: Step1WorkflowStatus;
+  workflowStatus: Step3WorkflowStatus;
   approved: boolean;
   approvedAt: string | null;
   summary: Step1ReviewSummary;
@@ -756,6 +833,7 @@ export interface CapabilityPenetrationPath {
   impactScore: number; // -5 to +5
   synergyClassification?: "Material Synergy" | "Adjacent Revenue" | "Disputed";
   reviewRationale?: string;
+  driverEligibility?: "FULL" | "CAPPED_3PP" | "CAPPED_2PP" | "CONTEXT_ONLY" | "NOT_ALLOWED";
 }
 
 /** Shape returned by POST /api/analyze-synergies */
@@ -771,6 +849,7 @@ export interface AnalyzeSynergiesResponse {
 /** Shape returned by POST /api/revise-synergies */
 export interface ReviseSynergiesResponse {
   path: CapabilityPenetrationPath;
+  structuredSynergy?: Step4StructuredResult["synergy_registry"][number] | null;
   error?: string;
   requiresApiKey?: boolean;
 }
@@ -790,8 +869,8 @@ export interface InvestmentMatrixEntry {
 
 export interface CapitalCheckpoints {
   capexRunway: string;
-  subsidiaryMargin: string;
-  investmentEfficiency: string;
+  scaleEconomics: string;
+  guidanceAlignment: string;
 }
 
 export interface CapitalAllocationData {
@@ -854,8 +933,10 @@ export interface Step4ReviewCapitalMetric {
   };
 }
 
+export type Step4WorkflowStatus = "needs_review" | "can_continue" | "blocked";
+
 export interface Step4ReviewState {
-  workflowStatus: "needs_review" | "can_continue";
+  workflowStatus: Step4WorkflowStatus;
   approved: boolean;
   approvedAt: string | null;
   summary: Step1ReviewSummary;
@@ -975,6 +1056,7 @@ export interface AnalyzeCapitalResponse {
 /** Shape returned by POST /api/revise-capital */
 export interface ReviseCapitalResponse {
   entry: InvestmentMatrixEntry;
+  structuredMetric?: Step4StructuredResult["capital_allocation"]["capital_metrics"][number] | null;
   error?: string;
   requiresApiKey?: boolean;
 }
@@ -1152,6 +1234,36 @@ export interface TopEngine {
   explanation: string;
 }
 
+/** LLM-generated 5-year CAGR for one segment */
+export interface SegmentCagr {
+  segment: string;
+  cagr_pct: number;   // e.g. 14.2
+  explanation: string;
+}
+
+/**
+ * Deterministic historical margin data point, computed from Step 2 filings.
+ * gross_margin_pct = gross_profit / revenue × 100.
+ * opex_pct = (revenue − operating_income) / revenue × 100.
+ * Either field is null when the underlying Step 2 rows lack the data.
+ */
+export interface HistoricalMarginPoint {
+  fiscal_year: number;
+  gross_margin_pct: number | null;
+  opex_pct: number | null;
+}
+
+/**
+ * LLM-projected margin pair for one forecast year (FY+1 … FY+5).
+ * Both fields are adjustable by the user in the UI.
+ */
+export interface MarginProjection {
+  fiscal_year: string;      // "FY+1", "FY+2", …
+  gross_margin_pct: number;
+  opex_pct: number;
+  rationale: string | null;
+}
+
 export interface SummaryConclusion {
   revenueShift: string;
   ecosystemResilience: string;
@@ -1159,6 +1271,15 @@ export interface SummaryConclusion {
 
 export interface SummaryInsights {
   topEngines: TopEngine[];
+  /** 5-year CAGR for every segment — LLM-generated, adjustable */
+  segmentCagrs?: SegmentCagr[];
+  /**
+   * Historical gross margin and OpEx/revenue % — computed deterministically
+   * from Step 2 data before the LLM call. Not adjustable (source of truth).
+   */
+  historicalMargins?: HistoricalMarginPoint[];
+  /** FY+1–FY+5 projected gross margin and OpEx % — LLM-generated, adjustable */
+  marginProjections?: MarginProjection[];
   conclusion: SummaryConclusion;
 }
 
@@ -1175,6 +1296,7 @@ export interface BankSummaryConclusion {
   creditQuality: string;
   nimOutlook: string;
   fcfeTrajectory: string;
+  liquidityRisk?: string;
 }
 
 export interface BankSummaryInsights {
@@ -1274,6 +1396,7 @@ export type CFPAction =
   | { type: "APPEND_HISTORY_ROWS"; payload: { year: number; rows: HistoricalExtractionRow[] } }
   | { type: "CLEAR_HISTORY" }
   | { type: "SET_FILING_HINTS"; payload: FilingHints }
+  | { type: "SET_TREND_ANALYSIS"; payload: TrendAnalysisResult }
   | { type: "SET_COMPETITION"; payload: CompetitiveLandscape }
   | { type: "CLEAR_COMPETITION" }
   | { type: "SET_SYNERGIES"; payload: SynergiesAndDrivers }
@@ -1334,6 +1457,14 @@ export interface ValuationSnapshot {
   decisionAction: "BUY" | "WATCH" | "AVOID" | "INSUFFICIENT_DATA";
   decisionLabel: string;
   decisionSummary: string;
+  // Valuation mode + hybrid-specific rates (populated for HYBRID, null otherwise)
+  valuationMode: "FCFF" | "FCFE" | "HYBRID";
+  bankKe: number | null;
+  industrialWacc: number | null;
+  bankFcfMargin: number | null;
+  industrialFcfMargin: number | null;
+  financialTerminalGrowth: number | null;
+  industrialTerminalGrowth: number | null;
 }
 
 /** One saved run for a company — stored in IndexedDB and exported as JSON. */

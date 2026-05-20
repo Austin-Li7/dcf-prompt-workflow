@@ -13,6 +13,7 @@ import type {
   ProductForecast, ForecastQuarterPoint, SegmentForecastBundle,
   GenerateForecastResponse, Step5ReviewSummary, Step5StructuredResult, Step5WorkflowStatus,
 } from "@/types/cfp";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 
 // =============================================================================
 // Helpers
@@ -140,7 +141,7 @@ export default function Step5Forecast() {
   const forecastMode = structuredResult?.machine_artifact.forecast_mode ?? null;
   const annualRows = useMemo(() => {
     if (!structuredResult || forecastMode !== "SEGMENT_ANNUAL") return [];
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const norm = (s: string | undefined | null) => (s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const tgt = norm(currentSegment);
     return structuredResult.machine_artifact.forecast_table.filter((row) => {
       const src = norm(row.segment);
@@ -171,7 +172,9 @@ export default function Step5Forecast() {
           step2History: state.history,
           step3Competition: state.competition,
           step4Complete: state.synergies,
+          trendAnalysis: state.history.trendAnalysis ?? null,
           targetSegment: currentSegment,
+          liquidityRiskRating: state.wacc.liquidityAssessment?.rating ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),
@@ -326,6 +329,17 @@ export default function Step5Forecast() {
 
       {hasArch && (
         <div className="space-y-6">
+
+          <Step5LineageNote
+            approved={state.forecast.approved}
+            segmentCount={state.profile.architectureJson?.architecture.length ?? 0}
+            confirmedYears={state.history.confirmedYears}
+            approvedSegmentCount={approvedSegments.length}
+            structuredResults={approvedStructuredResults}
+            eligibleDriversCount={state.synergies.paths.filter(
+              (p) => p.driverEligibility === "FULL" || p.driverEligibility?.startsWith("CAPPED"),
+            ).length}
+          />
 
           {/* Segment progress */}
           {phase !== "dashboard" && (
@@ -667,5 +681,66 @@ export default function Step5Forecast() {
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// Step 5 Lineage Panel
+// =============================================================================
+function Step5LineageNote({
+  approved, segmentCount, confirmedYears, approvedSegmentCount, structuredResults, eligibleDriversCount,
+}: {
+  approved: boolean;
+  segmentCount: number;
+  confirmedYears: number[];
+  approvedSegmentCount: number;
+  structuredResults: Step5StructuredResult[];
+  eligibleDriversCount: number;
+}) {
+  const lastResult = structuredResults[structuredResults.length - 1];
+  const confidence = lastResult?.machine_artifact.confidence_summary ?? null;
+
+  return (
+    <LineagePanel approved={approved} flowsTo="forecast flows to Step 8 DCF rows">
+      <LineageCard label="From Steps 1–4" sublabel="Segments, history anchor, eligible drivers" approved={approved}>
+        <ul className="space-y-0.5">
+          <li className="text-xs text-zinc-400">
+            <span className="font-mono text-zinc-200">{segmentCount}</span> segment{segmentCount !== 1 ? "s" : ""}
+          </li>
+          <li className="text-xs text-zinc-400">
+            <span className="font-mono text-zinc-200">{confirmedYears.length}</span> yr{confirmedYears.length !== 1 ? "s" : ""} history
+          </li>
+          <li className="text-xs text-zinc-400">
+            <span className="font-mono text-zinc-200">{eligibleDriversCount}</span> eligible driver{eligibleDriversCount !== 1 ? "s" : ""}
+          </li>
+        </ul>
+      </LineageCard>
+      <LineageCard label="Forecast Coverage" sublabel="FY+1–FY+5 per segment → Step 8 rows" approved={approved}>
+        {approvedSegmentCount > 0 ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">{approvedSegmentCount} segment{approvedSegmentCount !== 1 ? "s" : ""} forecasted</span>
+            <br />
+            <span className="text-xs text-zinc-400">FY+1 through FY+5</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">No segments approved yet</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Driver Confidence" sublabel="% of FY5 revenue with disclosed basis" approved={approved}>
+        {confidence ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">
+              {confidence.disclosed_driver_revenue_pct.toFixed(0)}% disclosed
+            </span>
+            <br />
+            <span className="text-xs text-zinc-400">
+              {confidence.strong_driver_revenue_pct.toFixed(0)}% strong inference
+            </span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">Computed after approval</span>
+        )}
+      </LineageCard>
+    </LineagePanel>
   );
 }

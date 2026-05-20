@@ -38,6 +38,25 @@ export interface CallLLMResult {
   finishMessage?: string;
 }
 
+/**
+ * Extract the structured payload from a callLLM result.
+ * Prefers the native structuredData field (tool-use path); falls back to
+ * parsing the raw text as JSON (text-completion path).
+ */
+export function extractStructuredPayload(
+  result: { text: string; structuredData?: unknown; finishReason?: string; finishMessage?: string },
+  provider: LLMProvider,
+): unknown {
+  if (result.structuredData && typeof result.structuredData === "object") {
+    return result.structuredData;
+  }
+  return parseStructuredJsonText(result.text, {
+    provider,
+    finishReason: result.finishReason,
+    finishMessage: result.finishMessage,
+  });
+}
+
 export function parseStructuredJsonText(
   text: string,
   context: { provider: LLMProvider; finishReason?: string; finishMessage?: string },

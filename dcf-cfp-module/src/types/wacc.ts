@@ -2,6 +2,9 @@
 // Module 2: Discount Rate (WACC) — Type Definitions
 // =============================================================================
 
+import type { LiquidityAssessment } from "@/lib/liquidity-assessment";
+export type { LiquidityAssessment };
+
 /** Raw data returned by GET /api/wacc-data */
 export interface WACCDataResponse {
   ticker: string;
@@ -82,4 +85,17 @@ export interface WACCState {
   /** Primary calculation used by single/conglomerate/financial modes. */
   calculation: WACCCalculation | null;
   saved: boolean;
+
+  // ── Valuation assumptions (persisted so dashboard survives reload) ─────────
+  fcfMargin: number;               // single/conglomerate/financial FCF margin
+  terminalGrowth: number;          // terminal growth rate (all modes)
+  bankFcfMargin: number;           // SOTP bank FCFE margin
+  industrialFcfMargin: number;     // SOTP industrial FCF margin
+
+  // ── Data freshness ────────────────────────────────────────────────────────
+  fetchedAt: string | null;        // ISO timestamp of last market data fetch
+
+  // ── Liquidity assessment (financial / hybrid modes only) ─────────────────
+  liquidityAssessment: LiquidityAssessment | null;
+  liquidityRiskSpread: number;     // decimal added to Ke: 0 | 0.005 | 0.010 | 0.020
 }

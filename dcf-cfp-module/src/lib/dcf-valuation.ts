@@ -424,12 +424,6 @@ export function buildSotpValuation(params: BuildSotpParams): SotpValuationResult
 // Shared helpers
 // =============================================================================
 
-function netDebt(wacc: WACCState): number {
-  const debtUsdM = (wacc.fetchedData?.totalDebt ?? 0) / 1_000_000;
-  const cashUsdM = (wacc.fetchedData?.totalCash ?? 0) / 1_000_000;
-  return debtUsdM - cashUsdM;
-}
-
 function annualRevenueValues(row: AggregatedRow): number[] {
   return [row.fy1, row.fy2, row.fy3, row.fy4, row.fy5];
 }

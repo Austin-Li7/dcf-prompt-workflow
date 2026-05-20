@@ -40,6 +40,9 @@ const Step5ForecastRowSchema = z.object({
   provision_for_credit_losses_usd_m: z.number().nullable().optional(),
   regulatory_capital_increase_usd_m: z.number().nullable().optional(),
   fcfe_usd_m: z.number().nullable().optional(),
+  // Strategic override — required when yoy_growth_pct exceeds the backend plateau ceiling.
+  // Must name the specific catalyst (new product, competitor exit, major CapEx) breaking the curve.
+  growth_justification: z.string().max(420).nullable().default(null),
 });
 
 const WeakInferenceSensitivitySchema = z.object({
@@ -255,7 +258,8 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
       ? rawMachineArtifact as Record<string, unknown>
       : {};
   const compositeDriverQualityWarnings: string[] = [];
-  const normalizeDriverQuality = (value: unknown): unknown => {
+  const VALID_DRIVER_QUALITY = new Set(["DISCLOSED", "STRONG", "WEAK", "ESTIMATED_BASE"]);
+  const normalizeDriverQuality = (value: unknown): string => {
     const normalized = normalizeEnumToken(value);
     if (typeof value === "string" && normalized === "WEAK") {
       const token = enumToken(value);
@@ -266,7 +270,8 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
         compositeDriverQualityWarnings.push(value);
       }
     }
-    return normalized;
+    // Default to WEAK when the field is missing or unrecognized — conservative but schema-valid
+    return VALID_DRIVER_QUALITY.has(normalized as string) ? (normalized as string) : "WEAK";
   };
   const confidenceSummary = machineRecord.confidence_summary ?? machineRecord.confidenceSummary;
   const forecastTable = machineRecord.forecast_table ?? machineRecord.forecastTable;
@@ -307,20 +312,66 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
         };
       })
     : assumptions;
-  const weakSensitivity = machineRecord.weak_inference_sensitivity ?? machineRecord.weakInferenceSensitivity;
-  const normalizedWeakSensitivity = Array.isArray(weakSensitivity)
-    ? weakSensitivity.map((entry) => {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-        const entryRecord = entry as Record<string, unknown>;
+
+  // Build the set of ids that are actually declared in the assumptions array.
+  const definedAssumptionIds = new Set(
+    Array.isArray(normalizedAssumptions)
+      ? normalizedAssumptions
+          .filter((a) => a && typeof a === "object" && !Array.isArray(a))
+          .map((a) => (a as Record<string, unknown>).id as string)
+          .filter(Boolean)
+      : [],
+  );
+  // Safe fallback when a row has no valid references left after cleanup.
+  const firstValidAssumptionId = Array.from(definedAssumptionIds)[0] ?? null;
+
+  // Track which rows needed repair so we can surface accurate warnings.
+  const rowsWithCleanedIds: string[] = [];
+
+  // Remove undeclared assumption_ids from each forecast row. Revenue numbers are
+  // preserved — only the broken rationale link is repaired. If all ids on a row are
+  // undeclared, fall back to the first declared assumption rather than leaving it empty.
+  const cleanedForecastTable = Array.isArray(normalizedForecastTable)
+    ? normalizedForecastTable.map((row) => {
+        if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+        const rowRecord = row as Record<string, unknown>;
+        const rawIds = Array.isArray(rowRecord.assumption_ids) ? (rowRecord.assumption_ids as unknown[]) : [];
+        const validIds = rawIds.filter(
+          (id): id is string => typeof id === "string" && definedAssumptionIds.has(id),
+        );
+        if (validIds.length === rawIds.length) return row;
+        rowsWithCleanedIds.push(`${rowRecord.segment ?? "?"}/${rowRecord.fiscal_year ?? "?"}`);
         return {
-          ...entryRecord,
-          assumption_id: entryRecord.assumption_id ?? entryRecord.assumptionId,
-          evidence_level: normalizeEnumToken(entryRecord.evidence_level ?? entryRecord.evidenceLevel),
-          if_removed_revenue_impact_usd_m:
-            entryRecord.if_removed_revenue_impact_usd_m ?? entryRecord.ifRemovedRevenueImpactUsdM,
-          fy5_impact_pct: entryRecord.fy5_impact_pct ?? entryRecord.fy5ImpactPct,
+          ...rowRecord,
+          assumption_ids:
+            validIds.length > 0 ? validIds : firstValidAssumptionId ? [firstValidAssumptionId] : rawIds,
         };
       })
+    : normalizedForecastTable;
+
+  const hasCleanedAssumptionIds = rowsWithCleanedIds.length > 0;
+
+  const weakSensitivity = machineRecord.weak_inference_sensitivity ?? machineRecord.weakInferenceSensitivity;
+  const normalizedWeakSensitivity = Array.isArray(weakSensitivity)
+    ? weakSensitivity
+        .map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+          const entryRecord = entry as Record<string, unknown>;
+          return {
+            ...entryRecord,
+            assumption_id: entryRecord.assumption_id ?? entryRecord.assumptionId,
+            evidence_level: normalizeEnumToken(entryRecord.evidence_level ?? entryRecord.evidenceLevel),
+            if_removed_revenue_impact_usd_m:
+              entryRecord.if_removed_revenue_impact_usd_m ?? entryRecord.ifRemovedRevenueImpactUsdM,
+            fy5_impact_pct: entryRecord.fy5_impact_pct ?? entryRecord.fy5ImpactPct,
+          };
+        })
+        // Drop entries whose assumption_id was never declared — they have no resolvable backing
+        .filter((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
+          const id = (entry as Record<string, unknown>).assumption_id;
+          return typeof id !== "string" || definedAssumptionIds.has(id);
+        })
     : weakSensitivity;
   const normalizedConfidence =
     confidenceSummary && typeof confidenceSummary === "object" && !Array.isArray(confidenceSummary)
@@ -359,12 +410,13 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
   const omittedNextAction =
     !machineRecord.next_action && !machineRecord.nextAction;
   const hasCompositeDriverQuality = compositeDriverQualityWarnings.length > 0;
+  const needsReview = hasCompositeDriverQuality || hasCleanedAssumptionIds;
   const normalizedReviewSummary =
     reviewSummary && typeof reviewSummary === "object" && !Array.isArray(reviewSummary)
       ? {
           ...(reviewSummary as Record<string, unknown>),
           warnings:
-            omittedWorkflowStatus || omittedNextAction || hasCompositeDriverQuality
+            omittedWorkflowStatus || omittedNextAction || needsReview
               ? Array.from(new Set([
                   ...(((reviewSummary as Record<string, unknown>).warnings as unknown[]) ?? []),
                   ...(omittedWorkflowStatus || omittedNextAction
@@ -372,6 +424,9 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
                     : []),
                   ...(hasCompositeDriverQuality
                     ? ["MODEL_COMPOSITE_DRIVER_QUALITY: Composite driver quality labels were conservatively mapped to WEAK and require review."]
+                    : []),
+                  ...(hasCleanedAssumptionIds
+                    ? [`MODEL_BROKEN_ASSUMPTION_REFS: ${rowsWithCleanedIds.length} row(s) had undeclared assumption_ids removed and replaced with the nearest valid assumption. Rows: ${rowsWithCleanedIds.slice(0, 5).join(", ")}.`]
                     : []),
                 ]))
               : (reviewSummary as Record<string, unknown>).warnings,
@@ -387,13 +442,13 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
       ...machineRecord,
       forecast_mode: machineRecord.forecast_mode ?? machineRecord.forecastMode,
       assumptions: normalizedAssumptions,
-      forecast_table: normalizedForecastTable,
+      forecast_table: cleanedForecastTable,
       weak_inference_sensitivity: normalizedWeakSensitivity ?? [],
       confidence_summary: normalizedConfidence,
-      workflow_status: hasCompositeDriverQuality
+      workflow_status: needsReview
         ? "NEEDS_REVIEW"
         : machineRecord.workflow_status ?? machineRecord.workflowStatus ?? "NEEDS_REVIEW",
-      next_action: hasCompositeDriverQuality
+      next_action: needsReview
         ? "HUMAN_REVIEW_MAJOR_ASSUMPTION"
         : machineRecord.next_action ?? machineRecord.nextAction ?? "HUMAN_REVIEW_MAJOR_ASSUMPTION",
     },
@@ -404,7 +459,8 @@ export function parseStep5StructuredResult(payload: unknown): Step5StructuredRes
   return Step5StructuredSchema.parse(normalizeStep5StructuredPayload(payload));
 }
 
-function normalizedName(value: string): string {
+function normalizedName(value: string | undefined | null): string {
+  if (!value) return "";
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 

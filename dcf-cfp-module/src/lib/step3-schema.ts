@@ -3,6 +3,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type {
   CategoryCompetitionEntry,
   Step3ReviewState,
+  Step3WorkflowStatus,
 } from "../types/cfp.ts";
 
 const EvidenceLevelSchema = z.enum([
@@ -74,6 +75,7 @@ export const Step3CategorySchema = z.object({
   category: z.string().min(1),
   mapped_from_step1_ids: z.array(z.string().min(1)).min(1),
   materiality: z.enum(["HIGH", "MEDIUM", "LOW"]),
+  pairing_status: z.enum(["VALIDATED", "PROVISIONAL", "LOW_EVIDENCE"]).default("PROVISIONAL"),
   primary_competitor: z.string().min(1),
   competitive_status: z.enum(["Leader", "Challenger", "Unclear"]),
   basis_for_pairing: boundedStr(320),
@@ -605,10 +607,10 @@ export function parseStep3Category(payload: unknown): Step3CategoryStructured {
   return Step3CategorySchema.parse(truncateCategoryJustifications(payload));
 }
 
-export function projectStep3StructuredToCategories(
-  result: Step3StructuredResult,
-): CategoryCompetitionEntry[] {
-  return result.categories.map((category) => ({
+export function projectStep3CategoryToLegacy(
+  category: Step3CategoryStructured,
+): CategoryCompetitionEntry {
+  return {
     category: category.category,
     primaryCompetitor: category.primary_competitor,
     competitiveStatus: category.competitive_status,
@@ -638,14 +640,32 @@ export function projectStep3StructuredToCategories(
     verificationNote: category.verification_note ?? undefined,
     sourceQuality: category.source_quality,
     confidence: category.confidence,
-  }));
+    materiality: category.materiality,
+    pairingStatus: category.pairing_status,
+  };
+}
+
+export function projectStep3StructuredToCategories(
+  result: Step3StructuredResult,
+): CategoryCompetitionEntry[] {
+  return result.categories.map((category) => projectStep3CategoryToLegacy(category));
+}
+
+const HARD_STOP_CODES = new Set(["CATEGORY_MISMATCH", "SNIPPET_MISMATCH"]);
+
+function deriveWorkflowStatus(result: Step3StructuredResult): Step3WorkflowStatus {
+  const hasHardStop = result.validation_warnings.some(
+    (w) => w.severity === "high" && HARD_STOP_CODES.has(w.code),
+  );
+  if (hasHardStop) return "blocked";
+  if (result.categories.some((c) => c.human_review_required || c.pairing_status === "LOW_EVIDENCE"))
+    return "needs_review";
+  return "can_continue";
 }
 
 export function buildStep3ReviewState(result: Step3StructuredResult): Step3ReviewState {
   return {
-    workflowStatus: result.categories.some((category) => category.human_review_required)
-      ? "needs_review"
-      : "can_continue",
+    workflowStatus: deriveWorkflowStatus(result),
     approved: false,
     approvedAt: null,
     summary: {

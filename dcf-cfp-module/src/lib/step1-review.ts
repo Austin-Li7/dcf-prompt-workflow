@@ -277,6 +277,22 @@ export function buildStep1ReviewState(result: Step1StructuredResult): Step1Revie
   };
 }
 
+export function markStep1ReviewApproved(review: Step1ReviewState): Step1ReviewState {
+  return {
+    ...review,
+    workflowStatus: "can_continue",
+    approved: true,
+    approvedAt: new Date().toISOString(),
+    summary: {
+      ...review.summary,
+      highlights: [
+        "Step 1 architecture review approved for downstream use.",
+        ...review.summary.highlights,
+      ],
+    },
+  };
+}
+
 export function applyStep1ApprovalEdits(
   result: Step1StructuredResult,
   edits: Step1ApprovalEdits,

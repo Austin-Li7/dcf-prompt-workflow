@@ -18,6 +18,7 @@ import {
   getStep5StructuredResults,
 } from "@/lib/aggregate-forecast";
 import type { AggregatedRow, SummaryInsights, GenerateSummaryResponse } from "@/types/cfp";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 
 // =============================================================================
 // Helpers
@@ -70,6 +71,7 @@ export default function Step6Summary() {
           step5ReviewWarnings: reviewWarningRows,
           step3Competition: state.competition,
           step4Complete: state.synergies,
+          liquidityRiskRating: state.wacc.liquidityAssessment?.rating ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),
@@ -203,6 +205,11 @@ export default function Step6Summary() {
 
       {hasForecast && rows.length > 0 && (
         <div className="space-y-8">
+
+          <Step6LineageNote
+            approved={state.summary.insights !== null}
+            rows={rows}
+          />
 
           {/* ===== THE MASTER TABLE ===== */}
           <section>
@@ -475,5 +482,45 @@ export default function Step6Summary() {
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// Step 6 Lineage Panel
+// =============================================================================
+function Step6LineageNote({ approved, rows }: { approved: boolean; rows: AggregatedRow[] }) {
+  const totalRow = rows.find((r) => r.isTotal);
+  const segmentRows = rows.filter((r) => !r.isTotal && !r.isSubtotal);
+
+  return (
+    <LineagePanel approved={approved} flowsTo="aggregated totals flow to Step 8 DCF table">
+      <LineageCard label="From Step 5" sublabel="Per-segment FY+1–FY+5 forecasts" approved={approved}>
+        <span className="font-mono text-xs text-zinc-200">
+          {segmentRows.length} segment{segmentRows.length !== 1 ? "s" : ""} aggregated
+        </span>
+      </LineageCard>
+      <LineageCard label="Revenue Totals" sublabel="Company-wide FY1 → FY5 and 5-yr CAGR" approved={approved}>
+        {totalRow ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">
+              FY1 ${fmt(totalRow.fy1)}M → FY5 ${fmt(totalRow.fy5)}M
+            </span>
+            <br />
+            <span className={`text-xs ${cagrColor(totalRow.cagr)}`}>
+              CAGR {pct(totalRow.cagr)}
+            </span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">No totals yet</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Flows to Step 8" sublabel="DCF revenue rows + insights narrative" approved={approved}>
+        <span className="text-xs text-zinc-400">
+          {approved
+            ? "Insights generated · ready for Step 8"
+            : "Generate insights to complete this step"}
+        </span>
+      </LineageCard>
+    </LineagePanel>
   );
 }

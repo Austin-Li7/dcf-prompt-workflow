@@ -54,6 +54,10 @@ const BankRowSchema = z.object({
   net_income_usd_m: nullableNum(),
   // Balance-sheet / capital metrics
   book_value_equity_usd_m: nullableNum(),
+  // TCE components — required for ROATCE = Net Income / avg(Book Equity − Goodwill − Intangibles − Preferred)
+  goodwill_usd_m: nullableNum(),
+  intangible_assets_usd_m: nullableNum(),
+  preferred_equity_usd_m: nullableNum(),
   total_rwa_usd_m: nullableNum(),
   tier1_capital_ratio_pct: nullableNum(),
   cet1_ratio_pct: nullableNum(),
@@ -63,6 +67,15 @@ const BankRowSchema = z.object({
   return_on_avg_equity_pct: nullableNum(),
   // Size metric
   total_assets_usd_m: nullableNum(),
+  // ── Liquidity metrics (Basel III / stress-test inputs) ─────────────────────
+  // All nullable: these appear in annual balance-sheet footnotes, not always per-segment.
+  total_loans_usd_m: nullableNum(),
+  total_deposits_usd_m: nullableNum(),
+  retail_insured_deposits_usd_m: nullableNum(),
+  wholesale_uninsured_deposits_usd_m: nullableNum(),
+  cash_and_hqla_usd_m: nullableNum(),
+  htm_bonds_usd_m: nullableNum(),
+  unrealized_losses_htm_usd_m: nullableNum(),
   mapped_from_step1_ids: z.array(z.string().min(1)).min(1),
   source_id: z.string().min(1),
   evidence_level: EvidenceLevelSchema,
@@ -149,7 +162,10 @@ export type Step2BankStructuredResult = z.infer<typeof Step2BankStructuredSchema
  */
 export function projectStep2BankStructuredToRows(
   result: Step2BankStructuredResult,
+  filingType?: "10-K" | "10-Q",
 ): ExtractHistoryResponse["rows"] {
+  const isAnnualFiling = filingType === "10-K";
+
   return result.rows.map((row) => {
     const source = result.sources.find((s) => s.source_id === row.source_id);
     const verified = row.validation_status === "verified_source";
@@ -174,11 +190,15 @@ export function projectStep2BankStructuredToRows(
       reviewNote: row.review_note,
       // Bank-mode fields
       workflow_mode: "bank" as const,
+      isAnnualFiling,
       nii_usd_m: row.nii_usd_m,
       non_interest_income_usd_m: row.non_interest_income_usd_m,
       provision_for_credit_losses_usd_m: row.provision_for_credit_losses_usd_m,
       net_income_usd_m: row.net_income_usd_m,
       book_value_equity_usd_m: row.book_value_equity_usd_m,
+      goodwill_usd_m: row.goodwill_usd_m,
+      intangible_assets_usd_m: row.intangible_assets_usd_m,
+      preferred_equity_usd_m: row.preferred_equity_usd_m,
       total_rwa_usd_m: row.total_rwa_usd_m,
       tier1_capital_ratio_pct: row.tier1_capital_ratio_pct,
       cet1_ratio_pct: row.cet1_ratio_pct,
@@ -186,6 +206,14 @@ export function projectStep2BankStructuredToRows(
       efficiency_ratio_pct: row.efficiency_ratio_pct,
       return_on_avg_equity_pct: row.return_on_avg_equity_pct,
       total_assets_usd_m: row.total_assets_usd_m,
+      // Liquidity fields
+      total_loans_usd_m: row.total_loans_usd_m ?? null,
+      total_deposits_usd_m: row.total_deposits_usd_m ?? null,
+      retail_insured_deposits_usd_m: row.retail_insured_deposits_usd_m ?? null,
+      wholesale_uninsured_deposits_usd_m: row.wholesale_uninsured_deposits_usd_m ?? null,
+      cash_and_hqla_usd_m: row.cash_and_hqla_usd_m ?? null,
+      htm_bonds_usd_m: row.htm_bonds_usd_m ?? null,
+      unrealized_losses_htm_usd_m: row.unrealized_losses_htm_usd_m ?? null,
     };
   });
 }

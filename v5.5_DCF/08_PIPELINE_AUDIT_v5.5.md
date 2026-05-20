@@ -26,6 +26,10 @@ Your job is to decide whether this company artifact is safe to proceed with.
 - Step 5 baseline and arithmetic traces sound?
 - Step 6 totals close?
 - Step 7 inputs plausible?
+- Step 7 calculation mode matches Step 1 company_type?
+  (financial_bank / financial_insurance → KE_ONLY; hybrid → SOTP; all others → STANDARD)
+- For SOTP: bank segments use Ke-only, industrial segments use full WACC?
+- For KE_ONLY: no Hamada re-levering applied (D/E re-lever = 0)?
 
 ### 3. Evidence Integrity
 - any laundering from weak evidence to strong forecast usage?
@@ -71,6 +75,7 @@ Focus spot-checks on:
 - Step 4 driver-relevant synergy
 - Step 5 material forecast assumption
 - Step 7 one parameter claim
+- Step 7 calculation mode vs Step 1 company_type alignment
 
 ## Gate Logic
 
@@ -79,6 +84,7 @@ FAIL if any:
 - unsupported driver feeds forecast
 - material arithmetic trace mismatch
 - hidden material uncertainty in user-facing output
+- Step 7 calculation mode contradicts Step 1 company_type (e.g. STANDARD used for a bank)
 
 CONDITIONAL_PASS if:
 - no blocking issue

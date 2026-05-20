@@ -57,10 +57,14 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
       currentPrice = summary.financialData?.currentPrice ?? 0;
       sharesOutstanding = summary.defaultKeyStatistics?.sharesOutstanding ?? 0;
 
-      // Market Cap
-      marketCap = currentPrice && sharesOutstanding
-        ? currentPrice * sharesOutstanding
-        : (summary.defaultKeyStatistics?.enterpriseValue ?? 0);
+      // Market Cap — prefer price × shares, then YF marketCap field; never use EV (includes debt)
+      if (currentPrice && sharesOutstanding) {
+        marketCap = currentPrice * sharesOutstanding;
+      } else {
+        marketCap = (summary.defaultKeyStatistics as Record<string, number> | undefined)?.marketCap
+          ?? summary.financialData?.marketCap
+          ?? 0;
+      }
 
       // Total Debt
       totalDebt = summary.financialData?.totalDebt ?? 0;
@@ -70,9 +74,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<WACCDataRespon
       companyDescription = summary.summaryProfile?.longBusinessSummary ?? "";
       industry = summary.summaryProfile?.industry ?? "";
       sector = summary.summaryProfile?.sector ?? "";
-      companyName = industry
-        ? `${cleanTicker} (${industry})`
-        : cleanTicker;
+      // Use the actual company short name, not the industry string
+      const shortName = (summary.summaryProfile as Record<string, string> | undefined)?.shortName
+        ?? (summary.summaryProfile as Record<string, string> | undefined)?.longName;
+      companyName = shortName ?? cleanTicker;
 
       // Damodaran industry beta lookup
       const betaMatch = lookupDamodaranBeta(industry);

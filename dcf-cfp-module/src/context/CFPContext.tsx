@@ -96,6 +96,13 @@ export const initialCFPState: CFPState = {
     industrialWaccCalculation: null,
     calculation: null,
     saved: false,
+    fcfMargin: 0.25,
+    terminalGrowth: 0.025,
+    bankFcfMargin: 0.20,
+    industrialFcfMargin: 0.25,
+    fetchedAt: null,
+    liquidityAssessment: null,
+    liquidityRiskSpread: 0,
   },
 };
 
@@ -166,6 +173,12 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
       return {
         ...state,
         history: { ...state.history, filingHints: action.payload },
+      };
+
+    case "SET_TREND_ANALYSIS":
+      return {
+        ...state,
+        history: { ...state.history, trendAnalysis: action.payload },
       };
 
     case "SET_COMPETITION":

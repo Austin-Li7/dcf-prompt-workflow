@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ZodError } from "zod";
 import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
 import { extractPdfText } from "@/lib/pdf-extract";
 import { buildStep1ReviewState } from "@/lib/step1-review";
@@ -144,9 +145,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
     }
 
     const documentTexts: string[] = [];
+    let filesReceived = false;
 
     const parsePdfFile = async (file: FormDataEntryValue | null, label: string) => {
       if (!file || !(file instanceof File) || file.size === 0) return;
+      filesReceived = true;
       if (file.size > MAX_PDF_SIZE_BYTES) {
         throw new Error(`${label} exceeds the 50 MB size limit.`);
       }
@@ -161,14 +164,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
     await parsePdfFile(tenQFiles[0] ?? null, "Form 10-Q");
 
     if (documentTexts.length === 0) {
+      // R2: distinguish "no file" from "file uploaded but unreadable"
+      const error = filesReceived
+        ? "Could not extract readable text from the uploaded PDF(s). Please ensure the files are text-based PDFs, not scanned images or encrypted documents."
+        : "At least one PDF (10-K or 10-Q) is required.";
       return NextResponse.json(
-        {
-          rawMarkdown: "",
-          structuredResult: null,
-          architectureJson: null,
-          step1Review: null,
-          error: "At least one PDF (10-K or 10-Q) is required.",
-        },
+        { rawMarkdown: "", structuredResult: null, architectureJson: null, step1Review: null, error },
         { status: 400 },
       );
     }
@@ -219,14 +220,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
     });
   } catch (err: unknown) {
     console.error("[analyze-company] Error:", err);
+    // R1: format ZodError fields into a readable sentence instead of raw JSON
+    let message = "Analysis failed.";
+    if (err instanceof ZodError) {
+      const fields = err.issues.map((i) => `${i.path.join(".") || "root"}: ${i.message}`).join("; ");
+      message = `Structured result validation failed — ${fields}`;
+    } else if (err instanceof Error) {
+      message = err.message;
+    }
     return NextResponse.json(
-      {
-        rawMarkdown: "",
-        structuredResult: null,
-        architectureJson: null,
-        step1Review: null,
-        error: "Analysis failed. Check server logs for details.",
-      },
+      { rawMarkdown: "", structuredResult: null, architectureJson: null, step1Review: null, error: message },
       { status: 500 },
     );
   }

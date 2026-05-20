@@ -15,13 +15,27 @@ import {
   detectConglomerate, detectFinancialCompany,
 } from "@/lib/wacc-math";
 import { inferTickerFromCompanyName, normalizeTickerInput } from "@/lib/ticker-lookup";
+import { damodaranBetaForWorkflowMode } from "@/lib/damodaran-betas";
 import { buildWaccSegmentsFromCFP } from "@/lib/wacc-handoff";
 import { buildDcfValuation, buildSotpValuation } from "@/lib/dcf-valuation";
 import { aggregateSegmentForecastFy, buildStep5AssumptionRows, buildStep5ReviewWarningRows, getStep5StructuredResults } from "@/lib/aggregate-forecast";
 import type {
   WACCDataResponse, WACCSegmentRow, WACCConstants, BusinessType, WACCCalculation,
 } from "@/types/wacc";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 import type { SotpValuationResult } from "@/lib/dcf-valuation";
+import {
+  buildLiquidityAssessment,
+  seedLiquidityInputsFromRow,
+  calcLiquidityMetrics,
+  runStressTest,
+  buildEarlyWarnings,
+  type LiquidityInputs,
+  type LiquidityAssessment,
+  type LiquidityRiskRating,
+  type MetricResult,
+  type StressTestResult,
+} from "@/lib/liquidity-assessment";
 
 // =============================================================================
 // Helpers
@@ -84,13 +98,50 @@ export default function Step7WACC() {
   // ── Hybrid SOTP mode ────────────────────────────────────────────────────────
   const [hybridSegments, setHybridSegments] = useState<WACCSegmentRow[]>(state.wacc.hybridSegments);
   const [hybridBankBeta, setHybridBankBeta] = useState(state.wacc.hybridBankBeta);
-  const [bankFcfMargin, setBankFcfMargin] = useState(0.20);
-  const [industrialFcfMargin, setIndustrialFcfMargin] = useState(0.25);
+  const [bankFcfMargin, setBankFcfMargin] = useState(state.wacc.bankFcfMargin ?? 0.20);
+  const [industrialFcfMargin, setIndustrialFcfMargin] = useState(state.wacc.industrialFcfMargin ?? 0.25);
 
   // ── Shared dashboard ────────────────────────────────────────────────────────
   const [showValuationDashboard, setShowValuationDashboard] = useState(false);
-  const [terminalGrowth, setTerminalGrowth] = useState(0.025);
-  const [fcfMargin, setFcfMargin] = useState(0.25); // for single/conglomerate/financial
+  const [terminalGrowth, setTerminalGrowth] = useState(state.wacc.terminalGrowth ?? 0.025);
+  const [fcfMargin, setFcfMargin] = useState(state.wacc.fcfMargin ?? 0.25);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(state.wacc.fetchedAt ?? null);
+
+  // ── Liquidity assessment (financial / hybrid modes) ─────────────────────────
+  const latestBankRow = useMemo(() => {
+    const rows = state.history.rows.filter((r) => r.workflow_mode === "bank" && r.isAnnualFiling);
+    if (rows.length === 0) return null;
+    return rows.reduce((best, r) => (r.fiscalYear > best.fiscalYear ? r : best), rows[0]);
+  }, [state.history.rows]);
+
+  const [liquidityInputs, setLiquidityInputs] = useState<LiquidityInputs>(() =>
+    state.wacc.liquidityAssessment?.inputs ??
+    (latestBankRow ? seedLiquidityInputsFromRow(latestBankRow) : {
+      cash_and_hqla_usd_m: 0,
+      total_loans_usd_m: 0,
+      htm_bonds_usd_m: 0,
+      unrealized_losses_htm_usd_m: 0,
+      retail_insured_deposits_usd_m: 0,
+      wholesale_uninsured_deposits_usd_m: 0,
+      total_equity_usd_m: 0,
+      flag_cds_spreads_spiking: false,
+      flag_fhlb_borrowing_elevated: false,
+      flag_credit_rating_downgrade: false,
+    })
+  );
+  const [stressFlightPct, setStressFlightPct] = useState(0.30);
+
+  const liquidityAssessment = useMemo(
+    () => buildLiquidityAssessment(liquidityInputs),
+    [liquidityInputs],
+  );
+  const liveStressResult = useMemo(
+    () => runStressTest(liquidityInputs, stressFlightPct),
+    [liquidityInputs, stressFlightPct],
+  );
+
+  const isFinancialMode = businessType === "financial" || businessType === "hybrid";
+  const liquidityRiskSpread = isFinancialMode ? liquidityAssessment.keSpread : 0;
 
   // ── Detect hints from fetched data ─────────────────────────────────────────
   const conglomerateHint = useMemo(() => {
@@ -129,6 +180,7 @@ export default function Step7WACC() {
       const data: WACCDataResponse = await res.json();
       if (data.error) setFetchError(data.error);
       setFetchedData(data);
+      setFetchedAt(new Date().toISOString());
       if (data.ticker) {
         setTickerInput(data.ticker);
         dispatch({ type: "UPDATE_PROFILE", payload: { ticker: data.ticker } });
@@ -183,9 +235,9 @@ export default function Step7WACC() {
       workflowMode: (workflowModes[r.name] ?? "industrial") as "bank" | "industrial",
     }));
     setHybridSegments(annotated);
-    // Set hybrid bank beta from Damodaran if available
-    const bankBetaFromFetch = businessType === "hybrid" && fetchedData?.damodaranBeta ? fetchedData.damodaranBeta : hybridBankBeta;
-    setHybridBankBeta(bankBetaFromFetch);
+    // Use the Damodaran bank beta (0.37) — the whole-company damodaranBeta
+    // reflects the dominant industry (e.g. Software 0.96) and is wrong here.
+    setHybridBankBeta(damodaranBetaForWorkflowMode("bank"));
   };
 
   const addHybridSegment = () =>
@@ -213,24 +265,26 @@ export default function Step7WACC() {
   const effectiveBeta = businessType === "conglomerate" ? weightedBeta : singleBeta;
 
   // Primary calculation (used for single / conglomerate / financial)
-  const calculation: WACCCalculation | null = useMemo(() => {
-    if (businessType === "hybrid") return null; // hybrid uses separate calculations
+  const waccResult = useMemo(() => {
+    if (businessType === "hybrid") return null;
     if (!fetchedData || fetchedData.marketCap <= 0) return null;
-    if (businessType === "financial") return fullBankKeCalculation({ equityBeta: singleBeta, constants });
+    if (businessType === "financial") return { calculation: fullBankKeCalculation({ equityBeta: singleBeta, constants, liquidityRiskSpread }), warnings: [] };
     return fullWACCCalculation({
       marketCap: fetchedData.marketCap, totalDebt: fetchedData.totalDebt,
       interestExpense: fetchedData.interestExpense, unleveredBeta: effectiveBeta, constants,
     });
   }, [fetchedData, businessType, singleBeta, effectiveBeta, constants]);
+  const calculation: WACCCalculation | null = waccResult?.calculation ?? null;
+  const waccWarnings: string[] = waccResult?.warnings ?? [];
 
-  // Hybrid: bank Ke
+  // Hybrid: bank Ke (includes liquidity spread for hybrid mode)
   const bankKeCalc: WACCCalculation | null = useMemo(() => {
     if (businessType !== "hybrid") return null;
-    return fullBankKeCalculation({ equityBeta: hybridBankBeta, constants });
-  }, [businessType, hybridBankBeta, constants]);
+    return fullBankKeCalculation({ equityBeta: hybridBankBeta, constants, liquidityRiskSpread });
+  }, [businessType, hybridBankBeta, constants, liquidityRiskSpread]);
 
   // Hybrid: industrial WACC
-  const industrialWaccCalc: WACCCalculation | null = useMemo(() => {
+  const industrialWaccResult = useMemo(() => {
     if (businessType !== "hybrid") return null;
     if (!fetchedData || fetchedData.marketCap <= 0) return null;
     return fullWACCCalculation({
@@ -239,6 +293,8 @@ export default function Step7WACC() {
       unleveredBeta: hybridIndustrialWeightedBeta, constants,
     });
   }, [businessType, fetchedData, hybridIndustrialWeightedBeta, constants]);
+  const industrialWaccCalc: WACCCalculation | null = industrialWaccResult?.calculation ?? null;
+  const industrialWaccWarnings: string[] = industrialWaccResult?.warnings ?? [];
 
   const hasCalculation = businessType === "hybrid"
     ? (bankKeCalc !== null && industrialWaccCalc !== null)
@@ -286,6 +342,10 @@ export default function Step7WACC() {
         hybridSegments, hybridBankBeta,
         bankKeCalculation: bankKeCalc, industrialWaccCalculation: industrialWaccCalc,
         saved: true,
+        fcfMargin, terminalGrowth, bankFcfMargin, industrialFcfMargin,
+        fetchedAt,
+        liquidityAssessment: isFinancialMode ? liquidityAssessment : null,
+        liquidityRiskSpread: isFinancialMode ? liquidityRiskSpread : 0,
       },
     });
   };
@@ -302,6 +362,26 @@ export default function Step7WACC() {
 
   const activeValuation = businessType === "hybrid" ? sotpValuation : standardValuation;
   const upside = activeValuation?.impliedUpsidePct ?? null;
+
+  // ── WACC sensitivity grid (beta ±0.1 × ERP ±0.5%) ──────────────────────────
+  const waccSensitivity = useMemo(() => {
+    if (!calculation || businessType === "financial" || businessType === "hybrid") return null;
+    if (!fetchedData || fetchedData.marketCap <= 0) return null;
+    const betaDeltas = [-0.1, 0, 0.1];
+    const erpDeltas = [-0.005, 0, 0.005];
+    return betaDeltas.map((db) =>
+      erpDeltas.map((de) => {
+        const r = fullWACCCalculation({
+          marketCap: fetchedData.marketCap,
+          totalDebt: fetchedData.totalDebt,
+          interestExpense: fetchedData.interestExpense,
+          unleveredBeta: effectiveBeta + db,
+          constants: { ...constants, impliedERP: constants.impliedERP + de },
+        });
+        return r?.calculation.wacc ?? null;
+      }),
+    );
+  }, [calculation, businessType, fetchedData, effectiveBeta, constants]);
 
   // ==========================================================================
   // Render
@@ -330,6 +410,29 @@ export default function Step7WACC() {
               : undefined
           }
         />
+
+        {/* ── Lineage panel ────────────────────────────────────────────────── */}
+        <Step7LineageNote
+          approved={state.wacc.saved}
+          ticker={state.profile.ticker || null}
+          companyType={state.profile.step1StructuredResult?.company_type}
+          businessType={businessType}
+          fetchedData={fetchedData}
+          calculation={calculation}
+          terminalGrowth={terminalGrowth}
+        />
+
+        {/* ── Liquidity Assessment (financial / hybrid modes only) ─────────── */}
+        {isFinancialMode && (
+          <LiquidityAssessmentPanel
+            inputs={liquidityInputs}
+            onInputsChange={setLiquidityInputs}
+            assessment={liquidityAssessment}
+            stressFlightPct={stressFlightPct}
+            onStressFlightPctChange={setStressFlightPct}
+            liveStress={liveStressResult}
+          />
+        )}
 
         {/* ── Valuation Dashboard ─────────────────────────────────────────── */}
         {showValuationDashboard && activeValuation && (
@@ -419,7 +522,14 @@ export default function Step7WACC() {
             <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">
               <BarChart3 size={16} /> Market Data
             </h3>
-            {fetchedData && <span className="text-xs text-zinc-500">{fetchedData.companyName}</span>}
+            <div className="flex items-center gap-3">
+              {fetchedData && <span className="text-xs text-zinc-400 font-medium">{fetchedData.companyName}</span>}
+              {fetchedAt && (
+                <span className="text-xs text-zinc-600" title={fetchedAt}>
+                  Fetched {new Date(fetchedAt).toLocaleDateString()}
+                </span>
+              )}
+            </div>
           </div>
 
           {!hasTicker && (
@@ -766,6 +876,53 @@ export default function Step7WACC() {
                 }
               </p>
             </div>
+
+            {/* Validation warnings from sanity checks */}
+            {waccWarnings.length > 0 && (
+              <div className="space-y-1.5">
+                {waccWarnings.map((w, i) => (
+                  <div key={i} className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" /> {w}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* WACC Sensitivity: unlevered beta ±0.1 × ERP ±0.5% */}
+            {waccSensitivity && (
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  WACC Sensitivity — Beta ±0.1 × ERP ±0.5%
+                </h4>
+                <div className="overflow-x-auto rounded-lg border border-zinc-800">
+                  <table className="w-full text-xs">
+                    <thead className="bg-zinc-800 text-zinc-400">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">β \ ERP</th>
+                        <th className="px-3 py-2 text-center font-medium">{pct(constants.impliedERP - 0.005, 1)} ERP</th>
+                        <th className="px-3 py-2 text-center font-medium">{pct(constants.impliedERP, 1)} ERP (base)</th>
+                        <th className="px-3 py-2 text-center font-medium">{pct(constants.impliedERP + 0.005, 1)} ERP</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/50">
+                      {waccSensitivity.map((row, ri) => {
+                        const betaLabel = ri === 0 ? `β ${(effectiveBeta - 0.1).toFixed(2)} (−0.1)` : ri === 1 ? `β ${effectiveBeta.toFixed(2)} (base)` : `β ${(effectiveBeta + 0.1).toFixed(2)} (+0.1)`;
+                        return (
+                          <tr key={ri} className={ri === 1 ? "bg-zinc-800/30" : ""}>
+                            <td className="px-3 py-2 font-medium text-zinc-300">{betaLabel}</td>
+                            {row.map((val, ci) => (
+                              <td key={ci} className={`px-3 py-2 text-center font-mono ${ri === 1 && ci === 1 ? "font-bold text-emerald-400" : "text-zinc-300"}`}>
+                                {val !== null ? pct(val) : "—"}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -796,6 +953,15 @@ export default function Step7WACC() {
                 {!industrialWaccCalc && <p className="text-xs text-zinc-500">Add industrial segments with estimated values above</p>}
               </div>
             </div>
+            {industrialWaccWarnings.length > 0 && (
+              <div className="space-y-1.5">
+                {industrialWaccWarnings.map((w, i) => (
+                  <div key={i} className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-200">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" /> {w}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         )}
 
@@ -832,12 +998,49 @@ function StandardDashboard({ val, businessType, fcfMargin, setFcfMargin, termina
 }) {
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <DashboardCard label="DCF Equity Value" value={fmtM(val.equityValueUsdM)} highlight />
         <DashboardCard label="Enterprise Value" value={fmtM(val.enterpriseValueUsdM)} />
         <DashboardCard label="Market Cap" value={val.marketCapUsdM ? fmtM(val.marketCapUsdM) : "N/A"} />
         <DashboardCard label={businessType === "financial" ? "Ke" : "WACC"} value={val.wacc ? fmtPct(val.wacc) : "N/A"} />
       </div>
+
+      {/* Per-share intrinsic value + decision signal */}
+      {val.intrinsicValuePerShare !== null && (
+        <div className="flex flex-wrap items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-950 px-4 py-3">
+          <div>
+            <p className="text-xs text-zinc-500">Intrinsic Value / Share</p>
+            <p className="mt-0.5 text-lg font-bold tabular-nums text-zinc-100">
+              ${val.intrinsicValuePerShare.toFixed(2)}
+            </p>
+          </div>
+          {val.currentPrice !== null && (
+            <div>
+              <p className="text-xs text-zinc-500">Current Price</p>
+              <p className="mt-0.5 text-lg font-semibold tabular-nums text-zinc-300">
+                ${val.currentPrice.toFixed(2)}
+              </p>
+            </div>
+          )}
+          <div>
+            <p className="text-xs text-zinc-500">Implied Upside</p>
+            <p className={`mt-0.5 text-lg font-bold tabular-nums ${val.impliedUpsidePct !== null && val.impliedUpsidePct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {fmtUpside(val.impliedUpsidePct)}
+            </p>
+          </div>
+          <div className="ml-auto">
+            <span className={`rounded-full border px-3 py-1 text-sm font-bold ${
+              val.decision.action === "BUY" ? "border-emerald-600/50 bg-emerald-950/40 text-emerald-300"
+              : val.decision.action === "WATCH" ? "border-amber-600/50 bg-amber-950/40 text-amber-300"
+              : val.decision.action === "AVOID" ? "border-red-600/50 bg-red-950/40 text-red-300"
+              : "border-zinc-700 bg-zinc-900 text-zinc-500"
+            }`}>
+              {val.decision.action}
+            </span>
+            <p className="mt-1 text-xs text-zinc-500">{val.decision.summary}</p>
+          </div>
+        </div>
+      )}
       <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <ForecastTable rows={val.forecastRows} terminalValueUsdM={val.terminalValueUsdM} terminalPvUsdM={val.terminalPresentValueUsdM} />
         <AssumptionsPanel fcfMargin={fcfMargin} setFcfMargin={setFcfMargin} terminalGrowth={terminalGrowth} setTerminalGrowth={setTerminalGrowth}
@@ -896,14 +1099,14 @@ function SotpDashboard({ val, bankFcfMargin, setBankFcfMargin, industrialFcfMarg
           <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-amber-300">
             <SlidersHorizontal size={14} /> Bank Assumptions
           </h4>
-          <AssumptionSlider label="Bank FCFE Margin" value={bankFcfMargin} min={0.10} max={0.30} step={0.005} onChange={setBankFcfMargin} />
+          <AssumptionSlider label="Bank FCFE Margin" value={bankFcfMargin} min={0.05} max={0.35} step={0.005} onChange={setBankFcfMargin} />
           <p className="text-xs text-zinc-600">FCFE / NII (net income proxy). Banks typically 15–25%.</p>
         </div>
         <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
           <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-emerald-300">
             <SlidersHorizontal size={14} /> Industrial Assumptions
           </h4>
-          <AssumptionSlider label="Industrial FCF Margin" value={industrialFcfMargin} min={0.10} max={0.40} step={0.005} onChange={setIndustrialFcfMargin} />
+          <AssumptionSlider label="Industrial FCF Margin" value={industrialFcfMargin} min={0.05} max={0.50} step={0.005} onChange={setIndustrialFcfMargin} />
           <AssumptionSlider label="Terminal Growth (both)" value={terminalGrowth} min={0.01} max={0.04} step={0.001} onChange={setTerminalGrowth} />
         </div>
       </div>
@@ -1014,7 +1217,7 @@ function AssumptionsPanel({ fcfMargin, setFcfMargin, terminalGrowth, setTerminal
       <h4 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
         <SlidersHorizontal size={15} /> Assumptions
       </h4>
-      <AssumptionSlider label="FCF Margin" value={fcfMargin} min={0.15} max={0.35} step={0.005} onChange={setFcfMargin} />
+      <AssumptionSlider label="FCF Margin" value={fcfMargin} min={0.05} max={0.50} step={0.005} onChange={setFcfMargin} />
       <AssumptionSlider label="Terminal Growth" value={terminalGrowth} min={0.01} max={0.04} step={0.001} onChange={setTerminalGrowth} />
       <div className="rounded-lg bg-zinc-900 px-3 py-2 text-xs text-zinc-400">{netDebtNote}</div>
     </div>
@@ -1078,5 +1281,357 @@ function AssumptionSlider({ label, value, min, max, step, onChange }: {
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-blue-500" />
     </label>
+  );
+}
+
+// =============================================================================
+// Step 7 Lineage Panel
+// =============================================================================
+function Step7LineageNote({
+  approved, ticker, companyType, businessType, fetchedData, calculation, terminalGrowth,
+}: {
+  approved: boolean;
+  ticker: string | null;
+  companyType?: string | null;
+  businessType: BusinessType;
+  fetchedData: WACCDataResponse | null;
+  calculation: WACCCalculation | null;
+  terminalGrowth: number;
+}) {
+  const pipeline =
+    companyType === "financial_bank" || companyType === "financial_insurance" || companyType === "financial_other"
+      ? "FCFE / Ke"
+      : companyType === "hybrid"
+      ? "Hybrid SOTP"
+      : "FCFF / WACC";
+  const waccVal = calculation?.wacc;
+  const debtM = fetchedData ? fetchedData.totalDebt / 1e6 : null;
+  const cashM = fetchedData && fetchedData.totalCash != null ? fetchedData.totalCash / 1e6 : null;
+  const sharesM = fetchedData?.sharesOutstanding != null ? fetchedData.sharesOutstanding / 1e6 : null;
+
+  return (
+    <LineagePanel approved={approved} flowsTo="WACC / Ke flows to Step 8 discount rate">
+      <LineageCard label="From Step 1" sublabel="Ticker + pipeline type → market data fetch" approved={approved}>
+        {ticker ? (
+          <>
+            <span className="font-mono text-sm font-semibold text-zinc-100">{ticker}</span>
+            <br />
+            <span className="text-xs text-zinc-400">{pipeline}</span>
+          </>
+        ) : (
+          <span className="text-xs text-amber-400">Ticker not set — enter above</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Discount Rate" sublabel={businessType === "financial" ? "Ke (bank mode)" : "WACC → Step 8 denominator"} approved={approved}>
+        {waccVal != null ? (
+          <>
+            <span className="font-mono text-sm font-semibold text-zinc-100">{(waccVal * 100).toFixed(2)}%</span>
+            <br />
+            <span className="text-xs text-zinc-400">Terminal growth {(terminalGrowth * 100).toFixed(1)}%</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">Fetch market data to compute</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Equity Bridge" sublabel="Debt, cash, shares → Step 8 value bridge" approved={approved}>
+        {debtM != null ? (
+          <ul className="space-y-0.5">
+            <li className="text-xs text-zinc-400">Debt <span className="font-mono text-zinc-200">${debtM.toFixed(0)}M</span></li>
+            {cashM != null && <li className="text-xs text-zinc-400">Cash <span className="font-mono text-zinc-200">${cashM.toFixed(0)}M</span></li>}
+            {sharesM != null && <li className="text-xs text-zinc-400">Shares <span className="font-mono text-zinc-200">{sharesM.toFixed(0)}M</span></li>}
+          </ul>
+        ) : (
+          <span className="text-xs text-zinc-500">Market data not yet fetched</span>
+        )}
+      </LineageCard>
+    </LineagePanel>
+  );
+}
+
+// =============================================================================
+// Liquidity Assessment Panel
+// =============================================================================
+
+const RAG_COLORS: Record<string, string> = {
+  green:  "bg-emerald-500/15 text-emerald-300 border-emerald-600/30",
+  yellow: "bg-amber-500/15 text-amber-300 border-amber-600/30",
+  red:    "bg-red-500/15 text-red-300 border-red-600/30",
+};
+
+const RATING_COLORS: Record<LiquidityRiskRating, string> = {
+  LOW:      "bg-emerald-500/15 text-emerald-300",
+  MODERATE: "bg-amber-500/15 text-amber-300",
+  HIGH:     "bg-red-500/15 text-red-300",
+  CRITICAL: "bg-red-600/30 text-red-200 animate-pulse",
+};
+
+const SPREAD_LABELS: Record<LiquidityRiskRating, string> = {
+  LOW:      "+0 bps",
+  MODERATE: "+50 bps",
+  HIGH:     "+100 bps",
+  CRITICAL: "+200 bps",
+};
+
+function MetricChip({ metric }: { metric: MetricResult }) {
+  const cls = RAG_COLORS[metric.status] ?? RAG_COLORS.yellow;
+  const valStr = metric.value === null
+    ? "N/A"
+    : metric.label.includes("Ratio") && metric.value < 5
+      ? `${(metric.value * 100).toFixed(1)}%`
+      : metric.value >= 10
+        ? metric.value.toFixed(1) + "×"
+        : `${(metric.value * 100).toFixed(1)}%`;
+  return (
+    <div className={`rounded-lg border p-3 ${cls}`}>
+      <p className="text-xs font-medium opacity-80">{metric.label}</p>
+      <p className="mt-1 text-xl font-bold font-mono">{valStr}</p>
+      <p className="mt-1 text-xs opacity-70">{metric.note}</p>
+    </div>
+  );
+}
+
+function LiquidityInputField({
+  label, value, onChange, unit = "$M",
+}: { label: string; value: number; onChange: (v: number) => void; unit?: string }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs text-zinc-400">{label}</span>
+      <div className="flex items-center gap-1">
+        <span className="text-xs text-zinc-500">{unit}</span>
+        <input
+          type="number" min={0} step={100}
+          value={value === 0 ? "" : value}
+          placeholder="0"
+          onChange={(e) => onChange(Math.max(0, Number(e.target.value) || 0))}
+          className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-right text-sm font-mono text-zinc-200 focus:border-blue-500 focus:outline-none"
+        />
+      </div>
+    </label>
+  );
+}
+
+function StressBar({ label, current, max, color }: {
+  label: string; current: number; max: number; color: "emerald" | "amber" | "red";
+}) {
+  const pct = max > 0 ? Math.max(0, Math.min(1, current / max)) : 0;
+  const barColor = {
+    emerald: "bg-emerald-500",
+    amber:   "bg-amber-500",
+    red:     "bg-red-500",
+  }[color];
+  const textColor = {
+    emerald: "text-emerald-300",
+    amber:   "text-amber-300",
+    red:     "text-red-300",
+  }[color];
+  return (
+    <div>
+      <div className="mb-1 flex justify-between text-xs">
+        <span className="text-zinc-400">{label}</span>
+        <span className={`font-mono font-semibold ${textColor}`}>
+          ${current.toFixed(0)}M <span className="text-zinc-500">/ ${max.toFixed(0)}M</span>
+        </span>
+      </div>
+      <div className="h-3 w-full rounded-full bg-zinc-800">
+        <div
+          className={`h-3 rounded-full transition-all duration-300 ${barColor}`}
+          style={{ width: `${pct * 100}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function LiquidityAssessmentPanel({
+  inputs, onInputsChange, assessment, stressFlightPct, onStressFlightPctChange, liveStress,
+}: {
+  inputs: LiquidityInputs;
+  onInputsChange: (v: LiquidityInputs) => void;
+  assessment: LiquidityAssessment;
+  stressFlightPct: number;
+  onStressFlightPctChange: (v: number) => void;
+  liveStress: StressTestResult;
+}) {
+  const set = (field: keyof LiquidityInputs) => (v: number | boolean) =>
+    onInputsChange({ ...inputs, [field]: v });
+
+  const { metrics, rating, keSpread, earlyWarnings } = assessment;
+  const ratingCls = RATING_COLORS[rating];
+  const totalDeposits = metrics.totalDeposits;
+
+  return (
+    <section className="space-y-5 rounded-xl border border-blue-800/40 bg-blue-950/10 p-5">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
+            <Shield size={16} />
+            Liquidity Assessment
+          </h3>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            Bank-run stress test · feeds Ke as a liquidity risk spread
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`rounded-full px-3 py-1 text-xs font-bold ${ratingCls}`}>
+            {rating}
+          </span>
+          <span className="rounded-full bg-blue-900/30 px-3 py-1 text-xs font-mono text-blue-200">
+            Ke +{(keSpread * 100).toFixed(0)} bps
+          </span>
+        </div>
+      </div>
+
+      {/* Early-warning toggles */}
+      <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Early Warning Signals
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {(
+            [
+              { field: "flag_cds_spreads_spiking",      label: "CDS Spreads Spiking" },
+              { field: "flag_fhlb_borrowing_elevated",  label: "FHLB Borrowing Elevated" },
+              { field: "flag_credit_rating_downgrade",  label: "Credit Rating Downgrade" },
+            ] as const
+          ).map(({ field, label }) => (
+            <label key={field} className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={inputs[field] as boolean}
+                onChange={(e) => set(field)(e.target.checked)}
+                className="h-4 w-4 accent-amber-500"
+              />
+              <span className="text-xs text-zinc-300">{label}</span>
+            </label>
+          ))}
+        </div>
+        {earlyWarnings.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {earlyWarnings.map((w, i) => (
+              <li key={i} className="flex items-start gap-2 text-xs text-amber-300">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                {w}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Balance-sheet inputs */}
+      <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Balance-Sheet Inputs <span className="ml-1 font-normal text-zinc-600">(USD Millions — pre-filled from Step 2)</span>
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <LiquidityInputField label="Cash & HQLA"            value={inputs.cash_and_hqla_usd_m}                  onChange={set("cash_and_hqla_usd_m")} />
+          <LiquidityInputField label="Total Loans"            value={inputs.total_loans_usd_m}                     onChange={set("total_loans_usd_m")} />
+          <LiquidityInputField label="HTM Bonds"              value={inputs.htm_bonds_usd_m}                       onChange={set("htm_bonds_usd_m")} />
+          <LiquidityInputField label="Unrealized HTM Losses"  value={inputs.unrealized_losses_htm_usd_m}           onChange={set("unrealized_losses_htm_usd_m")} />
+          <LiquidityInputField label="Retail Insured Deposits" value={inputs.retail_insured_deposits_usd_m}        onChange={set("retail_insured_deposits_usd_m")} />
+          <LiquidityInputField label="Wholesale / Uninsured"  value={inputs.wholesale_uninsured_deposits_usd_m}    onChange={set("wholesale_uninsured_deposits_usd_m")} />
+          <LiquidityInputField label="Total Common Equity"    value={inputs.total_equity_usd_m}                    onChange={set("total_equity_usd_m")} />
+        </div>
+      </div>
+
+      {/* Baseline metrics */}
+      <div>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Baseline Liquidity Metrics
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <MetricChip metric={metrics.ldr} />
+          <MetricChip metric={metrics.uninsuredConcentration} />
+          <MetricChip metric={metrics.lcrProxy} />
+        </div>
+      </div>
+
+      {/* Stress test */}
+      <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Bank-Run Stress Test
+        </p>
+
+        {/* Slider */}
+        <label className="block">
+          <div className="mb-1 flex justify-between text-xs">
+            <span className="text-zinc-400">Uninsured Deposit Flight Severity</span>
+            <span className="font-mono font-semibold text-zinc-200">
+              {(stressFlightPct * 100).toFixed(0)}% — ${liveStress.fleeingDeposits.toFixed(0)}M fleeing
+            </span>
+          </div>
+          <input
+            type="range" min={0} max={1} step={0.01} value={stressFlightPct}
+            onChange={(e) => onStressFlightPctChange(Number(e.target.value))}
+            className="w-full accent-red-500"
+          />
+          <div className="mt-0.5 flex justify-between text-xs text-zinc-600">
+            <span>0% (no stress)</span><span>50%</span><span>100% (full run)</span>
+          </div>
+        </label>
+
+        {/* Visual bars */}
+        <div className="mt-4 space-y-3">
+          <StressBar
+            label="HQLA Buffer Remaining"
+            current={liveStress.hqlaRemaining}
+            max={inputs.cash_and_hqla_usd_m || 1}
+            color={liveStress.hqlaRemaining > inputs.cash_and_hqla_usd_m * 0.3 ? "emerald" : "amber"}
+          />
+          <StressBar
+            label="Equity Remaining"
+            current={Math.max(0, liveStress.equityRemaining)}
+            max={inputs.total_equity_usd_m || 1}
+            color={liveStress.equityRemaining > 0 ? (liveStress.equityRemaining > inputs.total_equity_usd_m * 0.5 ? "emerald" : "amber") : "red"}
+          />
+        </div>
+
+        {/* Arithmetic trace */}
+        <div className="mt-4 space-y-1 rounded border border-zinc-700/30 bg-zinc-950/50 p-3 text-xs font-mono">
+          <div className="text-zinc-500">Stress trace:</div>
+          <div className="text-zinc-300">Fleeing deposits: <span className="text-white">${liveStress.fleeingDeposits.toFixed(0)}M</span></div>
+          <div className="text-zinc-300">HQLA drained: <span className="text-white">${Math.min(inputs.cash_and_hqla_usd_m, liveStress.fleeingDeposits).toFixed(0)}M</span> → remaining: <span className="text-white">${liveStress.hqlaRemaining.toFixed(0)}M</span></div>
+          {liveStress.shortfall > 0 && (
+            <>
+              <div className="text-amber-300">Shortfall after HQLA: <span className="text-white">${liveStress.shortfall.toFixed(0)}M</span> → forced HTM sales</div>
+              <div className="text-amber-300">HTM bonds sold: <span className="text-white">${liveStress.htmSold.toFixed(0)}M</span></div>
+              <div className="text-red-300">Realized losses: <span className="text-white">${liveStress.realizedLosses.toFixed(0)}M</span></div>
+            </>
+          )}
+          <div className={liveStress.equityRemaining < 0 ? "text-red-300" : "text-zinc-300"}>
+            Equity: <span className={liveStress.equityRemaining < 0 ? "text-red-200 font-bold" : "text-white"}>
+              ${liveStress.equityRemaining.toFixed(0)}M
+            </span>
+          </div>
+        </div>
+
+        {/* Insolvency alert */}
+        {liveStress.insolvent && (
+          <div className="mt-3 rounded-lg border border-red-500 bg-red-950/40 p-3 text-center">
+            <p className="text-sm font-bold uppercase tracking-widest text-red-300">
+              ⚠ Insolvent / Regulatory Takeover Risk
+            </p>
+            <p className="mt-1 text-xs text-red-400">
+              At {(stressFlightPct * 100).toFixed(0)}% flight, realized losses exceed total equity.
+              Bank cannot absorb forced asset-sale losses.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Ke spread explanation */}
+      <div className="rounded-lg border border-blue-800/30 bg-blue-950/20 p-3">
+        <p className="text-xs text-blue-200">
+          <span className="font-semibold">Ke impact:</span>{" "}
+          {rating === "LOW"
+            ? "No spread applied — liquidity profile is healthy."
+            : `A ${SPREAD_LABELS[rating]} liquidity risk premium is added to Ke above the base CAPM rate. This raises the discount rate and reduces the FCFE present value — reflecting the additional equity return required to compensate for funding fragility.`
+          }
+        </p>
+        <p className="mt-1 text-xs font-mono text-blue-300">
+          Ke = Rf + β × ERP{keSpread > 0 ? ` + ${(keSpread * 100).toFixed(0)}bps (liquidity)` : ""}
+        </p>
+      </div>
+    </section>
   );
 }

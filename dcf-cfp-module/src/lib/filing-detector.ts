@@ -4,15 +4,15 @@
  * Parses a PDF filename to extract filing metadata.
  *
  * Expected naming conventions:
- *   10-K  : TICKER-10K-YYYY.pdf      e.g. JPM-10K-2024.pdf
- *   10-Q  : TICKER-10Q-Qn-YYYY.pdf  e.g. JPM-10Q-Q1-2024.pdf
- *
- * Quarter 4 is not a valid 10-Q target (it's covered by the 10-K annual).
- * Up to 5 10-K files (years) and 15 10-Q files (3 per year × 5 years).
+ *   10-K  : TICKER-10K-YYYY.pdf         e.g. JPM-10K-2024.pdf
+ *   10-Q  : TICKER-10Q-Qn-YYYY.pdf     e.g. JPM-10Q-Q1-2024.pdf
+ *           Q4 10-Q is accepted when explicitly uploaded (some companies publish Q4
+ *           earnings reports); if not uploaded, Q4 is auto-derived from the 10-K.
+ * Up to 5 10-K files (years) and 20 10-Q files (4 per year × 5 years).
  */
 
 export type FilingType = "10-K" | "10-Q";
-export type FilingPeriod = "annual" | "Q1" | "Q2" | "Q3";
+export type FilingPeriod = "annual" | "Q1" | "Q2" | "Q3" | "Q4";
 
 export interface DetectedFiling {
   file: File;
@@ -47,10 +47,10 @@ const RE_10K = /10[-_\s]?k\b/i;
 const RE_10Q = /10[-_\s]?q\b/i;
 // Matches a 4-digit year 2000–2099
 const RE_YEAR = /\b(20\d{2})\b/;
-// Matches Q1, Q2, or Q3 (Q4 is annual — no standalone 10-Q for Q4)
-const RE_QUARTER = /[^a-z0-9](q([1-3]))[^a-z0-9]/i;
+// Matches Q1–Q4 surrounded by non-alphanumeric chars
+const RE_QUARTER = /[^a-z0-9](q([1-4]))[^a-z0-9]/i;
 // Fallback quarter scan (at word boundary)
-const RE_QUARTER_LOOSE = /\bq([1-3])\b/i;
+const RE_QUARTER_LOOSE = /\bq([1-4])\b/i;
 
 /**
  * Try to detect filing type, year, and quarter from a single filename.
@@ -105,7 +105,7 @@ export function detectFiling(file: File): FilingDetectionResult {
       return {
         fileName: name,
         reason:
-          'Quarter (Q1/Q2/Q3) not found in 10-Q filename. Rename to e.g. "JPM-10Q-Q2-2024.pdf".',
+          'Quarter (Q1/Q2/Q3/Q4) not found in 10-Q filename. Rename to e.g. "JPM-10Q-Q2-2024.pdf".',
       };
     }
 
@@ -117,7 +117,7 @@ export function detectFiling(file: File): FilingDetectionResult {
       year,
       period,
       displayName: `${ticker} ${year} ${period} (10-Q)`,
-      sortKey: year * 10 + qNum,
+      sortKey: year * 10 + qNum, // Q4 → position 4, processed after Q3
     };
   }
 
@@ -178,5 +178,5 @@ export function summariseFilings(detected: DetectedFiling[]): string {
 
 /** Max allowed uploads per type */
 export const MAX_10K_FILES = 5;
-export const MAX_10Q_FILES = 15;
+export const MAX_10Q_FILES = 20; // up to 4 quarters × 5 years
 export const MAX_TOTAL_PDF_FILES = MAX_10K_FILES + MAX_10Q_FILES;
