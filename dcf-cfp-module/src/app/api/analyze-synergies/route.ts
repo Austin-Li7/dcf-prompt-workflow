@@ -8,7 +8,7 @@ import {
   projectStep4StructuredToPaths,
   STEP4_RESPONSE_SCHEMA,
 } from "@/lib/step4-schema";
-import type { LLMProvider } from "@/types/cfp";
+import type { LLMProvider, TrendAnalysisResult } from "@/types/cfp";
 import type { AnalyzeSynergiesResponse } from "@/types/cfp";
 
 // =============================================================================
@@ -30,15 +30,39 @@ const STEP4_SYSTEM_PROMPT = [
   "Instead, evaluate cross-sell synergies via the Financial Services Productivity Loop: a customer acquired in one product (e.g., lending) becomes a lower-CAC acquisition for adjacent products (e.g., investing, banking, insurance).",
   "Quantify the cross-sell lift using disclosed multi-product attach rates, member lifetime value, or product-per-member metrics from official filings.",
   "BANK CAPITAL: For banking/financial segments, replace PP&E CapEx with regulatory capital deployment — Tier 1 capital ratio, CET1 ratio, and Risk-Weighted Asset (RWA) growth are the relevant capital metrics.",
-  "efficiency_score for bank capital entries must reflect ROATCE (Return on Average Tangible Common Equity) and/or ROAE (Return on Average Equity) rather than a generic CapEx-to-revenue calibration.",
+  "efficiency_score for bank capital entries must reflect ROATCE (Return on Average Tangible Common Equity).",
+  "Step 2 now supplies goodwill_usd_m, intangible_assets_usd_m, and preferred_equity_usd_m.",
+  "Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m.",
+  "Then ROATCE = net_income_usd_m / avg(TCE). Use ROAE (net_income / book_value_equity) only as fallback when TCE components are null.",
   "Include review_summary and validation_warnings suitable for a human review UI.",
   "No markdown, commentary, or prose outside the structured response.",
 ].join(" ");
+
+function formatTrendCeilings(trendAnalysis: TrendAnalysisResult | null | undefined): string {
+  if (!trendAnalysis || Object.keys(trendAnalysis.segments).length === 0) return "";
+  const lines = Object.entries(trendAnalysis.segments).map(([seg, r]) => {
+    const ceiling = r.calculated_plateau_ceiling_usd_m != null ? `plateau $${r.calculated_plateau_ceiling_usd_m.toFixed(0)}M` : "no plateau fit";
+    const growth = r.modeled_next_year_growth_limit_pct != null ? `next-year growth limit ${r.modeled_next_year_growth_limit_pct.toFixed(1)}%` : "growth limit unknown";
+    const sat = r.is_plateau_detected ? " [SATURATED]" : "";
+    const quality = r.fit_quality_r2 != null ? ` R²=${r.fit_quality_r2.toFixed(2)}` : "";
+    return `  - ${seg}: ${ceiling}, ${growth}${sat}${quality}`;
+  });
+  return [
+    "",
+    "BACKEND TREND CEILINGS (logistic S-curve regression on Step 2 data — no LLM, deterministic):",
+    ...lines,
+    "STRATEGIC OVERRIDE RULE: If any synergy driver would push a segment's revenue above its modeled growth limit,",
+    "you MUST document a growth_justification naming the specific catalyst breaking the mathematical curve",
+    "(e.g. 'Competitor bankruptcy releases 15% TAM share', 'New product launch expands addressable market').",
+    "Narrative optimism without a named catalyst is not a valid override.",
+  ].join("\n");
+}
 
 function buildStep4Prompt(inputs: {
   step1Architecture: unknown;
   step2Financials: unknown;
   step3Competition: unknown;
+  trendAnalysis?: TrendAnalysisResult | null;
 }): string {
   return [
     "Task: Produce Step 4 Synergy & Driver Eligibility plus Step 4.5 Capital Allocation.",
@@ -48,6 +72,7 @@ function buildStep4Prompt(inputs: {
     JSON.stringify(inputs.step2Financials || {}, null, 2),
     "Step 3 competitive landscape input:",
     JSON.stringify(inputs.step3Competition || {}, null, 2),
+    formatTrendCeilings(inputs.trendAnalysis),
     "Review Prompt V2 requirements:",
     "- Apply the but-for test: if the source business disappeared, would the recipient need to change pricing, product, or cost model?",
     "- Apply reciprocity: distinguish true functional interdependency from adjacent revenue.",
@@ -60,7 +85,7 @@ function buildStep4Prompt(inputs: {
     "Finance & Banking rules (apply when any segment involves lending, deposits, payments, banking, or financial products):",
     "- CROSS-SELL SYNERGY: Evaluate the Financial Services Productivity Loop — a member acquired in lending becomes a lower-CAC target for investing, banking, and insurance products. Use disclosed multi-product attach rates or product-per-member metrics to quantify.",
     "- CAPITAL (NO CAPEX): Do not model PP&E CapEx for bank/financial segments. Instead use regulatory capital deployment: Tier 1 capital ratio, CET1 ratio, and RWA growth are the capital efficiency metrics.",
-    "- EFFICIENCY SCORE: For bank capital entries, efficiency_score must reflect ROATCE (Return on Average Tangible Common Equity) and/or ROAE (Return on Average Equity). Positive = capital above cost of equity; negative = capital destruction.",
+    "- EFFICIENCY SCORE: For bank capital entries, compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m (all from Step 2 rows). ROATCE = net_income_usd_m / avg(TCE). A bank with ROATCE > cost of equity (~10–15%) earns a positive efficiency_score; below earns negative. Fall back to ROAE only if TCE components are null, and flag the fallback in review_note.",
     "- REGULATORY MOAT AS SYNERGY: If a bank charter enables a segment to cross-sell under one regulated entity (reducing per-product compliance cost), classify this as a Core Integration synergy and cite the charter in the rationale.",
   ].join("\n");
 }
@@ -68,7 +93,7 @@ function buildStep4Prompt(inputs: {
 export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynergiesResponse>> {
   try {
     const body = await req.json();
-    const { step1Architecture, step2Financials, step3Competition, apiKey: runtimeKey, llmProvider = "claude" as LLMProvider } = body;
+    const { step1Architecture, step2Financials, step3Competition, trendAnalysis, apiKey: runtimeKey, llmProvider = "claude" as LLMProvider } = body;
 
     if (!step1Architecture) {
       return NextResponse.json({ paths: [], error: "Step 1 architecture is required." }, { status: 400 });
@@ -83,7 +108,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynerg
       provider: llmProvider,
       apiKey,
       systemPrompt: STEP4_SYSTEM_PROMPT,
-      prompt: buildStep4Prompt({ step1Architecture, step2Financials, step3Competition }),
+      prompt: buildStep4Prompt({ step1Architecture, step2Financials, step3Competition, trendAnalysis: trendAnalysis as TrendAnalysisResult | null }),
       maxTokens: 12288,
       responseSchema:
         llmProvider === "gemini" ? GEMINI_STEP4_RESPONSE_SCHEMA : STEP4_RESPONSE_SCHEMA,

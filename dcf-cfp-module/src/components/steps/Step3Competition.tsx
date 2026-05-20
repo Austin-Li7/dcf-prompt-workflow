@@ -33,6 +33,7 @@ import type {
   Step3StructuredCategory,
   Step3StructuredResult,
 } from "@/types/cfp";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 
 // =============================================================================
 // Helpers
@@ -744,6 +745,13 @@ export default function Step3Competition() {
       {hasArchitecture && (
         <div className="space-y-6">
 
+          <Step3LineageNote
+            approved={state.competition.approved}
+            segmentCount={state.profile.architectureJson?.architecture.length ?? 0}
+            companyType={state.profile.step1StructuredResult?.company_type}
+            categories={categories}
+          />
+
           {/* ============================================================ */}
           {/* PHASE 1 — Generate                                           */}
           {/* ============================================================ */}
@@ -1296,5 +1304,59 @@ export default function Step3Competition() {
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// Step 3 Lineage Panel
+// =============================================================================
+function Step3LineageNote({
+  approved, segmentCount, companyType, categories,
+}: {
+  approved: boolean;
+  segmentCount: number;
+  companyType?: string | null;
+  categories: CategoryCompetitionEntry[];
+}) {
+  const pipeline =
+    companyType === "financial_bank" || companyType === "financial_insurance" || companyType === "financial_other"
+      ? "FCFE / Ke"
+      : companyType === "hybrid"
+      ? "Hybrid SOTP"
+      : "FCFF / WACC";
+  const highMed = categories.filter((c) => c.materiality === "HIGH" || c.materiality === "MEDIUM");
+  const topComp = highMed[0]?.primaryCompetitor ?? null;
+
+  return (
+    <LineagePanel approved={approved} flowsTo="competitors flow to Step 8 sanity check">
+      <LineageCard label="From Step 1" sublabel="Segments analyzed via Porter's Five Forces" approved={approved}>
+        {segmentCount > 0 ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">{segmentCount} segment{segmentCount !== 1 ? "s" : ""}</span>
+            <br />
+            <span className="text-xs text-zinc-400">{pipeline}</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">Awaiting Step 1</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Competitor Map" sublabel="HIGH / MEDIUM materiality categories" approved={approved}>
+        {categories.length > 0 ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">{highMed.length} of {categories.length} material</span>
+            {topComp && <><br /><span className="text-xs text-zinc-400">Top: {topComp}</span></>}
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">No analysis yet</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Flows to Step 8" sublabel="Market Sanity Check panel" approved={approved}>
+        <span className="text-xs text-zinc-400">
+          {approved
+            ? "Competitor benchmarks active in Step 8"
+            : "Approve to unlock Step 8 sanity check"}
+        </span>
+      </LineageCard>
+    </LineagePanel>
   );
 }

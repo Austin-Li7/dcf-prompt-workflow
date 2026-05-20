@@ -22,6 +22,7 @@ import { aggregateSegmentForecastFy, buildStep5AssumptionRows, buildStep5ReviewW
 import type {
   WACCDataResponse, WACCSegmentRow, WACCConstants, BusinessType, WACCCalculation,
 } from "@/types/wacc";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 import type { SotpValuationResult } from "@/lib/dcf-valuation";
 
 // =============================================================================
@@ -358,6 +359,17 @@ export default function Step7WACC() {
               ? `Damodaran: ${fetchedData.damodaranIndustry} · β ${fetchedData.damodaranBeta?.toFixed(3)}`
               : undefined
           }
+        />
+
+        {/* ── Lineage panel ────────────────────────────────────────────────── */}
+        <Step7LineageNote
+          approved={state.wacc.saved}
+          ticker={state.profile.ticker || null}
+          companyType={state.profile.step1StructuredResult?.company_type}
+          businessType={businessType}
+          fetchedData={fetchedData}
+          calculation={calculation}
+          terminalGrowth={terminalGrowth}
         />
 
         {/* ── Valuation Dashboard ─────────────────────────────────────────── */}
@@ -1207,5 +1219,69 @@ function AssumptionSlider({ label, value, min, max, step, onChange }: {
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-blue-500" />
     </label>
+  );
+}
+
+// =============================================================================
+// Step 7 Lineage Panel
+// =============================================================================
+function Step7LineageNote({
+  approved, ticker, companyType, businessType, fetchedData, calculation, terminalGrowth,
+}: {
+  approved: boolean;
+  ticker: string | null;
+  companyType?: string | null;
+  businessType: BusinessType;
+  fetchedData: WACCDataResponse | null;
+  calculation: WACCCalculation | null;
+  terminalGrowth: number;
+}) {
+  const pipeline =
+    companyType === "financial_bank" || companyType === "financial_insurance" || companyType === "financial_other"
+      ? "FCFE / Ke"
+      : companyType === "hybrid"
+      ? "Hybrid SOTP"
+      : "FCFF / WACC";
+  const waccVal = calculation?.wacc;
+  const debtM = fetchedData ? fetchedData.totalDebt / 1e6 : null;
+  const cashM = fetchedData && fetchedData.totalCash != null ? fetchedData.totalCash / 1e6 : null;
+  const sharesM = fetchedData?.sharesOutstanding != null ? fetchedData.sharesOutstanding / 1e6 : null;
+
+  return (
+    <LineagePanel approved={approved} flowsTo="WACC / Ke flows to Step 8 discount rate">
+      <LineageCard label="From Step 1" sublabel="Ticker + pipeline type → market data fetch" approved={approved}>
+        {ticker ? (
+          <>
+            <span className="font-mono text-sm font-semibold text-zinc-100">{ticker}</span>
+            <br />
+            <span className="text-xs text-zinc-400">{pipeline}</span>
+          </>
+        ) : (
+          <span className="text-xs text-amber-400">Ticker not set — enter above</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Discount Rate" sublabel={businessType === "financial" ? "Ke (bank mode)" : "WACC → Step 8 denominator"} approved={approved}>
+        {waccVal != null ? (
+          <>
+            <span className="font-mono text-sm font-semibold text-zinc-100">{(waccVal * 100).toFixed(2)}%</span>
+            <br />
+            <span className="text-xs text-zinc-400">Terminal growth {(terminalGrowth * 100).toFixed(1)}%</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">Fetch market data to compute</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Equity Bridge" sublabel="Debt, cash, shares → Step 8 value bridge" approved={approved}>
+        {debtM != null ? (
+          <ul className="space-y-0.5">
+            <li className="text-xs text-zinc-400">Debt <span className="font-mono text-zinc-200">${debtM.toFixed(0)}M</span></li>
+            {cashM != null && <li className="text-xs text-zinc-400">Cash <span className="font-mono text-zinc-200">${cashM.toFixed(0)}M</span></li>}
+            {sharesM != null && <li className="text-xs text-zinc-400">Shares <span className="font-mono text-zinc-200">{sharesM.toFixed(0)}M</span></li>}
+          </ul>
+        ) : (
+          <span className="text-xs text-zinc-500">Market data not yet fetched</span>
+        )}
+      </LineageCard>
+    </LineagePanel>
   );
 }

@@ -19,6 +19,8 @@ import {
   RefreshCw,
   Pause,
   RotateCcw,
+  TrendingUp,
+  BarChart2,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import StepShell from "./StepShell";
@@ -57,7 +59,8 @@ import { projectStep2IndustrialStructuredToRows } from "@/lib/step2-industrial-s
 import type { Step2BankStructuredResult } from "@/lib/step2-bank-schema";
 import type { Step2StructuredResult } from "@/lib/step2-schema";
 import type { Step2IndustrialStructuredResult } from "@/lib/step2-industrial-schema";
-import type { HistoricalExtractionRow, ExtractHistoryResponse, WorkflowMode } from "@/types/cfp";
+import type { HistoricalExtractionRow, ExtractHistoryResponse, WorkflowMode, TrendAnalysisResult } from "@/types/cfp";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 
 // =============================================================================
 // Constants
@@ -186,6 +189,11 @@ export default function Step2History() {
       : pipelinePhase.phase === "reviewing"
         ? pipelinePhase.year
         : null;
+
+  // ── Trend analysis (runs after each confirm) ─────────────────────────────────
+  const [isTrendLoading, setIsTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState<string | null>(null);
+  const [steadyYearOverride, setSteadyYearOverride] = useState<number | "">("");
 
   // ── Staging rows (editable before confirming to master) ──────────────────────
   const [stagingRows, setStagingRows] = useState<HistoricalExtractionRow[]>([]);
@@ -492,20 +500,54 @@ export default function Step2History() {
     [dispatch],
   );
 
+  // ── Trend analysis API call ──────────────────────────────────────────────────
+  const runTrendAnalysis = useCallback(
+    async (rows: HistoricalExtractionRow[], steadyYear?: number | null) => {
+      if (rows.length === 0) return;
+      setIsTrendLoading(true);
+      setTrendError(null);
+      try {
+        const res = await fetch("/api/trend-analysis", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rows,
+            steady_growth_start_year: steadyYear ?? null,
+          }),
+        });
+        const data = (await res.json()) as { result: TrendAnalysisResult | null; error?: string };
+        if (!res.ok || data.error) {
+          setTrendError(data.error ?? "Trend analysis failed.");
+          return;
+        }
+        if (data.result) {
+          dispatch({ type: "SET_TREND_ANALYSIS", payload: data.result });
+        }
+      } catch (err) {
+        setTrendError(err instanceof Error ? err.message : "Trend analysis failed.");
+      } finally {
+        setIsTrendLoading(false);
+      }
+    },
+    [dispatch],
+  );
+
   // ── Confirm staging → append to master ──────────────────────────────────────
   const handleConfirm = () => {
     if (stagingRows.length === 0) return;
+    const newRows = [...masterRows, ...stagingRows];
     dispatch({
       type: "SET_HISTORY",
       payload: {
-        rows: [...masterRows, ...stagingRows],
+        rows: newRows,
         confirmedYears: mergeHistoryYears(confirmedYears, stagingYears),
         structuredResults: [
           ...(state.history.structuredResults ?? []),
           ...structuredResults,
         ],
-        // Preserve hints when confirming
+        // Preserve existing fields when confirming new data
         filingHints: state.history.filingHints,
+        trendAnalysis: state.history.trendAnalysis,
       },
     });
     setStagingRows([]);
@@ -515,6 +557,8 @@ export default function Step2History() {
     setDataFiles([]);
     setTextNotes("");
     if (fileInputRef.current) fileInputRef.current.value = "";
+    // Run fresh trend analysis against the newly combined row set
+    void runTrendAnalysis(newRows, steadyYearOverride !== "" ? steadyYearOverride : null);
   };
 
   // ── Excel download ───────────────────────────────────────────────────────────
@@ -589,6 +633,15 @@ export default function Step2History() {
 
       {hasArchitecture && (
         <div className="space-y-8">
+
+          <Step2LineageNote
+            approved={state.history.confirmedYears.length > 0}
+            confirmedYears={state.history.confirmedYears}
+            segmentCount={state.profile.architectureJson?.architecture.length ?? 0}
+            companyType={state.profile.step1StructuredResult?.company_type}
+            trendAnalysis={state.history.trendAnalysis ?? null}
+            totalRows={state.history.rows.length}
+          />
 
           {/* ================================================================ */}
           {/*  EXTRACTION FORM                                                 */}
@@ -874,9 +927,198 @@ export default function Step2History() {
             </section>
           )}
 
+          {/* ================================================================ */}
+          {/*  TREND ANALYSIS PANEL                                             */}
+          {/* ================================================================ */}
+          {(masterRows.length > 0 || isTrendLoading) && (
+            <TrendAnalysisPanel
+              result={state.history.trendAnalysis ?? null}
+              isLoading={isTrendLoading}
+              error={trendError}
+              steadyYearOverride={steadyYearOverride}
+              onSteadyYearChange={setSteadyYearOverride}
+              onReanalyze={() =>
+                void runTrendAnalysis(
+                  masterRows,
+                  steadyYearOverride !== "" ? steadyYearOverride : null,
+                )
+              }
+            />
+          )}
+
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// TrendAnalysisPanel
+// =============================================================================
+interface TrendAnalysisPanelProps {
+  result: TrendAnalysisResult | null;
+  isLoading: boolean;
+  error: string | null;
+  steadyYearOverride: number | "";
+  onSteadyYearChange: (v: number | "") => void;
+  onReanalyze: () => void;
+}
+
+function TrendAnalysisPanel({
+  result,
+  isLoading,
+  error,
+  steadyYearOverride,
+  onSteadyYearChange,
+  onReanalyze,
+}: TrendAnalysisPanelProps) {
+  const segments = result ? Object.entries(result.segments) : [];
+  const autoYear = result?.auto_detected_steady_growth_year;
+  const ts = result?.analysis_timestamp
+    ? new Date(result.analysis_timestamp).toLocaleString()
+    : null;
+
+  return (
+    <section className="space-y-4 rounded-xl border border-sky-800/40 bg-sky-950/20 p-5">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <BarChart2 size={16} className="text-sky-400" />
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-sky-400">
+            Growth Ceiling Analysis
+          </h3>
+        </div>
+        {ts && <span className="text-xs text-zinc-500">Last run: {ts}</span>}
+      </div>
+
+      {isLoading && (
+        <div className="flex items-center gap-3 text-sm text-zinc-400">
+          <Loader2 size={16} className="animate-spin text-sky-400" />
+          Running logistic trend analysis…
+        </div>
+      )}
+
+      {error && !isLoading && (
+        <div className="flex items-start gap-2 rounded-lg border border-red-800/40 bg-red-950/20 p-3 text-sm text-red-400">
+          <AlertCircle size={15} className="mt-0.5 shrink-0" />
+          {error}
+        </div>
+      )}
+
+      {!isLoading && !error && segments.length > 0 && (
+        <>
+          <div className="overflow-x-auto rounded-lg border border-zinc-700/50">
+            <table className="w-full min-w-[640px] text-xs">
+              <thead>
+                <tr className="border-b border-zinc-700/50 bg-zinc-800/50 text-left text-zinc-400">
+                  <th className="px-3 py-2 font-medium">Segment</th>
+                  <th className="px-3 py-2 font-medium">Plateau Ceiling</th>
+                  <th className="px-3 py-2 font-medium">Next-Yr Limit</th>
+                  <th className="px-3 py-2 font-medium">Saturation</th>
+                  <th className="px-3 py-2 font-medium">Inflection Yr</th>
+                  <th className="px-3 py-2 font-medium">R²</th>
+                  <th className="px-3 py-2 font-medium">Note</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-700/30">
+                {segments.map(([seg, r]) => (
+                  <tr key={seg} className="hover:bg-zinc-800/30">
+                    <td className="px-3 py-2 font-medium text-zinc-200">{seg}</td>
+                    <td className="px-3 py-2 text-zinc-300">
+                      {r.calculated_plateau_ceiling_usd_m != null
+                        ? `$${r.calculated_plateau_ceiling_usd_m.toLocaleString()} M`
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {r.modeled_next_year_growth_limit_pct != null ? (
+                        <span
+                          className={
+                            r.modeled_next_year_growth_limit_pct < 5
+                              ? "text-amber-400"
+                              : "text-emerald-400"
+                          }
+                        >
+                          {r.modeled_next_year_growth_limit_pct.toFixed(1)}%
+                        </span>
+                      ) : (
+                        <span className="text-zinc-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {r.is_plateau_detected ? (
+                        <span className="rounded-full bg-amber-900/40 px-2 py-0.5 text-xs text-amber-400">
+                          Saturated
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-emerald-900/30 px-2 py-0.5 text-xs text-emerald-500">
+                          Growing
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-400">
+                      {r.inflection_year ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-400">
+                      {r.fit_quality_r2 != null
+                        ? r.fit_quality_r2.toFixed(3)
+                        : r.fit_ok
+                          ? "—"
+                          : <span className="text-zinc-600">CAGR</span>}
+                    </td>
+                    <td
+                      className="max-w-[200px] truncate px-3 py-2 text-zinc-500"
+                      title={r.review_note}
+                    >
+                      {r.review_note}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Steady-growth-year control */}
+          <div className="flex flex-wrap items-center gap-4 pt-1">
+            <div className="flex items-center gap-2 text-sm text-zinc-400">
+              <TrendingUp size={14} className="text-sky-500" />
+              <span>
+                Steady growth from:{" "}
+                <span className="font-medium text-zinc-300">
+                  {autoYear != null ? autoYear : "—"}
+                </span>{" "}
+                <span className="text-zinc-600">(auto-detected)</span>
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={2000}
+                max={2040}
+                placeholder="Override year"
+                value={steadyYearOverride}
+                onChange={(e) =>
+                  onSteadyYearChange(e.target.value === "" ? "" : Number(e.target.value))
+                }
+                className="w-32 rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+              />
+              <button
+                onClick={onReanalyze}
+                disabled={isLoading}
+                className="flex items-center gap-1.5 rounded-lg border border-sky-700/60 bg-sky-900/20 px-3 py-1.5 text-sm text-sky-400 transition-colors hover:bg-sky-900/40 disabled:opacity-50"
+              >
+                <RefreshCw size={13} />
+                Re-analyze
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {!isLoading && !error && !result && (
+        <p className="text-sm text-zinc-500">
+          Trend analysis will run automatically after you confirm historical data.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -1376,6 +1618,65 @@ function SegmentGroup({
         </div>
       )}
     </div>
+  );
+}
+
+// =============================================================================
+// Step 2 Lineage Panel
+// =============================================================================
+function Step2LineageNote({
+  approved, confirmedYears, segmentCount, companyType, trendAnalysis, totalRows,
+}: {
+  approved: boolean;
+  confirmedYears: number[];
+  segmentCount: number;
+  companyType?: string | null;
+  trendAnalysis: TrendAnalysisResult | null;
+  totalRows: number;
+}) {
+  const yearRange = confirmedYears.length > 0
+    ? `${Math.min(...confirmedYears)}–${Math.max(...confirmedYears)}, ${confirmedYears.length} yr${confirmedYears.length !== 1 ? "s" : ""}`
+    : null;
+  const pipeline =
+    companyType === "financial_bank" || companyType === "financial_insurance" || companyType === "financial_other"
+      ? "FCFE / Ke"
+      : companyType === "hybrid"
+      ? "Hybrid SOTP"
+      : "FCFF / WACC";
+  const trendSegments = trendAnalysis ? Object.keys(trendAnalysis.segments).length : 0;
+
+  return (
+    <LineagePanel approved={approved} flowsTo="baseline flows to Steps 5–8">
+      <LineageCard label="From Step 1" sublabel="Segment names + pipeline type" approved={approved}>
+        {segmentCount > 0 ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">{segmentCount} segment{segmentCount !== 1 ? "s" : ""}</span>
+            <br />
+            <span className="text-xs text-zinc-400">{pipeline}</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">Awaiting Step 1</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Revenue Baseline" sublabel="Confirmed fiscal years → Step 5 anchor" approved={approved}>
+        {yearRange ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">{yearRange}</span>
+            <br />
+            <span className="text-xs text-zinc-400">{totalRows} row{totalRows !== 1 ? "s" : ""} extracted</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">No years confirmed yet</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Trend Analysis" sublabel="S-curve ceilings → Steps 4–5 override rule" approved={approved}>
+        {trendSegments > 0 ? (
+          <span className="font-mono text-xs text-emerald-300">Computed · {trendSegments} segment{trendSegments !== 1 ? "s" : ""}</span>
+        ) : (
+          <span className="text-xs text-zinc-500">Computed after confirming baseline</span>
+        )}
+      </LineageCard>
+    </LineagePanel>
   );
 }
 

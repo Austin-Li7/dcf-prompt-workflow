@@ -17,6 +17,7 @@ import type {
   Step4ReviewState, Step4WorkflowStatus,
   Step4StructuredResult,
 } from "@/types/cfp";
+import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 
 // =============================================================================
 // Phase type
@@ -264,7 +265,7 @@ export default function Step4Synergies() {
     setErrorMsg(null); setIsLoading(true);
     try {
       const res = await fetch("/api/analyze-synergies", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step3Competition: state.competition, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
+        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step3Competition: state.competition, trendAnalysis: state.history.trendAnalysis ?? null, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeSynergiesResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
       setPaths(d.paths);
@@ -348,7 +349,7 @@ export default function Step4Synergies() {
     setErrorMsg(null); setIsLoading(true);
     try {
       const res = await fetch("/api/analyze-capital", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: paths, recentNews: newsText, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
+        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: paths, recentNews: newsText, trendAnalysis: state.history.trendAnalysis ?? null, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeCapitalResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
       if (d.paths?.length) {
@@ -473,6 +474,15 @@ export default function Step4Synergies() {
 
       {hasArch && (
         <div className="space-y-6">
+
+          <Step4LineageNote
+            approved={state.synergies.synergiesApproved && state.synergies.capitalApproved}
+            segmentCount={state.profile.architectureJson?.architecture.length ?? 0}
+            confirmedYears={state.history.confirmedYears}
+            step3Approved={state.competition.approved}
+            paths={paths}
+            capitalData={capitalData}
+          />
 
           {/* ===== SUB-STEP INDICATOR ===== */}
           <div className="flex gap-2 text-xs">
@@ -767,5 +777,60 @@ export default function Step4Synergies() {
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// Step 4 Lineage Panel
+// =============================================================================
+function Step4LineageNote({
+  approved, segmentCount, confirmedYears, step3Approved, paths, capitalData,
+}: {
+  approved: boolean;
+  segmentCount: number;
+  confirmedYears: number[];
+  step3Approved: boolean;
+  paths: CapabilityPenetrationPath[];
+  capitalData: CapitalAllocationData | null;
+}) {
+  const eligibleDrivers = paths.filter(
+    (p) => p.driverEligibility === "FULL" || p.driverEligibility?.startsWith("CAPPED"),
+  );
+  const pillars = capitalData?.investmentMatrix.length ?? 0;
+
+  return (
+    <LineagePanel approved={approved} flowsTo="drivers flow to Step 5 forecast">
+      <LineageCard label="From Steps 1–3" sublabel="Architecture, baseline, competitor data" approved={approved}>
+        <ul className="space-y-0.5">
+          <li className="text-xs text-zinc-400">
+            <span className="font-mono text-zinc-200">{segmentCount}</span> segment{segmentCount !== 1 ? "s" : ""}
+          </li>
+          <li className="text-xs text-zinc-400">
+            <span className="font-mono text-zinc-200">{confirmedYears.length}</span> yr{confirmedYears.length !== 1 ? "s" : ""} history
+          </li>
+          <li className={`text-xs ${step3Approved ? "text-zinc-400" : "text-amber-400"}`}>
+            Step 3 {step3Approved ? "approved ✓" : "pending"}
+          </li>
+        </ul>
+      </LineageCard>
+      <LineageCard label="Eligible Drivers" sublabel="FULL + CAPPED → additive in Step 5" approved={approved}>
+        {paths.length > 0 ? (
+          <>
+            <span className="font-mono text-xs text-zinc-200">{eligibleDrivers.length} eligible</span>
+            <br />
+            <span className="text-xs text-zinc-400">{paths.length} paths total</span>
+          </>
+        ) : (
+          <span className="text-xs text-zinc-500">No synergy paths yet</span>
+        )}
+      </LineageCard>
+      <LineageCard label="Capital Matrix" sublabel="Investment pillars → qualitative input" approved={approved}>
+        {pillars > 0 ? (
+          <span className="font-mono text-xs text-zinc-200">{pillars} pillar{pillars !== 1 ? "s" : ""}</span>
+        ) : (
+          <span className="text-xs text-zinc-500">Capital analysis pending</span>
+        )}
+      </LineageCard>
+    </LineagePanel>
   );
 }
