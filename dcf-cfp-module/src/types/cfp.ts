@@ -329,6 +329,14 @@ export interface HistoricalExtractionRow {
   efficiency_ratio_pct?: number | null;
   return_on_avg_equity_pct?: number | null;
   total_assets_usd_m?: number | null;
+  // Liquidity fields (bank mode, annual balance-sheet rows)
+  total_loans_usd_m?: number | null;
+  total_deposits_usd_m?: number | null;
+  retail_insured_deposits_usd_m?: number | null;
+  wholesale_uninsured_deposits_usd_m?: number | null;
+  cash_and_hqla_usd_m?: number | null;
+  htm_bonds_usd_m?: number | null;
+  unrealized_losses_htm_usd_m?: number | null;
   // Industrial workflow fields (only populated for industrial-mode rows)
   gross_profit_usd_m?: number | null;
   capex_usd_m?: number | null;
@@ -428,6 +436,14 @@ export interface Step2BankHistoricalRow {
   efficiency_ratio_pct: number | null;
   return_on_avg_equity_pct: number | null;
   total_assets_usd_m: number | null;
+  // Liquidity fields
+  total_loans_usd_m: number | null;
+  total_deposits_usd_m: number | null;
+  retail_insured_deposits_usd_m: number | null;
+  wholesale_uninsured_deposits_usd_m: number | null;
+  cash_and_hqla_usd_m: number | null;
+  htm_bonds_usd_m: number | null;
+  unrealized_losses_htm_usd_m: number | null;
   mapped_from_step1_ids: string[];
   source_id: string;
   evidence_level: Step2EvidenceLevel;
@@ -1280,6 +1296,7 @@ export interface BankSummaryConclusion {
   creditQuality: string;
   nimOutlook: string;
   fcfeTrajectory: string;
+  liquidityRisk?: string;
 }
 
 export interface BankSummaryInsights {

@@ -101,6 +101,8 @@ export const initialCFPState: CFPState = {
     bankFcfMargin: 0.20,
     industrialFcfMargin: 0.25,
     fetchedAt: null,
+    liquidityAssessment: null,
+    liquidityRiskSpread: 0,
   },
 };
 

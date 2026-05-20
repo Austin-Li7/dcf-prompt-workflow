@@ -46,6 +46,8 @@ const wacc: WACCState = {
   bankFcfMargin: 0.20,
   industrialFcfMargin: 0.25,
   fetchedAt: "2026-05-01T12:00:00.000Z",
+  liquidityAssessment: null,
+  liquidityRiskSpread: 0,
 };
 
 const state: CFPState = {

@@ -95,6 +95,7 @@ const BANK_SCHEMA = {
         creditQuality:    { type: "string" },
         nimOutlook:       { type: "string" },
         fcfeTrajectory:   { type: "string" },
+        liquidityRisk:    { type: "string" },
       },
     },
   },
@@ -222,6 +223,7 @@ const BANK_PROMPT_TASKS = [
   "  - nimOutlook: 2-sentence NIM compression/expansion assessment referencing rate environment and competitive data.",
   "  - fcfeTrajectory: 2-sentence narrative of FCFE evolution FY1→FY5, noting any capital-constrained early periods.",
   "Task 3: Flag material ALM or interest rate risks from Step 5 review warnings.",
+  "Task 4: If a liquidityRiskRating is provided (HIGH or CRITICAL), write a 2-sentence 'liquidityRisk' assessment in the conclusion describing the funding vulnerability, HTM loss exposure, and Ke spread impact on FCFE discounting. For LOW/MODERATE ratings, write a brief 1-sentence note that liquidity appears adequate.",
   "Always set summaryMode to the string \"BANK\".",
 ].join("\n");
 
@@ -235,6 +237,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
       step5ReviewWarnings,
       step3Competition,
       step4Complete,
+      liquidityRiskRating,
       apiKey: runtimeKey,
       llmProvider = "claude" as LLMProvider,
     } = body;
@@ -264,6 +267,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
         ? `\nHISTORICAL MARGIN DATA (deterministic from Step 2 filings — use as baseline for Task 3):\n${JSON.stringify(historicalMargins)}`
         : "";
 
+    const liquidityRatingBlock =
+      liquidityRiskRating
+        ? `\nStep 7 Liquidity Risk Rating: ${liquidityRiskRating}`
+        : "";
+
     const dataBlock = [
       `Aggregated forecast (NII/revenue + FCFE where available): ${JSON.stringify(aggregatedTableData)}`,
       `Step 5 v5.5 forecast artifacts: ${JSON.stringify(step5ForecastArtifacts || [])}`,
@@ -271,6 +279,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
       `Competition: ${JSON.stringify(step3Competition || {})}`,
       `Synergies & Capital: ${JSON.stringify(step4Complete || {})}`,
       historicalMarginBlock,
+      liquidityRatingBlock,
     ].join("\n");
 
     if (mode === "INDUSTRIAL") {

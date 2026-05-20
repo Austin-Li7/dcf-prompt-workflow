@@ -272,6 +272,8 @@ export interface FullBankKeInputs {
    *  Used directly as the equity beta — no Hamada re-levering applied. */
   equityBeta: number;
   constants: WACCConstants;
+  /** Optional liquidity risk premium added to Ke (decimal). Default 0. */
+  liquidityRiskSpread?: number;
 }
 
 /**
@@ -284,25 +286,29 @@ export interface FullBankKeInputs {
  *   business model, not a financing choice. Damodaran's own published bank betas
  *   already reflect this: they are the equity beta, not the asset beta.
  *
+ * Ke = Rf + β × ERP + liquidityRiskSpread
+ *   liquidityRiskSpread: 0 (LOW) | 50bps (MODERATE) | 100bps (HIGH) | 200bps (CRITICAL)
+ *
  * The result populates WACCCalculation with:
- *   wacc = costOfEquity, weightEquity = 1, weightDebt = 0
+ *   wacc = Ke, weightEquity = 1, weightDebt = 0
  * so the rest of the DCF pipeline (Step 8) can consume it unchanged.
  */
 export function fullBankKeCalculation(inputs: FullBankKeInputs): WACCCalculation {
-  const { equityBeta, constants } = inputs;
+  const { equityBeta, constants, liquidityRiskSpread = 0 } = inputs;
   const { riskFreeRate, impliedERP } = constants;
 
-  const costOfEquity = riskFreeRate + equityBeta * impliedERP;
+  const baseKe = riskFreeRate + equityBeta * impliedERP;
+  const costOfEquity = baseKe + liquidityRiskSpread;
 
   return {
     deRatio: 0,
     unleveredBeta: equityBeta,
-    releveredBeta: equityBeta,  // no re-levering
+    releveredBeta: equityBeta,
     costOfEquity,
     preTaxCostOfDebt: 0,
     afterTaxCostOfDebt: 0,
     weightEquity: 1,
     weightDebt: 0,
-    wacc: costOfEquity,         // discount rate = Ke for equity DCF
+    wacc: costOfEquity,
   };
 }

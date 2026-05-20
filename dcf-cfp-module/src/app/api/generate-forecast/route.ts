@@ -244,6 +244,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
       step4Complete,
       trendAnalysis,
       targetSegment,
+      liquidityRiskRating,
       apiKey: runtimeKey,
       llmProvider = "claude" as LLMProvider,
     } = body;
@@ -280,6 +281,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
     const isDeepSeek = llmProvider === "deepseek";
     const outputConstraint = isDeepSeek
       ? `\nOutput size constraint (provider cap = 8 192 output tokens): Use SEGMENT_ANNUAL forecast_mode. Write at most 4 assumptions; keep each arithmetic_trace ≤ 80 characters. Omit weak_inference_sensitivity rows unless the driver contributes > 15 % of FY5 revenue. Keep all string fields as short as possible.\n`
+      : "";
+
+    // Liquidity risk injection — add constraint text for HIGH/CRITICAL ratings
+    const liquidityConstraint = isBankMode && (liquidityRiskRating === "HIGH" || liquidityRiskRating === "CRITICAL")
+      ? `\nLIQUIDITY RISK CONSTRAINT (Step 7 rating: ${liquidityRiskRating}):
+- NIM projections may understate funding cost pressure: elevated wholesale funding reliance means deposit repricing compresses NIM faster than historical trends imply. Apply additional NIM compression of 10–25 bps vs. the historical trend.
+- PCL trajectory may be understated: deposit-flight stress and credit deterioration are correlated. Apply a 10–20% uplift to projected provision_for_credit_losses_usd_m vs. baseline loss rates.
+- Flag these constraints in review_summary.warnings with code "LIQUIDITY_RISK_CONSTRAINT".`
       : "";
 
     // Finance rules — only included when the segment is bank/NII-driven
@@ -326,7 +335,8 @@ Rules:
 - Keep review_summary concise: one_line ≤ 260 chars; each highlight/warning ≤ 220 chars.
 - No prose outside the structured response.
 
-${modeRules}`;
+${modeRules}
+${liquidityConstraint}`;
 
     const result = await callLLM({
       provider: llmProvider,

@@ -70,6 +70,7 @@ export default function Step6Summary() {
           step5ReviewWarnings: reviewWarningRows,
           step3Competition: state.competition,
           step4Complete: state.synergies,
+          liquidityRiskRating: state.wacc.liquidityAssessment?.rating ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),

@@ -67,6 +67,15 @@ const BankRowSchema = z.object({
   return_on_avg_equity_pct: nullableNum(),
   // Size metric
   total_assets_usd_m: nullableNum(),
+  // ── Liquidity metrics (Basel III / stress-test inputs) ─────────────────────
+  // All nullable: these appear in annual balance-sheet footnotes, not always per-segment.
+  total_loans_usd_m: nullableNum(),
+  total_deposits_usd_m: nullableNum(),
+  retail_insured_deposits_usd_m: nullableNum(),
+  wholesale_uninsured_deposits_usd_m: nullableNum(),
+  cash_and_hqla_usd_m: nullableNum(),
+  htm_bonds_usd_m: nullableNum(),
+  unrealized_losses_htm_usd_m: nullableNum(),
   mapped_from_step1_ids: z.array(z.string().min(1)).min(1),
   source_id: z.string().min(1),
   evidence_level: EvidenceLevelSchema,
@@ -197,6 +206,14 @@ export function projectStep2BankStructuredToRows(
       efficiency_ratio_pct: row.efficiency_ratio_pct,
       return_on_avg_equity_pct: row.return_on_avg_equity_pct,
       total_assets_usd_m: row.total_assets_usd_m,
+      // Liquidity fields
+      total_loans_usd_m: row.total_loans_usd_m ?? null,
+      total_deposits_usd_m: row.total_deposits_usd_m ?? null,
+      retail_insured_deposits_usd_m: row.retail_insured_deposits_usd_m ?? null,
+      wholesale_uninsured_deposits_usd_m: row.wholesale_uninsured_deposits_usd_m ?? null,
+      cash_and_hqla_usd_m: row.cash_and_hqla_usd_m ?? null,
+      htm_bonds_usd_m: row.htm_bonds_usd_m ?? null,
+      unrealized_losses_htm_usd_m: row.unrealized_losses_htm_usd_m ?? null,
     };
   });
 }

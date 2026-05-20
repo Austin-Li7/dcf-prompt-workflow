@@ -174,6 +174,7 @@ export default function Step5Forecast() {
           step4Complete: state.synergies,
           trendAnalysis: state.history.trendAnalysis ?? null,
           targetSegment: currentSegment,
+          liquidityRiskRating: state.wacc.liquidityAssessment?.rating ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),

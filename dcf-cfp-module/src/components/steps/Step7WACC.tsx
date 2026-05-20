@@ -24,6 +24,18 @@ import type {
 } from "@/types/wacc";
 import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 import type { SotpValuationResult } from "@/lib/dcf-valuation";
+import {
+  buildLiquidityAssessment,
+  seedLiquidityInputsFromRow,
+  calcLiquidityMetrics,
+  runStressTest,
+  buildEarlyWarnings,
+  type LiquidityInputs,
+  type LiquidityAssessment,
+  type LiquidityRiskRating,
+  type MetricResult,
+  type StressTestResult,
+} from "@/lib/liquidity-assessment";
 
 // =============================================================================
 // Helpers
@@ -94,6 +106,42 @@ export default function Step7WACC() {
   const [terminalGrowth, setTerminalGrowth] = useState(state.wacc.terminalGrowth ?? 0.025);
   const [fcfMargin, setFcfMargin] = useState(state.wacc.fcfMargin ?? 0.25);
   const [fetchedAt, setFetchedAt] = useState<string | null>(state.wacc.fetchedAt ?? null);
+
+  // ── Liquidity assessment (financial / hybrid modes) ─────────────────────────
+  const latestBankRow = useMemo(() => {
+    const rows = state.history.rows.filter((r) => r.workflow_mode === "bank" && r.isAnnualFiling);
+    if (rows.length === 0) return null;
+    return rows.reduce((best, r) => (r.fiscalYear > best.fiscalYear ? r : best), rows[0]);
+  }, [state.history.rows]);
+
+  const [liquidityInputs, setLiquidityInputs] = useState<LiquidityInputs>(() =>
+    state.wacc.liquidityAssessment?.inputs ??
+    (latestBankRow ? seedLiquidityInputsFromRow(latestBankRow) : {
+      cash_and_hqla_usd_m: 0,
+      total_loans_usd_m: 0,
+      htm_bonds_usd_m: 0,
+      unrealized_losses_htm_usd_m: 0,
+      retail_insured_deposits_usd_m: 0,
+      wholesale_uninsured_deposits_usd_m: 0,
+      total_equity_usd_m: 0,
+      flag_cds_spreads_spiking: false,
+      flag_fhlb_borrowing_elevated: false,
+      flag_credit_rating_downgrade: false,
+    })
+  );
+  const [stressFlightPct, setStressFlightPct] = useState(0.30);
+
+  const liquidityAssessment = useMemo(
+    () => buildLiquidityAssessment(liquidityInputs),
+    [liquidityInputs],
+  );
+  const liveStressResult = useMemo(
+    () => runStressTest(liquidityInputs, stressFlightPct),
+    [liquidityInputs, stressFlightPct],
+  );
+
+  const isFinancialMode = businessType === "financial" || businessType === "hybrid";
+  const liquidityRiskSpread = isFinancialMode ? liquidityAssessment.keSpread : 0;
 
   // ── Detect hints from fetched data ─────────────────────────────────────────
   const conglomerateHint = useMemo(() => {
@@ -220,7 +268,7 @@ export default function Step7WACC() {
   const waccResult = useMemo(() => {
     if (businessType === "hybrid") return null;
     if (!fetchedData || fetchedData.marketCap <= 0) return null;
-    if (businessType === "financial") return { calculation: fullBankKeCalculation({ equityBeta: singleBeta, constants }), warnings: [] };
+    if (businessType === "financial") return { calculation: fullBankKeCalculation({ equityBeta: singleBeta, constants, liquidityRiskSpread }), warnings: [] };
     return fullWACCCalculation({
       marketCap: fetchedData.marketCap, totalDebt: fetchedData.totalDebt,
       interestExpense: fetchedData.interestExpense, unleveredBeta: effectiveBeta, constants,
@@ -229,11 +277,11 @@ export default function Step7WACC() {
   const calculation: WACCCalculation | null = waccResult?.calculation ?? null;
   const waccWarnings: string[] = waccResult?.warnings ?? [];
 
-  // Hybrid: bank Ke
+  // Hybrid: bank Ke (includes liquidity spread for hybrid mode)
   const bankKeCalc: WACCCalculation | null = useMemo(() => {
     if (businessType !== "hybrid") return null;
-    return fullBankKeCalculation({ equityBeta: hybridBankBeta, constants });
-  }, [businessType, hybridBankBeta, constants]);
+    return fullBankKeCalculation({ equityBeta: hybridBankBeta, constants, liquidityRiskSpread });
+  }, [businessType, hybridBankBeta, constants, liquidityRiskSpread]);
 
   // Hybrid: industrial WACC
   const industrialWaccResult = useMemo(() => {
@@ -296,6 +344,8 @@ export default function Step7WACC() {
         saved: true,
         fcfMargin, terminalGrowth, bankFcfMargin, industrialFcfMargin,
         fetchedAt,
+        liquidityAssessment: isFinancialMode ? liquidityAssessment : null,
+        liquidityRiskSpread: isFinancialMode ? liquidityRiskSpread : 0,
       },
     });
   };
@@ -371,6 +421,18 @@ export default function Step7WACC() {
           calculation={calculation}
           terminalGrowth={terminalGrowth}
         />
+
+        {/* ── Liquidity Assessment (financial / hybrid modes only) ─────────── */}
+        {isFinancialMode && (
+          <LiquidityAssessmentPanel
+            inputs={liquidityInputs}
+            onInputsChange={setLiquidityInputs}
+            assessment={liquidityAssessment}
+            stressFlightPct={stressFlightPct}
+            onStressFlightPctChange={setStressFlightPct}
+            liveStress={liveStressResult}
+          />
+        )}
 
         {/* ── Valuation Dashboard ─────────────────────────────────────────── */}
         {showValuationDashboard && activeValuation && (
@@ -1283,5 +1345,293 @@ function Step7LineageNote({
         )}
       </LineageCard>
     </LineagePanel>
+  );
+}
+
+// =============================================================================
+// Liquidity Assessment Panel
+// =============================================================================
+
+const RAG_COLORS: Record<string, string> = {
+  green:  "bg-emerald-500/15 text-emerald-300 border-emerald-600/30",
+  yellow: "bg-amber-500/15 text-amber-300 border-amber-600/30",
+  red:    "bg-red-500/15 text-red-300 border-red-600/30",
+};
+
+const RATING_COLORS: Record<LiquidityRiskRating, string> = {
+  LOW:      "bg-emerald-500/15 text-emerald-300",
+  MODERATE: "bg-amber-500/15 text-amber-300",
+  HIGH:     "bg-red-500/15 text-red-300",
+  CRITICAL: "bg-red-600/30 text-red-200 animate-pulse",
+};
+
+const SPREAD_LABELS: Record<LiquidityRiskRating, string> = {
+  LOW:      "+0 bps",
+  MODERATE: "+50 bps",
+  HIGH:     "+100 bps",
+  CRITICAL: "+200 bps",
+};
+
+function MetricChip({ metric }: { metric: MetricResult }) {
+  const cls = RAG_COLORS[metric.status] ?? RAG_COLORS.yellow;
+  const valStr = metric.value === null
+    ? "N/A"
+    : metric.label.includes("Ratio") && metric.value < 5
+      ? `${(metric.value * 100).toFixed(1)}%`
+      : metric.value >= 10
+        ? metric.value.toFixed(1) + "×"
+        : `${(metric.value * 100).toFixed(1)}%`;
+  return (
+    <div className={`rounded-lg border p-3 ${cls}`}>
+      <p className="text-xs font-medium opacity-80">{metric.label}</p>
+      <p className="mt-1 text-xl font-bold font-mono">{valStr}</p>
+      <p className="mt-1 text-xs opacity-70">{metric.note}</p>
+    </div>
+  );
+}
+
+function LiquidityInputField({
+  label, value, onChange, unit = "$M",
+}: { label: string; value: number; onChange: (v: number) => void; unit?: string }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs text-zinc-400">{label}</span>
+      <div className="flex items-center gap-1">
+        <span className="text-xs text-zinc-500">{unit}</span>
+        <input
+          type="number" min={0} step={100}
+          value={value === 0 ? "" : value}
+          placeholder="0"
+          onChange={(e) => onChange(Math.max(0, Number(e.target.value) || 0))}
+          className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-right text-sm font-mono text-zinc-200 focus:border-blue-500 focus:outline-none"
+        />
+      </div>
+    </label>
+  );
+}
+
+function StressBar({ label, current, max, color }: {
+  label: string; current: number; max: number; color: "emerald" | "amber" | "red";
+}) {
+  const pct = max > 0 ? Math.max(0, Math.min(1, current / max)) : 0;
+  const barColor = {
+    emerald: "bg-emerald-500",
+    amber:   "bg-amber-500",
+    red:     "bg-red-500",
+  }[color];
+  const textColor = {
+    emerald: "text-emerald-300",
+    amber:   "text-amber-300",
+    red:     "text-red-300",
+  }[color];
+  return (
+    <div>
+      <div className="mb-1 flex justify-between text-xs">
+        <span className="text-zinc-400">{label}</span>
+        <span className={`font-mono font-semibold ${textColor}`}>
+          ${current.toFixed(0)}M <span className="text-zinc-500">/ ${max.toFixed(0)}M</span>
+        </span>
+      </div>
+      <div className="h-3 w-full rounded-full bg-zinc-800">
+        <div
+          className={`h-3 rounded-full transition-all duration-300 ${barColor}`}
+          style={{ width: `${pct * 100}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function LiquidityAssessmentPanel({
+  inputs, onInputsChange, assessment, stressFlightPct, onStressFlightPctChange, liveStress,
+}: {
+  inputs: LiquidityInputs;
+  onInputsChange: (v: LiquidityInputs) => void;
+  assessment: LiquidityAssessment;
+  stressFlightPct: number;
+  onStressFlightPctChange: (v: number) => void;
+  liveStress: StressTestResult;
+}) {
+  const set = (field: keyof LiquidityInputs) => (v: number | boolean) =>
+    onInputsChange({ ...inputs, [field]: v });
+
+  const { metrics, rating, keSpread, earlyWarnings } = assessment;
+  const ratingCls = RATING_COLORS[rating];
+  const totalDeposits = metrics.totalDeposits;
+
+  return (
+    <section className="space-y-5 rounded-xl border border-blue-800/40 bg-blue-950/10 p-5">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
+            <Shield size={16} />
+            Liquidity Assessment
+          </h3>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            Bank-run stress test · feeds Ke as a liquidity risk spread
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`rounded-full px-3 py-1 text-xs font-bold ${ratingCls}`}>
+            {rating}
+          </span>
+          <span className="rounded-full bg-blue-900/30 px-3 py-1 text-xs font-mono text-blue-200">
+            Ke +{(keSpread * 100).toFixed(0)} bps
+          </span>
+        </div>
+      </div>
+
+      {/* Early-warning toggles */}
+      <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Early Warning Signals
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {(
+            [
+              { field: "flag_cds_spreads_spiking",      label: "CDS Spreads Spiking" },
+              { field: "flag_fhlb_borrowing_elevated",  label: "FHLB Borrowing Elevated" },
+              { field: "flag_credit_rating_downgrade",  label: "Credit Rating Downgrade" },
+            ] as const
+          ).map(({ field, label }) => (
+            <label key={field} className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={inputs[field] as boolean}
+                onChange={(e) => set(field)(e.target.checked)}
+                className="h-4 w-4 accent-amber-500"
+              />
+              <span className="text-xs text-zinc-300">{label}</span>
+            </label>
+          ))}
+        </div>
+        {earlyWarnings.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {earlyWarnings.map((w, i) => (
+              <li key={i} className="flex items-start gap-2 text-xs text-amber-300">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                {w}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Balance-sheet inputs */}
+      <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Balance-Sheet Inputs <span className="ml-1 font-normal text-zinc-600">(USD Millions — pre-filled from Step 2)</span>
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <LiquidityInputField label="Cash & HQLA"            value={inputs.cash_and_hqla_usd_m}                  onChange={set("cash_and_hqla_usd_m")} />
+          <LiquidityInputField label="Total Loans"            value={inputs.total_loans_usd_m}                     onChange={set("total_loans_usd_m")} />
+          <LiquidityInputField label="HTM Bonds"              value={inputs.htm_bonds_usd_m}                       onChange={set("htm_bonds_usd_m")} />
+          <LiquidityInputField label="Unrealized HTM Losses"  value={inputs.unrealized_losses_htm_usd_m}           onChange={set("unrealized_losses_htm_usd_m")} />
+          <LiquidityInputField label="Retail Insured Deposits" value={inputs.retail_insured_deposits_usd_m}        onChange={set("retail_insured_deposits_usd_m")} />
+          <LiquidityInputField label="Wholesale / Uninsured"  value={inputs.wholesale_uninsured_deposits_usd_m}    onChange={set("wholesale_uninsured_deposits_usd_m")} />
+          <LiquidityInputField label="Total Common Equity"    value={inputs.total_equity_usd_m}                    onChange={set("total_equity_usd_m")} />
+        </div>
+      </div>
+
+      {/* Baseline metrics */}
+      <div>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Baseline Liquidity Metrics
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <MetricChip metric={metrics.ldr} />
+          <MetricChip metric={metrics.uninsuredConcentration} />
+          <MetricChip metric={metrics.lcrProxy} />
+        </div>
+      </div>
+
+      {/* Stress test */}
+      <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Bank-Run Stress Test
+        </p>
+
+        {/* Slider */}
+        <label className="block">
+          <div className="mb-1 flex justify-between text-xs">
+            <span className="text-zinc-400">Uninsured Deposit Flight Severity</span>
+            <span className="font-mono font-semibold text-zinc-200">
+              {(stressFlightPct * 100).toFixed(0)}% — ${liveStress.fleeingDeposits.toFixed(0)}M fleeing
+            </span>
+          </div>
+          <input
+            type="range" min={0} max={1} step={0.01} value={stressFlightPct}
+            onChange={(e) => onStressFlightPctChange(Number(e.target.value))}
+            className="w-full accent-red-500"
+          />
+          <div className="mt-0.5 flex justify-between text-xs text-zinc-600">
+            <span>0% (no stress)</span><span>50%</span><span>100% (full run)</span>
+          </div>
+        </label>
+
+        {/* Visual bars */}
+        <div className="mt-4 space-y-3">
+          <StressBar
+            label="HQLA Buffer Remaining"
+            current={liveStress.hqlaRemaining}
+            max={inputs.cash_and_hqla_usd_m || 1}
+            color={liveStress.hqlaRemaining > inputs.cash_and_hqla_usd_m * 0.3 ? "emerald" : "amber"}
+          />
+          <StressBar
+            label="Equity Remaining"
+            current={Math.max(0, liveStress.equityRemaining)}
+            max={inputs.total_equity_usd_m || 1}
+            color={liveStress.equityRemaining > 0 ? (liveStress.equityRemaining > inputs.total_equity_usd_m * 0.5 ? "emerald" : "amber") : "red"}
+          />
+        </div>
+
+        {/* Arithmetic trace */}
+        <div className="mt-4 space-y-1 rounded border border-zinc-700/30 bg-zinc-950/50 p-3 text-xs font-mono">
+          <div className="text-zinc-500">Stress trace:</div>
+          <div className="text-zinc-300">Fleeing deposits: <span className="text-white">${liveStress.fleeingDeposits.toFixed(0)}M</span></div>
+          <div className="text-zinc-300">HQLA drained: <span className="text-white">${Math.min(inputs.cash_and_hqla_usd_m, liveStress.fleeingDeposits).toFixed(0)}M</span> → remaining: <span className="text-white">${liveStress.hqlaRemaining.toFixed(0)}M</span></div>
+          {liveStress.shortfall > 0 && (
+            <>
+              <div className="text-amber-300">Shortfall after HQLA: <span className="text-white">${liveStress.shortfall.toFixed(0)}M</span> → forced HTM sales</div>
+              <div className="text-amber-300">HTM bonds sold: <span className="text-white">${liveStress.htmSold.toFixed(0)}M</span></div>
+              <div className="text-red-300">Realized losses: <span className="text-white">${liveStress.realizedLosses.toFixed(0)}M</span></div>
+            </>
+          )}
+          <div className={liveStress.equityRemaining < 0 ? "text-red-300" : "text-zinc-300"}>
+            Equity: <span className={liveStress.equityRemaining < 0 ? "text-red-200 font-bold" : "text-white"}>
+              ${liveStress.equityRemaining.toFixed(0)}M
+            </span>
+          </div>
+        </div>
+
+        {/* Insolvency alert */}
+        {liveStress.insolvent && (
+          <div className="mt-3 rounded-lg border border-red-500 bg-red-950/40 p-3 text-center">
+            <p className="text-sm font-bold uppercase tracking-widest text-red-300">
+              ⚠ Insolvent / Regulatory Takeover Risk
+            </p>
+            <p className="mt-1 text-xs text-red-400">
+              At {(stressFlightPct * 100).toFixed(0)}% flight, realized losses exceed total equity.
+              Bank cannot absorb forced asset-sale losses.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Ke spread explanation */}
+      <div className="rounded-lg border border-blue-800/30 bg-blue-950/20 p-3">
+        <p className="text-xs text-blue-200">
+          <span className="font-semibold">Ke impact:</span>{" "}
+          {rating === "LOW"
+            ? "No spread applied — liquidity profile is healthy."
+            : `A ${SPREAD_LABELS[rating]} liquidity risk premium is added to Ke above the base CAPM rate. This raises the discount rate and reduces the FCFE present value — reflecting the additional equity return required to compensate for funding fragility.`
+          }
+        </p>
+        <p className="mt-1 text-xs font-mono text-blue-300">
+          Ke = Rf + β × ERP{keSpread > 0 ? ` + ${(keSpread * 100).toFixed(0)}bps (liquidity)` : ""}
+        </p>
+      </div>
+    </section>
   );
 }

@@ -381,6 +381,23 @@ function extractStep7Data(state: CFPState): Record<string, unknown> {
       : null,
     bank_ke: w.bankKeCalculation?.wacc ?? null,
     industrial_wacc: w.industrialWaccCalculation?.wacc ?? null,
+    liquidity_risk_rating: w.liquidityAssessment?.rating ?? null,
+    liquidity_risk_spread: w.liquidityRiskSpread,
+    liquidity_assessment: w.liquidityAssessment
+      ? {
+          ldr_pct: w.liquidityAssessment.metrics.ldr.value,
+          ldr_status: w.liquidityAssessment.metrics.ldr.status,
+          uninsured_concentration_pct: w.liquidityAssessment.metrics.uninsuredConcentration.value,
+          uninsured_status: w.liquidityAssessment.metrics.uninsuredConcentration.status,
+          lcr_proxy_pct: w.liquidityAssessment.metrics.lcrProxy.value,
+          lcr_proxy_status: w.liquidityAssessment.metrics.lcrProxy.status,
+          early_warnings: w.liquidityAssessment.earlyWarnings,
+          ke_spread_bps: Math.round(w.liquidityRiskSpread * 10000),
+          stress_30pct_insolvent: w.liquidityAssessment.stressAt30Pct.insolvent,
+          stress_30pct_hqla_remaining: w.liquidityAssessment.stressAt30Pct.hqlaRemaining,
+          stress_30pct_equity_remaining: w.liquidityAssessment.stressAt30Pct.equityRemaining,
+        }
+      : null,
   };
 }
 

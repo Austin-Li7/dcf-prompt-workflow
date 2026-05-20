@@ -114,6 +114,14 @@ export const BankChunkRowSchema = z.object({
   efficiency_ratio_pct: z.number().nullable(),
   return_on_avg_equity_pct: z.number().nullable(),
   total_assets_usd_m: z.number().nullable(),
+  // Liquidity fields
+  total_loans_usd_m: z.number().nullable(),
+  total_deposits_usd_m: z.number().nullable(),
+  retail_insured_deposits_usd_m: z.number().nullable(),
+  wholesale_uninsured_deposits_usd_m: z.number().nullable(),
+  cash_and_hqla_usd_m: z.number().nullable(),
+  htm_bonds_usd_m: z.number().nullable(),
+  unrealized_losses_htm_usd_m: z.number().nullable(),
   source_excerpt: z.string().max(160),
   confidence: z.enum(["high", "medium", "low"]),
 });
