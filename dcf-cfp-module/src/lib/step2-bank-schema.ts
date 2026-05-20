@@ -54,6 +54,10 @@ const BankRowSchema = z.object({
   net_income_usd_m: nullableNum(),
   // Balance-sheet / capital metrics
   book_value_equity_usd_m: nullableNum(),
+  // TCE components — required for ROATCE = Net Income / avg(Book Equity − Goodwill − Intangibles − Preferred)
+  goodwill_usd_m: nullableNum(),
+  intangible_assets_usd_m: nullableNum(),
+  preferred_equity_usd_m: nullableNum(),
   total_rwa_usd_m: nullableNum(),
   tier1_capital_ratio_pct: nullableNum(),
   cet1_ratio_pct: nullableNum(),
@@ -183,6 +187,9 @@ export function projectStep2BankStructuredToRows(
       provision_for_credit_losses_usd_m: row.provision_for_credit_losses_usd_m,
       net_income_usd_m: row.net_income_usd_m,
       book_value_equity_usd_m: row.book_value_equity_usd_m,
+      goodwill_usd_m: row.goodwill_usd_m,
+      intangible_assets_usd_m: row.intangible_assets_usd_m,
+      preferred_equity_usd_m: row.preferred_equity_usd_m,
       total_rwa_usd_m: row.total_rwa_usd_m,
       tier1_capital_ratio_pct: row.tier1_capital_ratio_pct,
       cet1_ratio_pct: row.cet1_ratio_pct,

@@ -40,6 +40,9 @@ const Step5ForecastRowSchema = z.object({
   provision_for_credit_losses_usd_m: z.number().nullable().optional(),
   regulatory_capital_increase_usd_m: z.number().nullable().optional(),
   fcfe_usd_m: z.number().nullable().optional(),
+  // Strategic override — required when yoy_growth_pct exceeds the backend plateau ceiling.
+  // Must name the specific catalyst (new product, competitor exit, major CapEx) breaking the curve.
+  growth_justification: z.string().max(420).nullable().default(null),
 });
 
 const WeakInferenceSensitivitySchema = z.object({

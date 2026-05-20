@@ -319,6 +319,9 @@ export interface HistoricalExtractionRow {
   provision_for_credit_losses_usd_m?: number | null;
   net_income_usd_m?: number | null;
   book_value_equity_usd_m?: number | null;
+  goodwill_usd_m?: number | null;
+  intangible_assets_usd_m?: number | null;
+  preferred_equity_usd_m?: number | null;
   total_rwa_usd_m?: number | null;
   tier1_capital_ratio_pct?: number | null;
   cet1_ratio_pct?: number | null;
@@ -415,6 +418,9 @@ export interface Step2BankHistoricalRow {
   provision_for_credit_losses_usd_m: number | null;
   net_income_usd_m: number | null;
   book_value_equity_usd_m: number | null;
+  goodwill_usd_m: number | null;
+  intangible_assets_usd_m: number | null;
+  preferred_equity_usd_m: number | null;
   total_rwa_usd_m: number | null;
   tier1_capital_ratio_pct: number | null;
   cet1_ratio_pct: number | null;
@@ -522,6 +528,43 @@ export interface FilingHints {
   tenQ: FilingTypeHints | null;
 }
 
+// ---------------------------------------------------------------------------
+// Step 2 – Trend Analysis  (logistic S-curve regression, backend-computed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Logistic regression result for one segment.
+ * Generated deterministically by /api/trend-analysis — no LLM involved.
+ */
+export interface SegmentTrendResult {
+  /** Mathematical plateau / carrying capacity from the logistic fit (USD M). Null when fit failed. */
+  calculated_plateau_ceiling_usd_m: number | null;
+  /** True when the last observed value is ≥80% of the modeled plateau — saturation is the binding constraint. */
+  is_plateau_detected: boolean;
+  /** Discrete growth rate the model predicts from last observed year → next year (%). Null when insufficient data. */
+  modeled_next_year_growth_limit_pct: number | null;
+  /** Year of maximum growth rate on the logistic curve (may be future). Null when fit failed. */
+  inflection_year: number | null;
+  /** Year from which the plateau model should govern forecasts (user override or auto-detected inflection). */
+  steady_growth_start_year: number;
+  data_points_used: number;
+  /** R² of the logistic fit (0–1). Null when fit fell back to CAGR. */
+  fit_quality_r2: number | null;
+  fit_ok: boolean;
+  review_note: string;
+}
+
+/** Full trend analysis result stored in CFPState after /api/trend-analysis completes. */
+export interface TrendAnalysisResult {
+  /** Per-segment logistic regression outputs, keyed by segment name. */
+  segments: Record<string, SegmentTrendResult>;
+  /** Median inflection year across all segments (auto-detected). Null when no fits succeeded. */
+  auto_detected_steady_growth_year: number | null;
+  /** User-supplied override for steady growth start year (null = use auto-detected). */
+  user_override_steady_growth_year: number | null;
+  analysis_timestamp: string;
+}
+
 /** The master history kept in global context (confirmed rows across years). */
 export interface HistoricalData {
   rows: HistoricalExtractionRow[];
@@ -530,6 +573,8 @@ export interface HistoricalData {
   continuity_bridges?: ContinuityBridge[]; // segment restructuring audit records
   /** Filing structure hints from bank mode PDF extraction — persisted for future year uploads. */
   filingHints?: FilingHints;
+  /** Backend logistic regression outputs — generated after Step 2 extraction completes. */
+  trendAnalysis?: TrendAnalysisResult;
 }
 
 // Kept for backward-compat — used by the export API
@@ -1295,6 +1340,7 @@ export type CFPAction =
   | { type: "APPEND_HISTORY_ROWS"; payload: { year: number; rows: HistoricalExtractionRow[] } }
   | { type: "CLEAR_HISTORY" }
   | { type: "SET_FILING_HINTS"; payload: FilingHints }
+  | { type: "SET_TREND_ANALYSIS"; payload: TrendAnalysisResult }
   | { type: "SET_COMPETITION"; payload: CompetitiveLandscape }
   | { type: "CLEAR_COMPETITION" }
   | { type: "SET_SYNERGIES"; payload: SynergiesAndDrivers }

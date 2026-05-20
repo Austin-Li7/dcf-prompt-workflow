@@ -16,6 +16,7 @@ import type {
   LLMProvider,
   ProductForecast,
   SynergiesAndDrivers,
+  TrendAnalysisResult,
 } from "@/types/cfp";
 
 // =============================================================================
@@ -113,6 +114,10 @@ function leanHistory(history: HistoricalData | null | undefined) {
         ...(r.provision_for_credit_losses_usd_m != null ? { provision_for_credit_losses_usd_m: r.provision_for_credit_losses_usd_m } : {}),
         ...(r.net_income_usd_m != null ? { net_income_usd_m: r.net_income_usd_m } : {}),
         ...(r.cet1_ratio_pct != null ? { cet1_ratio_pct: r.cet1_ratio_pct } : {}),
+        ...(r.book_value_equity_usd_m != null ? { book_value_equity_usd_m: r.book_value_equity_usd_m } : {}),
+        ...(r.goodwill_usd_m != null ? { goodwill_usd_m: r.goodwill_usd_m } : {}),
+        ...(r.intangible_assets_usd_m != null ? { intangible_assets_usd_m: r.intangible_assets_usd_m } : {}),
+        ...(r.preferred_equity_usd_m != null ? { preferred_equity_usd_m: r.preferred_equity_usd_m } : {}),
         // Industrial fields — include only when populated
         ...(r.capex_usd_m != null ? { capex_usd_m: r.capex_usd_m } : {}),
         ...(r.gross_profit_usd_m != null ? { gross_profit_usd_m: r.gross_profit_usd_m } : {}),
@@ -170,6 +175,44 @@ function leanSynergies(synergies: SynergiesAndDrivers | null | undefined) {
 }
 
 /**
+ * Format the backend trend ceiling for a specific segment into a compact
+ * instruction block to be injected into the Step 5 prompt.
+ */
+function formatSegmentTrendCeiling(
+  trendAnalysis: TrendAnalysisResult | null | undefined,
+  targetSegment: string,
+): string {
+  if (!trendAnalysis) return "";
+  const r = trendAnalysis.segments[targetSegment];
+  if (!r) return "";
+
+  const parts: string[] = [
+    "",
+    `BACKEND TREND CEILING for "${targetSegment}" (logistic S-curve regression — deterministic, no LLM):`,
+  ];
+
+  if (r.fit_ok && r.calculated_plateau_ceiling_usd_m != null) {
+    parts.push(`  Plateau ceiling: $${r.calculated_plateau_ceiling_usd_m.toFixed(0)}M`);
+    parts.push(`  Next-year algorithmic growth limit: ${r.modeled_next_year_growth_limit_pct?.toFixed(1) ?? "n/a"}%`);
+    parts.push(`  Saturation detected: ${r.is_plateau_detected ? "YES — segment is ≥80% of plateau" : "No"}`);
+    parts.push(`  Fit quality (R²): ${r.fit_quality_r2?.toFixed(3) ?? "n/a"}`);
+  } else {
+    const fallback = r.modeled_next_year_growth_limit_pct;
+    parts.push(`  No plateau fit (${r.review_note}). CAGR fallback: ${fallback != null ? fallback.toFixed(1) + "%" : "unknown"}`);
+  }
+
+  parts.push(
+    "STRATEGIC OVERRIDE RULE: If your modeled yoy_growth_pct exceeds the algorithmic growth limit above,",
+    "  you MUST populate growth_justification with the specific named catalyst breaking the mathematical curve",
+    "  (e.g. 'Competitor X filed for bankruptcy, releasing Y% of TAM' or 'New product launch expands addressable market by $ZM').",
+    "  Vague optimism ('strong demand', 'market tailwinds') is not a valid override.",
+    "  If growth_justification is null and yoy_growth_pct > algorithmic limit, set workflow_status to NEEDS_REVIEW.",
+  );
+
+  return parts.join("\n");
+}
+
+/**
  * Detect whether the target segment uses bank/NII-driven revenue.
  * Checks history row workflow_mode and presence of NII data.
  */
@@ -199,6 +242,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
       step2History,
       step3Competition,
       step4Complete,
+      trendAnalysis,
       targetSegment,
       apiKey: runtimeKey,
       llmProvider = "claude" as LLMProvider,
@@ -229,6 +273,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
     const synergiesLean = leanSynergies(step4Complete as SynergiesAndDrivers);
 
     const isBankMode = detectBankMode(step2History as HistoricalData, targetSegment);
+    const trendCeilingBlock = formatSegmentTrendCeiling(trendAnalysis as TrendAnalysisResult | null, targetSegment);
 
     // DeepSeek V3 hard-caps output at 8 192 tokens.
     // Instruct it to produce a minimal-but-valid artifact that fits within that budget.
@@ -264,6 +309,7 @@ ${JSON.stringify(synergiesLean)}
 
 Authoritative Step 2 baseline anchors (FY+1 must start from baselineRevenueUsdM):
 ${JSON.stringify(baselineContext)}
+${trendCeilingBlock}
 
 Rules:
 - schema_version must be exactly "v5.5".

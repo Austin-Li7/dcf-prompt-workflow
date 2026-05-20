@@ -173,6 +173,12 @@ function cfpReducer(state: CFPState, action: CFPAction): CFPState {
         history: { ...state.history, filingHints: action.payload },
       };
 
+    case "SET_TREND_ANALYSIS":
+      return {
+        ...state,
+        history: { ...state.history, trendAnalysis: action.payload },
+      };
+
     case "SET_COMPETITION":
       return { ...state, competition: action.payload };
 

@@ -27,6 +27,7 @@ import {
   saveCompanyAnalysis,
   downloadSave,
 } from "@/lib/company-saves";
+import { downloadMethodologyExport } from "@/lib/methodology-export";
 import type { CompanySave, ValuationSnapshot } from "@/types/cfp";
 
 // =============================================================================
@@ -292,6 +293,12 @@ export default function Step8Valuation() {
                       className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-600/50 bg-emerald-600/10 px-4 py-2.5 text-sm font-medium text-emerald-400 hover:bg-emerald-600/20"
                     >
                       <Download size={15} /> Download JSON backup
+                    </button>
+                    <button
+                      onClick={() => downloadMethodologyExport(state, savedRecord.snapshot)}
+                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-blue-600/50 bg-blue-600/10 px-4 py-2.5 text-sm font-medium text-blue-400 hover:bg-blue-600/20"
+                    >
+                      <Download size={15} /> Download Methodology JSON
                     </button>
                     <button
                       onClick={() => setShowCompleteModal(false)}

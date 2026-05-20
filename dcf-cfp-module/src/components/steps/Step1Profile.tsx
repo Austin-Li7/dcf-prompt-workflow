@@ -13,6 +13,7 @@ import {
   Check,
   ArrowRight,
   Plus,
+  GitBranch,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import StepShell from "./StepShell";
@@ -22,6 +23,7 @@ import { applyStep1ApprovalEdits, buildStep1ReviewState, markStep1ReviewApproved
 import { projectStructuredStep1ToArchitecture } from "@/lib/step1-schema";
 import type {
   AnalyzeCompanyResponse,
+  BusinessArchitecture,
   CompanyType,
   Step1OmissionReviewEntry,
   Step1ReportedNodeReviewEntry,
@@ -362,6 +364,13 @@ export default function Step1Profile() {
               <span className="text-xs text-amber-400">Ticker not inferred — enter manually for WACC step</span>
             )}
           </div>
+
+          <LineageNote
+            approved={state.profile.step1Review?.approved ?? false}
+            companyType={state.profile.step1StructuredResult?.company_type}
+            ticker={tickerInput || state.profile.ticker || null}
+            architecture={state.profile.architectureJson}
+          />
 
           {review && (
             <section className="space-y-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
@@ -844,6 +853,137 @@ function ReportedNodeCard({ node }: { node: Step1ReportedNodeReviewEntry }) {
           {hiddenProductCount > 0 ? ` +${hiddenProductCount} more` : ""}
         </p>
       )}
+    </div>
+  );
+}
+
+// =============================================================================
+// Data Lineage Note
+// =============================================================================
+
+function LineageNote({
+  approved,
+  companyType,
+  ticker,
+  architecture,
+}: {
+  approved: boolean;
+  companyType?: CompanyType;
+  ticker: string | null;
+  architecture: BusinessArchitecture | null;
+}) {
+  const segments = architecture?.architecture ?? [];
+
+  const pipelineLabel =
+    companyType === "financial_bank" || companyType === "financial_insurance" || companyType === "financial_other"
+      ? "FCFE / Ke (financial pipeline)"
+      : companyType === "hybrid"
+      ? "Hybrid — FCFF/WACC + FCFE/Ke (SOTP)"
+      : "FCFF / WACC (industrial pipeline)";
+
+  return (
+    <section
+      className={`rounded-lg border p-4 ${
+        approved
+          ? "border-emerald-700/40 bg-emerald-950/10"
+          : "border-zinc-700/60 bg-zinc-900/40"
+      }`}
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <GitBranch size={15} className={approved ? "text-emerald-400" : "text-zinc-400"} />
+        <span className={`text-xs font-semibold uppercase tracking-wide ${approved ? "text-emerald-300" : "text-zinc-300"}`}>
+          Data Lineage — What This Step Locks In
+        </span>
+        <span
+          className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${
+            approved
+              ? "bg-emerald-600/20 text-emerald-300"
+              : "bg-zinc-700/50 text-zinc-400"
+          }`}
+        >
+          {approved ? "Locked · flowing to Steps 2–8" : "Pending approval"}
+        </span>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        {/* Pipeline */}
+        <LineageCard
+          label="DCF Pipeline"
+          sublabel="Determines Steps 5–8 valuation mode"
+          approved={approved}
+        >
+          {companyType ? (
+            <span className="font-mono text-xs text-zinc-200">{pipelineLabel}</span>
+          ) : (
+            <span className="text-xs text-zinc-500">Awaiting analysis</span>
+          )}
+        </LineageCard>
+
+        {/* Segments */}
+        <LineageCard
+          label="Canonical Segments"
+          sublabel="Row identifiers for Steps 2–6 forecasting"
+          approved={approved}
+        >
+          {segments.length > 0 ? (
+            <ul className="space-y-0.5">
+              {segments.slice(0, 5).map((a) => (
+                <li key={a.segment} className="truncate font-mono text-xs text-zinc-200">
+                  {a.segment}
+                </li>
+              ))}
+              {segments.length > 5 && (
+                <li className="text-xs text-zinc-500">+{segments.length - 5} more</li>
+              )}
+            </ul>
+          ) : (
+            <span className="text-xs text-zinc-500">Awaiting approval</span>
+          )}
+        </LineageCard>
+
+        {/* Ticker */}
+        <LineageCard
+          label="Ticker"
+          sublabel="Market data seed for Step 7 WACC fetch"
+          approved={approved}
+        >
+          {ticker ? (
+            <span className="font-mono text-sm font-semibold text-zinc-100">{ticker}</span>
+          ) : (
+            <span className="text-xs text-amber-400">Not set — enter above before approving</span>
+          )}
+        </LineageCard>
+      </div>
+
+      {!approved && (
+        <p className="mt-3 text-xs text-zinc-500">
+          These values are set in stone when you click <span className="text-zinc-300">Approve Step 1</span>. If segment names or the pipeline type are wrong, every downstream step will produce mismatched outputs.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function LineageCard({
+  label,
+  sublabel,
+  approved,
+  children,
+}: {
+  label: string;
+  sublabel: string;
+  approved: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-3 ${
+        approved ? "border-emerald-800/30 bg-emerald-950/20" : "border-zinc-800 bg-zinc-950/50"
+      }`}
+    >
+      <p className="mb-0.5 text-xs font-medium text-zinc-300">{label}</p>
+      <p className="mb-2 text-xs text-zinc-500">{sublabel}</p>
+      {children}
     </div>
   );
 }
