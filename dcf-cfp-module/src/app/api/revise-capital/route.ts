@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   GEMINI_STEP4_CAPITAL_METRIC_RESPONSE_SCHEMA,
   parseStep4CapitalMetric,
@@ -84,7 +85,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCapital
       "  Document findings in review_note.",
     ].join("\n");
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: REVISE_CAPITAL_SYSTEM_PROMPT,

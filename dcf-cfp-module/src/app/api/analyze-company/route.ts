@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import { extractPdfText } from "@/lib/pdf-extract";
 import { buildStep1ReviewState } from "@/lib/step1-review";
 import {
@@ -192,7 +193,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
       );
     }
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: STEP1_SYSTEM_PROMPT,
@@ -205,6 +206,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
       responseToolName: "submit_step1_structured_result",
       responseToolDescription:
         "Submit the Step 1 structured result with reported_view, analysis_view, claims, and sources.",
+      dataSectionStart: "<documents>",
     });
 
     const structuredPayload = extractStructuredPayload(result, llmProvider);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   GEMINI_STEP4_SYNERGY_RESPONSE_SCHEMA,
   parseStep4Synergy,
@@ -103,7 +104,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseSynergi
       "- Preserve step5_revenue_ceiling consistency — do not infer new revenue ceilings from this single synergy.",
     ].join("\n");
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: REVISE_SYNERGIES_SYSTEM_PROMPT,

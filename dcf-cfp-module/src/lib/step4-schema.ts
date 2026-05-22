@@ -430,13 +430,258 @@ function normalizeStep4StructuredPayload(payload: unknown): unknown {
       : capitalAllocation;
   const existingWarnings = normalizeValidationWarnings(record.validation_warnings, synergyIds);
 
+  // ── Cross-reference healing ────────────────────────────────────────────────
+  // The LLM often produces internally consistent JSON whose cross-references
+  // (source_ids / claim_ids) don't perfectly match the top-level `sources` /
+  // `claims` arrays — e.g. a synergy cites "src-apple-10k" but the sources
+  // array has "source:apple:10k".  The superRefine in Step4StructuredSchema
+  // hard-fails on any mismatch.  We auto-declare missing entries here so the
+  // strict schema passes, and add validation_warnings so reviewers know.
+  //
+  // Also rewrites source_ids arrays that contain claim IDs (a common LLM error)
+  // by expanding the claim to its actual source references.
+  const { healedSources, healedClaims, healedCapAlloc, healedSynergies } = healCrossReferences(
+    Array.isArray(record.sources) ? (record.sources as Record<string, unknown>[]) : [],
+    Array.isArray(record.claims) ? (record.claims as Record<string, unknown>[]) : [],
+    synergies,
+    normalizedCapitalAllocation,
+    normalizedWarnings,
+  );
+
   return {
     ...record,
     schema_version: "v5.5",
-    synergy_registry: synergies,
-    capital_allocation: normalizedCapitalAllocation,
+    sources: healedSources,
+    claims: healedClaims,
+    synergy_registry: healedSynergies,
+    capital_allocation: healedCapAlloc,
     validation_warnings: [...existingWarnings, ...normalizedWarnings],
   };
+}
+
+/**
+ * Collect every source_id and claim_id referenced in the normalised synergies
+ * and capital_allocation, then ensure each one is present in `sources` / `claims`.
+ * Any that are absent get a synthetic placeholder entry and a validation warning.
+ *
+ * Special case — claim ID used as source ID:
+ *   The LLM sometimes puts claim IDs (e.g. "claim_1") into a `source_ids` array
+ *   that expects source document IDs.  When detected, the offending claim ID is
+ *   expanded to the real source_ids that the claim itself cites — preserving the
+ *   correct citation chain rather than creating a misleading synthetic source.
+ *
+ * This runs BEFORE Step4StructuredSchema.parse(), so the strict superRefine
+ * cross-reference check always passes — even when the LLM was inconsistent.
+ */
+function healCrossReferences(
+  rawSources: Record<string, unknown>[],
+  rawClaims: Record<string, unknown>[],
+  synergies: unknown,
+  normalizedCapAlloc: unknown,
+  warnings: z.infer<typeof ValidationWarningSchema>[],
+): { healedSources: Record<string, unknown>[]; healedClaims: Record<string, unknown>[]; healedCapAlloc: unknown; healedSynergies: unknown } {
+  const healedSources = [...rawSources];
+  const healedClaims = [...rawClaims];
+
+  const knownSourceIds = new Set(
+    healedSources.flatMap((s) => (typeof s.source_id === "string" ? [s.source_id] : [])),
+  );
+  const knownClaimIds = new Set(
+    healedClaims.flatMap((c) => (typeof c.claim_id === "string" ? [c.claim_id] : [])),
+  );
+
+  // Build claim_id → source_ids map so we can expand claim refs in source_ids arrays.
+  const claimToSourceIds = new Map<string, string[]>();
+  rawClaims.forEach((c) => {
+    if (typeof c.claim_id === "string" && Array.isArray(c.source_ids)) {
+      claimToSourceIds.set(
+        c.claim_id,
+        c.source_ids.filter((id): id is string => typeof id === "string"),
+      );
+    }
+  });
+
+  /**
+   * Expand a source_ids array: replace any entry that is actually a claim_id
+   * with the real source_ids that claim cites.  Entries that are neither a
+   * known source_id nor a known claim_id are left as-is (they will be
+   * auto-declared below).  De-duplicates the result.
+   *
+   * Returns { expanded, claimIdsFound } — claimIdsFound used for the warning.
+   */
+  function expandSourceIds(arr: unknown): { expanded: string[]; claimIdsFound: string[] } {
+    if (!Array.isArray(arr)) return { expanded: [], claimIdsFound: [] };
+    const result: string[] = [];
+    const claimIdsFound: string[] = [];
+    for (const entry of arr) {
+      if (typeof entry !== "string") continue;
+      if (knownClaimIds.has(entry)) {
+        // This is a claim ID sitting where a source ID should be.
+        // Expand it to the claim's actual source_ids.
+        claimIdsFound.push(entry);
+        const resolved = claimToSourceIds.get(entry) ?? [];
+        result.push(...resolved);
+      } else {
+        result.push(entry);
+      }
+    }
+    // De-duplicate while preserving order
+    return { expanded: [...new Set(result)], claimIdsFound };
+  }
+
+  // ── Rewrite source_ids arrays that contain claim IDs ───────────────────────
+  const allClaimIdsFoundInSourceArrays: string[] = [];
+
+  // Rewrite capital metrics
+  const capAlloc = normalizedCapAlloc as Record<string, unknown> | null | undefined;
+  let healedCapAlloc: unknown = normalizedCapAlloc;
+  if (capAlloc && Array.isArray(capAlloc.capital_metrics)) {
+    let rewritten = false;
+    const newMetrics = capAlloc.capital_metrics.map((m: unknown) => {
+      if (!m || typeof m !== "object") return m;
+      const mr = m as Record<string, unknown>;
+      const { expanded, claimIdsFound } = expandSourceIds(mr.source_ids);
+      if (claimIdsFound.length === 0) return m;
+      rewritten = true;
+      allClaimIdsFoundInSourceArrays.push(...claimIdsFound);
+      return { ...mr, source_ids: expanded.length > 0 ? expanded : mr.source_ids };
+    });
+    if (rewritten) {
+      healedCapAlloc = { ...capAlloc, capital_metrics: newMetrics };
+    }
+  }
+
+  // Rewrite synergy financial_signal.source_ids
+  let healedSynergies: unknown = synergies;
+  if (Array.isArray(synergies)) {
+    let rewritten = false;
+    const newSynergies = synergies.map((s) => {
+      if (!s || typeof s !== "object") return s;
+      const sr = s as Record<string, unknown>;
+      const fs = sr.financial_signal as Record<string, unknown> | undefined;
+      if (!fs) return s;
+      const { expanded, claimIdsFound } = expandSourceIds(fs.source_ids);
+      if (claimIdsFound.length === 0) return s;
+      rewritten = true;
+      allClaimIdsFoundInSourceArrays.push(...claimIdsFound);
+      return {
+        ...sr,
+        financial_signal: {
+          ...fs,
+          source_ids: expanded.length > 0 ? expanded : fs.source_ids,
+        },
+      };
+    });
+    if (rewritten) healedSynergies = newSynergies;
+  }
+
+  if (allClaimIdsFoundInSourceArrays.length > 0) {
+    const unique = [...new Set(allClaimIdsFoundInSourceArrays)];
+    warnings.push({
+      code: "CLAIM_ID_USED_AS_SOURCE_REF",
+      severity: "warn",
+      message: `LLM placed claim ID(s) in source_ids arrays — expanded to actual source references: ${unique.slice(0, 4).join(", ")}`,
+      synergy_ids: [],
+      capital_metric_ids: [],
+    });
+  }
+
+  // ── Collect all source_ids and claim_ids still referenced ─────────────────
+  const referencedSourceIds = new Set<string>();
+  const referencedClaimIds = new Set<string>();
+
+  const addStr = (set: Set<string>, v: unknown) => {
+    if (typeof v === "string" && v.length > 0) set.add(v);
+  };
+  const addArr = (set: Set<string>, arr: unknown) => {
+    if (Array.isArray(arr)) arr.forEach((v) => addStr(set, v));
+  };
+
+  // From claims
+  rawClaims.forEach((c) => addArr(referencedSourceIds, c.source_ids));
+  // From synergies (use healedSynergies so expanded arrays are counted)
+  if (Array.isArray(healedSynergies)) {
+    healedSynergies.forEach((s) => {
+      if (!s || typeof s !== "object") return;
+      const sr = s as Record<string, unknown>;
+      addArr(referencedClaimIds, sr.basis_claim_ids);
+      const fs = sr.financial_signal as Record<string, unknown> | undefined;
+      if (fs) {
+        addStr(referencedClaimIds, fs.claim_id);
+        addArr(referencedSourceIds, fs.source_ids);
+      }
+    });
+  }
+  // From capital metrics (use healedCapAlloc)
+  const hcap = healedCapAlloc as Record<string, unknown> | null | undefined;
+  if (hcap && Array.isArray(hcap.capital_metrics)) {
+    hcap.capital_metrics.forEach((m: unknown) => {
+      if (!m || typeof m !== "object") return;
+      const mr = m as Record<string, unknown>;
+      addStr(referencedClaimIds, mr.claim_id);
+      addArr(referencedSourceIds, mr.source_ids);
+    });
+  }
+
+  // ── Auto-declare any still-missing source_ids ──────────────────────────────
+  const missingSources = [...referencedSourceIds].filter((id) => !knownSourceIds.has(id));
+  if (missingSources.length > 0) {
+    for (const id of missingSources) {
+      healedSources.push({
+        source_id: id,
+        source_type: "derived",
+        name: `[Auto-declared] ${id.slice(0, 80)}`,
+        url: null,
+        locator: null,
+        excerpt: null,
+      });
+      knownSourceIds.add(id);
+    }
+    warnings.push({
+      code: "UNDECLARED_SOURCE_REFS_HEALED",
+      severity: "warn",
+      message: `${missingSources.length} source reference(s) auto-declared (LLM omitted from sources array): ${missingSources.slice(0, 3).join(", ")}`,
+      synergy_ids: [],
+      capital_metric_ids: [],
+    });
+  }
+
+  // ── Auto-declare missing claim_ids ─────────────────────────────────────────
+  const missingClaims = [...referencedClaimIds].filter((id) => !knownClaimIds.has(id));
+  if (missingClaims.length > 0) {
+    // Pick the first known source_id as the fallback citation; create a
+    // synthetic one if the sources array is somehow also empty.
+    const fallbackSourceId = [...knownSourceIds][0] ?? "synthetic:no-source";
+    if (!knownSourceIds.has(fallbackSourceId)) {
+      healedSources.push({
+        source_id: fallbackSourceId,
+        source_type: "derived",
+        name: "[Auto-declared] fallback source",
+        url: null,
+        locator: null,
+        excerpt: null,
+      });
+      knownSourceIds.add(fallbackSourceId);
+    }
+    for (const id of missingClaims) {
+      healedClaims.push({
+        claim_id: id,
+        text: `[Auto-declared] Undeclared claim reference: ${id.slice(0, 120)}`,
+        source_ids: [fallbackSourceId],
+        evidence_level: "UNSUPPORTED",
+        source_snippet: null,
+      });
+    }
+    warnings.push({
+      code: "UNDECLARED_CLAIM_REFS_HEALED",
+      severity: "warn",
+      message: `${missingClaims.length} claim reference(s) auto-declared (LLM omitted from claims array): ${missingClaims.slice(0, 3).join(", ")}`,
+      synergy_ids: [],
+      capital_metric_ids: [],
+    });
+  }
+
+  return { healedSources, healedClaims, healedCapAlloc, healedSynergies };
 }
 
 function normalizeCapitalAllocation(
