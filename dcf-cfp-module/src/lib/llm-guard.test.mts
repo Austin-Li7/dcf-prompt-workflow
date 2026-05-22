@@ -6,10 +6,39 @@ import {
   isTruncated,
   parseConfirmation,
   splitPromptIntoParts,
+  buildCompressionPrompt,
+  DEFAULT_DILUTION_THRESHOLD,
   TRUNCATION_REASON_RE,
   guardedCallLLM,
 } from "./llm-guard.ts";
 import type { CallLLMResult } from "./llm-service.ts";
+
+// =============================================================================
+// DEFAULT_DILUTION_THRESHOLD
+// =============================================================================
+
+test("DEFAULT_DILUTION_THRESHOLD is 0.6", () => {
+  assert.equal(DEFAULT_DILUTION_THRESHOLD, 0.6);
+});
+
+// =============================================================================
+// buildCompressionPrompt
+// =============================================================================
+
+test("buildCompressionPrompt includes the task instructions and context block", () => {
+  const p = buildCompressionPrompt("Analyze revenue by segment.", "Q1 2024: $500M, Q2: $600M");
+  assert.ok(p.includes("Analyze revenue by segment."), "should include task instructions");
+  assert.ok(p.includes("Q1 2024: $500M"), "should include context block");
+  assert.ok(p.includes("distil"), "should contain distillation instruction");
+});
+
+test("buildCompressionPrompt truncates very long task instructions to 600 chars", () => {
+  // Use a character not present in the boilerplate so the count is exact
+  const longTask = "Z".repeat(1000);
+  const p = buildCompressionPrompt(longTask, "data");
+  const zCount = (p.match(/Z/g) ?? []).length;
+  assert.equal(zCount, 600, `task instructions should be truncated to exactly 600 chars, got ${zCount}`);
+});
 
 // =============================================================================
 // estimateTokens
@@ -162,6 +191,7 @@ test("Layer 1: splits and multi-calls when prompt exceeds deepseek limit", async
     makeOpts({
       provider: "deepseek",
       prompt: bigPrompt,
+      skipContextCompression: true, // isolate Layer 1 behaviour
       _callFn: async (o) => { calls.push((o as { prompt: string }).prompt.slice(0, 10)); return makeResult(); },
     }),
   );
@@ -174,6 +204,7 @@ test("Layer 1: inputSplit=true when prompt was split", async () => {
     makeOpts({
       provider: "deepseek",
       prompt: bigPrompt,
+      skipContextCompression: true, // isolate Layer 1 behaviour
       _callFn: async () => makeResult(),
     }),
   );
@@ -301,6 +332,149 @@ test("Layer 3: split retry merges structured results when mergeStructuredResults
   assert.ok(merged.rows.includes("b"));
 });
 
+// ─── Layer 4 ──────────────────────────────────────────────────────────────────
+
+test("Layer 4: fires when prompt exceeds dilution threshold for provider", async () => {
+  // DeepSeek limit = 50_000 tokens; 60% threshold = 30_000 tokens → 120_000 chars
+  const largePrompt = "x".repeat(130_000); // ~32_500 tokens — over the 30k threshold
+  const prompts: string[] = [];
+
+  const result = await guardedCallLLM(
+    makeOpts({
+      provider: "deepseek",
+      prompt: largePrompt,
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        prompts.push((o as { prompt: string }).prompt);
+        return makeResult({ text: "compressed context summary" });
+      },
+    }),
+  );
+
+  // First call should be the compression pre-pass
+  assert.ok(
+    prompts[0].includes("context distiller") || prompts[0].includes("CONTEXT TO DISTIL"),
+    "first call should be the compression prompt",
+  );
+  assert.equal(result.guardLog.contextDilutionDetected, true);
+  assert.equal(result.guardLog.contextCompressed, true);
+  assert.ok(typeof result.guardLog.contextTokensAfterCompression === "number");
+});
+
+test("Layer 4: skipped when prompt is below dilution threshold", async () => {
+  const smallPrompt = "Analyze this company."; // tiny — well below any threshold
+  let compressionRan = false;
+
+  const result = await guardedCallLLM(
+    makeOpts({
+      prompt: smallPrompt,
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        const p = (o as { prompt: string }).prompt;
+        if (p.includes("CONTEXT TO DISTIL")) compressionRan = true;
+        return makeResult();
+      },
+    }),
+  );
+
+  assert.equal(compressionRan, false, "compression should not run for small prompts");
+  assert.equal(result.guardLog.contextDilutionDetected, false);
+  assert.equal(result.guardLog.contextCompressed, false);
+  assert.equal(result.guardLog.contextTokensAfterCompression, null);
+});
+
+test("Layer 4: skipped when skipContextCompression=true", async () => {
+  const largePrompt = "x".repeat(130_000);
+  let compressionRan = false;
+
+  await guardedCallLLM(
+    makeOpts({
+      provider: "deepseek",
+      prompt: largePrompt,
+      skipContextCompression: true,
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        if ((o as { prompt: string }).prompt.includes("CONTEXT TO DISTIL")) compressionRan = true;
+        return makeResult();
+      },
+    }),
+  );
+
+  assert.equal(compressionRan, false);
+});
+
+test("Layer 4: preserves instruction prefix when dataSectionStart provided", async () => {
+  const instructions = "TASK INSTRUCTIONS\n<documents>";
+  const bigData = "D".repeat(130_000);
+  const prompt = instructions + bigData;
+  let compressionInputPrompt = "";
+
+  await guardedCallLLM(
+    makeOpts({
+      provider: "deepseek",
+      prompt,
+      dataSectionStart: "<documents>",
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        const p = (o as { prompt: string }).prompt;
+        if (p.includes("CONTEXT TO DISTIL")) compressionInputPrompt = p;
+        return makeResult({ text: "compressed data" });
+      },
+    }),
+  );
+
+  assert.ok(compressionInputPrompt.length > 0, "compression call should have been made");
+  assert.ok(
+    compressionInputPrompt.includes("TASK INSTRUCTIONS"),
+    "task instructions should be passed to compression prompt",
+  );
+});
+
+test("Layer 4: compression failure does not throw — falls back to full prompt", async () => {
+  const largePrompt = "x".repeat(130_000);
+  let mainCallMade = false;
+
+  const result = await guardedCallLLM(
+    makeOpts({
+      provider: "deepseek",
+      prompt: largePrompt,
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        const p = (o as { prompt: string }).prompt;
+        if (p.includes("CONTEXT TO DISTIL")) throw new Error("compression network error");
+        mainCallMade = true;
+        return makeResult({ text: "main result" });
+      },
+    }),
+  );
+
+  assert.ok(mainCallMade, "main call should still run after compression failure");
+  assert.equal(result.guardLog.contextDilutionDetected, true);
+  assert.equal(result.guardLog.contextCompressed, false, "contextCompressed should remain false on failure");
+  assert.equal(result.text, "main result");
+});
+
+test("Layer 4: custom dilution threshold overrides default", async () => {
+  // With threshold=1.0, compression never fires regardless of prompt size
+  const largePrompt = "x".repeat(130_000);
+  let compressionRan = false;
+
+  await guardedCallLLM(
+    makeOpts({
+      provider: "deepseek",
+      prompt: largePrompt,
+      contextDilutionThreshold: 1.0, // only fires at the hard cap — effectively disabled
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        if ((o as { prompt: string }).prompt.includes("CONTEXT TO DISTIL")) compressionRan = true;
+        return makeResult();
+      },
+    }),
+  );
+
+  assert.equal(compressionRan, false, "compression should not run when threshold=1.0");
+});
+
 // ─── guardLog fields ──────────────────────────────────────────────────────────
 
 test("guardLog is present on every result", async () => {
@@ -309,6 +483,8 @@ test("guardLog is present on every result", async () => {
   );
   const log = result.guardLog;
   assert.ok(typeof log.inputTokensEstimated === "number");
+  assert.ok(typeof log.contextDilutionDetected === "boolean");
+  assert.ok(typeof log.contextCompressed === "boolean");
   assert.ok(typeof log.inputSplit === "boolean");
   assert.ok(typeof log.inputChunks === "number");
   assert.ok(typeof log.confirmationRan === "boolean");

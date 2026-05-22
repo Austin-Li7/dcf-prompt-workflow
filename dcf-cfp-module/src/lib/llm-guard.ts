@@ -1,10 +1,25 @@
 /**
- * LLM Guard — three-layer quality wrapper around callLLM.
+ * LLM Guard — four-layer quality wrapper around callLLM.
+ *
+ * Layers run in this order: 4 → 1 → call → 2 → 3
+ *
+ * Layer 4 — Context dilution (pre-flight, runs FIRST):
+ *   When the prompt exceeds the provider's dilution threshold (default 60 %
+ *   of the input limit), the context block is too large to maintain sharp
+ *   LLM attention — even if it technically fits the window.  Layer 4 runs a
+ *   fast compression pre-pass: it asks the LLM to distill the context down to
+ *   only the facts the task actually needs, then replaces the bloated context
+ *   with the compressed version before proceeding.  This often prevents Layer 1
+ *   splitting entirely and produces sharper, faster results.
+ *
+ *   Principle: start each task with a focused, minimal context.  Accumulated
+ *   prior-step results, verbose filing text, and repeated boilerplate all
+ *   dilute attention and increase latency and cost.
  *
  * Layer 1 — Input capacity:
- *   Estimates prompt tokens. If over the provider's context limit, splits
- *   the data section into chunks and processes each independently, then
- *   merges the results before proceeding.
+ *   Estimates prompt tokens. If still over the provider's hard limit after
+ *   Layer 4 compression, splits the data section into chunks and processes
+ *   each independently, then merges the results.
  *
  * Layer 2 — Understanding confirmation:
  *   After every main call, sends a lightweight text-only follow-up asking
@@ -24,9 +39,11 @@
  *   const result = await guardedCallLLM({
  *     provider, apiKey, prompt, systemPrompt, maxTokens,
  *     responseSchema, responseToolName, responseToolDescription,
- *     dataSectionStart: "<documents>",     // optional — marks start of data block
- *     mergeStructuredResults: mergeMyFn,   // optional — required for Layer 3 split
+ *     dataSectionStart: "<documents>",     // optional — marks start of data/context block
+ *     mergeStructuredResults: mergeMyFn,   // optional — required for Layer 1/3 split
  *     skipConfirmation: false,             // default false = Layer 2 always runs
+ *     contextDilutionThreshold: 0.6,       // default — compress when > 60 % of limit
+ *     skipContextCompression: false,       // default false = Layer 4 always active
  *   });
  *   // result.guardLog has diagnostics; result.text / .structuredData work identically
  *   // to a plain callLLM result.
@@ -143,6 +160,53 @@ function mergeCallResults(
 }
 
 // =============================================================================
+// Layer 4 — Context dilution / compression (pre-flight)
+// =============================================================================
+
+/**
+ * Fraction of the provider's input limit above which context compression is
+ * triggered.  Below this threshold every prompt is considered "fresh enough"
+ * and Layer 4 is skipped.
+ *
+ * 0.6 = 60 % of the limit.  Choose a value lower than 1.0 (which is Layer 1's
+ * hard-split trigger) so Layer 4 has a chance to reduce the prompt before
+ * Layer 1 would need to split it.
+ */
+export const DEFAULT_DILUTION_THRESHOLD = 0.6;
+
+/** Max tokens the LLM may use when producing the compressed context. */
+const COMPRESSION_MAX_TOKENS = 4096;
+
+/**
+ * Build the compression prompt.
+ *
+ * `taskInstructions` is the part of the prompt the caller wants to preserve
+ * verbatim (e.g. the task description before `<documents>`).
+ * `contextBlock` is the large data/context section to be distilled.
+ */
+export function buildCompressionPrompt(
+  taskInstructions: string,
+  contextBlock: string,
+): string {
+  return [
+    "You are a context distiller.  Your job is to extract ONLY the facts",
+    "that are strictly necessary to answer the following task.",
+    "Rules:",
+    "- Preserve every number, date, segment name, and financial figure verbatim.",
+    "- Drop all prose explanations, boilerplate, repeated context, and anything",
+    "  not directly needed to complete the task.",
+    "- Output plain text — no markdown, no headers, no commentary.",
+    "- Be maximally concise: target 30 % of the input length.",
+    "",
+    "TASK (for reference — do NOT answer it, only distil the context for it):",
+    taskInstructions.slice(0, 600).trim(),
+    "",
+    "CONTEXT TO DISTIL:",
+    contextBlock,
+  ].join("\n");
+}
+
+// =============================================================================
 // Layer 2 — Understanding confirmation
 // =============================================================================
 
@@ -193,18 +257,28 @@ export function parseConfirmation(text: string): ConfirmationOutcome {
 // =============================================================================
 
 export interface GuardLog {
-  /** Estimated input tokens before any splitting. */
+  /** Estimated input tokens before any compression or splitting. */
   inputTokensEstimated: number;
+  // ── Layer 4 ────────────────────────────────────────────────────────────────
+  /** True when the prompt exceeded the dilution threshold and compression ran. */
+  contextDilutionDetected: boolean;
+  /** True when Layer 4 successfully replaced the context with a compressed version. */
+  contextCompressed: boolean;
+  /** Token count after compression (null when compression was skipped or failed). */
+  contextTokensAfterCompression: number | null;
+  // ── Layer 1 ────────────────────────────────────────────────────────────────
   /** True when Layer 1 split the prompt across multiple sub-calls. */
   inputSplit: boolean;
   /** Number of input chunks (1 = no split). */
   inputChunks: number;
+  // ── Layer 2 ────────────────────────────────────────────────────────────────
   /** True when the Layer 2 confirmation call ran. */
   confirmationRan: boolean;
   /** Null when confirmation was skipped; true/false after it ran. */
   confirmationOk: boolean | null;
   /** Raw text from the confirmation call. */
   confirmationText: string | null;
+  // ── Layer 3 ────────────────────────────────────────────────────────────────
   /** True when the main response was truncated (Layer 3 triggered). */
   outputTruncated: boolean;
   /** True when Layer 3 re-ran the call with a split prompt. */
@@ -246,6 +320,24 @@ export interface GuardedCallOptions extends CallLLMOptions {
   skipConfirmation?: boolean;
 
   /**
+   * Fraction of the provider's input limit above which Layer 4 context
+   * compression is triggered.  Default: 0.6 (60 %).  Set to 1.0 to disable.
+   *
+   * Example: for Claude (180k limit) the default fires at 108k tokens.
+   * The prompt is still well within the hard cap, but large enough that
+   * accumulated context starts to dilute LLM attention and inflate cost.
+   */
+  contextDilutionThreshold?: number;
+
+  /**
+   * When true, skips Layer 4 (context compression).
+   * Use for routes whose prompts are inherently compact and don't accumulate
+   * prior-step context (e.g. revision routes with small payloads).
+   * Defaults to false.
+   */
+  skipContextCompression?: boolean;
+
+  /**
    * Override the underlying LLM call function.  Used in tests to inject a
    * mock without needing module mocking.  Defaults to `callLLM` from
    * llm-service.
@@ -272,6 +364,8 @@ export async function guardedCallLLM(
     dataSectionStart,
     mergeStructuredResults,
     skipConfirmation = false,
+    contextDilutionThreshold = DEFAULT_DILUTION_THRESHOLD,
+    skipContextCompression = false,
     _callFn,
     ...rest
   } = options;
@@ -284,6 +378,9 @@ export async function guardedCallLLM(
 
   const log: GuardLog = {
     inputTokensEstimated: inputTokens,
+    contextDilutionDetected: false,
+    contextCompressed: false,
+    contextTokensAfterCompression: null,
     inputSplit: false,
     inputChunks: 1,
     confirmationRan: false,
@@ -293,19 +390,72 @@ export async function guardedCallLLM(
     outputSplitRetry: false,
   };
 
+  // ─── Layer 4: Context dilution / compression (pre-flight) ─────────────────
+  // Runs BEFORE Layer 1.  When the prompt is large enough to dilute the LLM's
+  // attention (but not necessarily over the hard cap), compress the context
+  // section down to only the facts the task needs.
+  let activePrompt = prompt;
+  const dilutionLimit = Math.floor(limit * contextDilutionThreshold);
+
+  if (!skipContextCompression && inputTokens > dilutionLimit) {
+    log.contextDilutionDetected = true;
+    console.info(
+      `[llm-guard] Layer 4: prompt ${inputTokens.toLocaleString()} tokens exceeds dilution threshold ${dilutionLimit.toLocaleString()} — compressing context`,
+    );
+
+    // Split at the dataSectionStart marker (if provided) so instructions are
+    // preserved verbatim and only the context/data block is distilled.
+    let taskInstructions = "";
+    let contextBlock = activePrompt;
+
+    if (dataSectionStart) {
+      const markerIdx = activePrompt.indexOf(dataSectionStart);
+      if (markerIdx !== -1) {
+        taskInstructions = activePrompt.slice(0, markerIdx + dataSectionStart.length);
+        contextBlock = activePrompt.slice(markerIdx + dataSectionStart.length);
+      }
+    }
+
+    try {
+      const compressionResult = await invoke({
+        provider,
+        apiKey,
+        prompt: buildCompressionPrompt(taskInstructions || activePrompt, contextBlock),
+        maxTokens: COMPRESSION_MAX_TOKENS,
+        // Plain text — no schema, no tool use
+      });
+
+      const compressedPrompt = taskInstructions + compressionResult.text;
+      const compressedTokens = estimateTokens(compressedPrompt);
+
+      console.info(
+        `[llm-guard] Layer 4: compressed ${inputTokens.toLocaleString()} → ${compressedTokens.toLocaleString()} tokens`,
+      );
+
+      log.contextCompressed = true;
+      log.contextTokensAfterCompression = compressedTokens;
+      activePrompt = compressedPrompt;
+    } catch (err) {
+      console.warn("[llm-guard] Layer 4: compression failed, proceeding with full context —", err);
+    }
+  }
+
+  // Re-estimate after possible compression
+  const activeTokens = estimateTokens((systemPrompt ?? "") + activePrompt);
+
   // ─── Layer 1: Input capacity check ────────────────────────────────────────
   let mainResult: CallLLMResult;
 
-  if (inputTokens > limit) {
+  if (activeTokens > limit) {
     // 80 % of the limit per chunk — leaves room for the instruction prefix
     const tokensPerChunk = Math.floor(limit * 0.8);
-    const chunks = splitPromptIntoParts(prompt, tokensPerChunk, dataSectionStart);
+    const chunks = splitPromptIntoParts(activePrompt, tokensPerChunk, dataSectionStart);
 
     log.inputSplit = chunks.length > 1;
     log.inputChunks = chunks.length;
 
     console.info(
-      `[llm-guard] Layer 1: input ${inputTokens.toLocaleString()} tokens exceeds ${limit.toLocaleString()} limit — splitting into ${chunks.length} chunks`,
+      `[llm-guard] Layer 1: input ${activeTokens.toLocaleString()} tokens exceeds ${limit.toLocaleString()} limit — splitting into ${chunks.length} chunks`,
     );
 
     const chunkResults = await Promise.all(
@@ -315,7 +465,7 @@ export async function guardedCallLLM(
     );
     mainResult = mergeCallResults(chunkResults, mergeStructuredResults);
   } else {
-    mainResult = await invoke({ provider, apiKey, prompt, systemPrompt, ...rest });
+    mainResult = await invoke({ provider, apiKey, prompt: activePrompt, systemPrompt, ...rest });
   }
 
   // ─── Layer 2: Understanding confirmation ──────────────────────────────────
@@ -327,7 +477,7 @@ export async function guardedCallLLM(
       const confirmCall = await invoke({
         provider,
         apiKey,
-        prompt: buildConfirmationPrompt(prompt),
+        prompt: buildConfirmationPrompt(activePrompt),
         maxTokens: CONFIRMATION_MAX_TOKENS,
         // No schema — plain text only so the LLM can describe gaps freely
       });
@@ -354,7 +504,7 @@ export async function guardedCallLLM(
             "Here is the complete original request. Please provide a full response, ensuring",
             "every required section is covered:",
             "",
-            prompt,
+            activePrompt,
           ].join("\n"),
           systemPrompt,
           ...rest,
@@ -398,7 +548,7 @@ export async function guardedCallLLM(
       // Re-run with halved chunk size so each sub-call fits within the output cap
       log.outputSplitRetry = true;
       const halfTokens = Math.floor(limit * 0.4);
-      const halves = splitPromptIntoParts(prompt, halfTokens, dataSectionStart);
+      const halves = splitPromptIntoParts(activePrompt, halfTokens, dataSectionStart);
 
       const halfResults = await Promise.all(
         halves.map((halfPrompt) =>
