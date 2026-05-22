@@ -18,8 +18,22 @@ import type { LLMProvider } from "@/types/cfp";
 // Token budget
 // =============================================================================
 
+/**
+ * Per-chunk *input* token budget by provider.
+ *
+ * The constraint here is NOT the provider's input window — it's how much
+ * structured output we can get back for each chunk. Gemini 2.5 Flash caps
+ * output at 65_536 tokens (including reasoning), and the bank chunk schema
+ * is ~24 numeric fields + 160-char excerpt per row. Empirically, a chunk
+ * containing more than ~180k tokens of dense filing text produces enough
+ * rows to overflow that output cap (MAX_TOKENS truncation → invalid JSON).
+ *
+ * Trade-off: a smaller per-chunk budget means more chunks per file (more
+ * round-trips). Concurrency=3 in the map phase keeps wall-time bounded.
+ * `extractChunk` also retries with chunk-halving on MAX_TOKENS as a backstop.
+ */
 const PROVIDER_TOKEN_TARGETS: Record<LLMProvider, number> = {
-  gemini: 700_000, // 1M cap, leave headroom for response + system prompt
+  gemini: 180_000, // 1M input cap, but output cap (65k) is the real constraint
   claude: 150_000, // 200k cap
   deepseek: 50_000, // 64k input cap; leave headroom for system prompt + response
 };

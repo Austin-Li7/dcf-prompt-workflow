@@ -3,7 +3,8 @@ import {
   fitLogistic,
   computeNextYearGrowthPct,
   isPlateau,
-  computeCagr,
+  computeLogLinearGrowthPct,
+  classifySeriesShape,
   type TrendPoint,
 } from "@/lib/logistic-regression";
 import type { HistoricalExtractionRow, SegmentTrendResult, TrendAnalysisResult } from "@/types/cfp";
@@ -122,6 +123,10 @@ function fitSegment(
       calculated_plateau_ceiling_usd_m: Math.round(fit.L * 100) / 100,
       is_plateau_detected: saturated,
       modeled_next_year_growth_limit_pct: Math.round(growthLimitPct * 100) / 100,
+      // When the logistic fit succeeds, the plateau ceiling IS the trend signal;
+      // backward-looking CAGR is redundant and risks confusing the prompt formatter.
+      historical_cagr_pct: null,
+      series_shape: classifySeriesShape(series),
       inflection_year: fit.inflection_year,
       steady_growth_start_year: steadyYear,
       data_points_used: series.length,
@@ -131,24 +136,68 @@ function fitSegment(
     };
   }
 
-  // --- Fallback: CAGR when logistic fit failed ---
-  const cagr = computeCagr(series);
+  // --- Logistic fit failed: classify the series shape and decide what to surface ---
+  //
+  // Old behaviour (the bug we're fixing): always fall through to a two-point
+  // CAGR and pass it to the LLM as a "growth limit". For declining or
+  // non-monotone segments this produced misleading negative ceilings (e.g.
+  // SoFi Technology Platform → -30.1 %) that the model dutifully projected.
+  //
+  // New behaviour: only emit a fallback growth number when the series is
+  // monotone increasing — and even then label it as INFORMATIONAL historical
+  // CAGR, not a forward-looking limit. For declining / non-monotone / too-
+  // short series we emit no number at all, and the prompt formatter tells
+  // the LLM to derive growth from synergies, competition, and management
+  // guidance instead.
+  const shape = classifySeriesShape(series);
   const steadyYear = userSteadyYear ?? lastYear;
+
+  let historicalCagrPct: number | null = null;
+  let shapeNote: string;
+
+  switch (shape) {
+    case "increasing": {
+      const growth = computeLogLinearGrowthPct(series);
+      historicalCagrPct = growth != null ? Math.round(growth * 100) / 100 : null;
+      shapeNote = historicalCagrPct != null
+        ? `Historical CAGR (log-linear regression): ${historicalCagrPct.toFixed(1)}% — informational only, not a forward ceiling.`
+        : "Series is monotone increasing but log-linear regression failed.";
+      break;
+    }
+    case "decreasing":
+      shapeNote =
+        "Series declines monotonically — likely scope change, divestiture, or sunset segment. " +
+        "No reliable forward growth signal; forecast must be derived from competition, synergies, and management guidance.";
+      break;
+    case "non_monotone": {
+      // Find the peak / trough year for the review note so analysts can audit.
+      const peakIdx = series.reduce(
+        (best, p, i) => (p.value > series[best].value ? i : best),
+        0,
+      );
+      shapeNote =
+        `Series is non-monotone (peak in ${series[peakIdx].year} at $${series[peakIdx].value.toFixed(0)}M) — ` +
+        "likely scope change, accounting reclassification, or one-time event. No fallback growth rate computed.";
+      break;
+    }
+    case "insufficient":
+    default:
+      shapeNote = "Insufficient history (≤2 positive data points) — no trend can be inferred.";
+      break;
+  }
 
   return {
     calculated_plateau_ceiling_usd_m: null,
     is_plateau_detected: false,
-    modeled_next_year_growth_limit_pct: cagr != null ? Math.round(cagr * 100) / 100 : null,
+    modeled_next_year_growth_limit_pct: null, // see comment block above
+    historical_cagr_pct: historicalCagrPct,
+    series_shape: shape,
     inflection_year: null,
     steady_growth_start_year: steadyYear,
     data_points_used: series.length,
     fit_quality_r2: null,
     fit_ok: false,
-    review_note: `Logistic fit failed (${fit.error ?? "unknown reason"}). ${
-      cagr != null
-        ? `CAGR fallback used: ${cagr.toFixed(1)}%.`
-        : "Insufficient data for any growth estimate."
-    }`,
+    review_note: `Logistic fit failed (${fit.error ?? "unknown reason"}). ${shapeNote}`,
   };
 }
 

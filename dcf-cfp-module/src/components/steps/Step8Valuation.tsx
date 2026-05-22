@@ -691,7 +691,11 @@ export default function Step8Valuation() {
           <InfoPanel title="Market Sanity Check" icon={<BarChart3 size={15} />}>
             {competitors.length > 0 ? (
               <>
-                <p className="mb-2 text-zinc-500">Step 3 primary competitors — compare implied multiples against these peers before acting on model output.</p>
+                <p className="mb-2 text-zinc-500">
+                  Step 3 primary competitors — compare implied multiples against these peers before acting on model output.
+                  The badge shows <span className="text-zinc-300">{state.profile.companyName || "the subject company"}</span>&rsquo;s
+                  position in that category relative to the peer (not the peer&rsquo;s own standing).
+                </p>
                 <ul className="space-y-1.5">
                   {competitors.map((c, i) => (
                     <li key={i} className="flex items-start justify-between gap-2">
@@ -704,7 +708,7 @@ export default function Step8Valuation() {
                         c.competitive_status === "Challenger" ? "bg-amber-900/40 text-amber-300" :
                                                                 "bg-zinc-800 text-zinc-400"
                       }`}>
-                        {c.competitive_status}
+                        {(state.profile.companyName || "Subject")}: {c.competitive_status}
                       </span>
                     </li>
                   ))}

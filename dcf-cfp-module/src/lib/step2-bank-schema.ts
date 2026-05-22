@@ -373,7 +373,62 @@ function normalizeBankPayload(payload: unknown): unknown {
     }
   }
 
+  // Prune dangling row_id references in validation_warnings rather than hard-failing.
+  // Bank mode is especially prone to this because rows without a primary banking
+  // metric are auto-moved into excluded_items above — any warning the model
+  // attached to such a row would otherwise leave a dangling pointer.
+  pruneDanglingBankWarningRowIds(p);
+
   return p;
+}
+
+/**
+ * Strips validation_warnings[].row_ids[] entries that don't appear in rows[].row_id.
+ * Mutates `p` in place. Appends a single meta-warning when any pruning occurred.
+ * Mirrors the helper in step2-schema.ts; duplicated rather than shared to keep
+ * each schema file self-contained (matching the existing per-file sanitizer pattern).
+ */
+function pruneDanglingBankWarningRowIds(p: Record<string, unknown>): void {
+  if (!Array.isArray(p.rows) || !Array.isArray(p.validation_warnings)) return;
+
+  const knownRowIds = new Set(
+    (p.rows as Array<Record<string, unknown>>)
+      .map((row) => row.row_id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  );
+
+  let prunedCount = 0;
+  const affectedCodes: string[] = [];
+
+  const repaired = (p.validation_warnings as Array<Record<string, unknown>>).map((warning) => {
+    if (!Array.isArray(warning.row_ids)) return warning;
+    const original = warning.row_ids as unknown[];
+    const kept = original.filter(
+      (id): id is string => typeof id === "string" && knownRowIds.has(id),
+    );
+    const dropped = original.length - kept.length;
+    if (dropped > 0) {
+      prunedCount += dropped;
+      if (typeof warning.code === "string") affectedCodes.push(warning.code);
+    }
+    return { ...warning, row_ids: kept };
+  });
+
+  if (prunedCount > 0) {
+    const uniqueCodes = Array.from(new Set(affectedCodes));
+    const codesPreview =
+      uniqueCodes.join(", ").length > 120
+        ? `${uniqueCodes.slice(0, 4).join(", ")}, …`
+        : uniqueCodes.join(", ");
+    repaired.push({
+      code: "validation_warning_unknown_row_ids",
+      severity: "info",
+      message: `Auto-repair: removed ${prunedCount} dangling row_id reference(s) from ${uniqueCodes.length} warning(s) [${codesPreview}]; referenced rows were not in rows[].`,
+      row_ids: [],
+    });
+  }
+
+  p.validation_warnings = repaired;
 }
 
 export function parseStep2BankStructuredResult(payload: unknown): Step2BankStructuredResult {

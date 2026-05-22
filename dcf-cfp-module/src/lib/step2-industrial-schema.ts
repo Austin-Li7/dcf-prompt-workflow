@@ -15,9 +15,26 @@ import type { HistoricalExtractionRow } from "@/types/cfp";
 // ---------------------------------------------------------------------------
 
 const nullableNum = z.number().nullable();
+/**
+ * Length-capped, nullable string preprocessor.
+ *   - empty string → null (so models that emit "" for "no data" don't fail .min(1))
+ *   - over-length string → truncated to `max` chars (so a slightly-long excerpt
+ *     or locator can't reject the entire Step 2 reduce result)
+ *   - otherwise pass through unchanged
+ *
+ * The truncation behaviour mirrors `nullableStr` / `boundedStr` in
+ * step2-bank-schema.ts and the `source_excerpt` preprocess in chunk-schema.ts.
+ * Reduce-phase failures are especially costly because all map-phase Gemini
+ * calls have already succeeded by the time the schema runs.
+ */
 const boundedStr = (max: number) =>
   z.preprocess(
-    (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+    (v) => {
+      if (typeof v !== "string") return v;
+      if (v.trim() === "") return null;
+      if (v.length > max) return v.slice(0, max);
+      return v;
+    },
     z.string().max(max).nullable(),
   );
 

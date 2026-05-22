@@ -16,7 +16,16 @@ const SourceSchema = z.object({
   source_type: z.enum(["uploaded_file", "text_notes", "derived", "not_available"]),
   name: z.string().min(1),
   locator: z.string().min(1).nullable(),
-  excerpt: z.string().min(1).max(220).nullable(),
+  // Auto-truncate over-length excerpts before validation. The `locator` field
+  // carries the full citation; `excerpt` is a brief proof-of-disclosure signal.
+  // Rejecting the entire Step 2 reduce result over a slightly-long excerpt
+  // wastes all upstream work, so we clip at the 220-char cap instead. Mirrors
+  // the source_excerpt preprocess in chunk-schema.ts (chunk-row level) and
+  // the nullableStr helper in step2-bank-schema.ts.
+  excerpt: z.preprocess(
+    (v) => (typeof v === "string" && v.length > 220 ? v.slice(0, 220) : v),
+    z.string().min(1).max(220).nullable(),
+  ),
 });
 
 const RowSchema = z.object({
@@ -261,7 +270,69 @@ function normalizeStep2StructuredPayload(payload: unknown): unknown {
     }
   }
 
+  // Prune dangling row_id references in validation_warnings rather than hard-failing.
+  // The model occasionally emits a warning whose row_ids[] point at:
+  //   (a) a slightly-renamed row that exists under a different row_id,
+  //   (b) a row it moved to excluded_items[] instead of rows[], or
+  //   (c) a row it forgot to emit.
+  // The warning's message is still useful even when the pointer is bad, so we
+  // drop only the unresolvable row_ids (preserving the rest) and append a
+  // meta-warning describing what we cleaned up. This mirrors the
+  // rows_missing_step1_mapping pattern above.
+  pruneDanglingWarningRowIds(p);
+
   return p;
+}
+
+/**
+ * Strips validation_warnings[].row_ids[] entries that don't appear in rows[].row_id.
+ * Mutates `p` in place. Appends a single meta-warning when any pruning occurred,
+ * including the list of original warning codes whose pointers were cleaned, so
+ * the analyst can investigate (typically: row renamed, row moved to
+ * excluded_items, or pointer hallucinated by the model).
+ */
+function pruneDanglingWarningRowIds(p: Record<string, unknown>): void {
+  if (!Array.isArray(p.rows) || !Array.isArray(p.validation_warnings)) return;
+
+  const knownRowIds = new Set(
+    (p.rows as Array<Record<string, unknown>>)
+      .map((row) => row.row_id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  );
+
+  let prunedCount = 0;
+  const affectedCodes: string[] = [];
+
+  const repaired = (p.validation_warnings as Array<Record<string, unknown>>).map((warning) => {
+    if (!Array.isArray(warning.row_ids)) return warning;
+    const original = warning.row_ids as unknown[];
+    const kept = original.filter(
+      (id): id is string => typeof id === "string" && knownRowIds.has(id),
+    );
+    const dropped = original.length - kept.length;
+    if (dropped > 0) {
+      prunedCount += dropped;
+      if (typeof warning.code === "string") affectedCodes.push(warning.code);
+    }
+    return { ...warning, row_ids: kept };
+  });
+
+  if (prunedCount > 0) {
+    const uniqueCodes = Array.from(new Set(affectedCodes));
+    // Keep message under the 220-char schema cap by truncating the code list.
+    const codesPreview =
+      uniqueCodes.join(", ").length > 120
+        ? `${uniqueCodes.slice(0, 4).join(", ")}, …`
+        : uniqueCodes.join(", ");
+    repaired.push({
+      code: "validation_warning_unknown_row_ids",
+      severity: "info",
+      message: `Auto-repair: removed ${prunedCount} dangling row_id reference(s) from ${uniqueCodes.length} warning(s) [${codesPreview}]; referenced rows were not in rows[].`,
+      row_ids: [],
+    });
+  }
+
+  p.validation_warnings = repaired;
 }
 
 export function parseStep2StructuredResult(payload: unknown): Step2StructuredResult {

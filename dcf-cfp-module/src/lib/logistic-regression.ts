@@ -161,7 +161,12 @@ export function isPlateau(fit: LogisticFitResult, lastValue: number): boolean {
 }
 
 /**
- * Fallback CAGR when there are only 2 data points (no logistic fit possible).
+ * Naive two-point CAGR between the first and last positive data points.
+ * **Deprecated for trend-analysis use** because it gives meaningless results
+ * for any non-monotone series (segment rebrand, divestiture, cyclical decline,
+ * one-time spike). Retained only for callers that explicitly want the legacy
+ * behaviour; prefer `computeLogLinearGrowthPct` paired with `classifySeriesShape`.
+ *
  * Returns null when data is insufficient.
  */
 export function computeCagr(data: TrendPoint[]): number | null {
@@ -172,4 +177,88 @@ export function computeCagr(data: TrendPoint[]): number | null {
   const years = last.year - first.year;
   if (years === 0 || first.value <= 0) return null;
   return ((last.value / first.value) ** (1 / years) - 1) * 100;
+}
+
+// ---------------------------------------------------------------------------
+// Shape classifier — preconditions for trustable fallback growth estimates
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape of a per-segment time series, used to decide whether a fallback
+ * historical growth rate is meaningful or whether the segment's history
+ * is too discontinuous to anchor a forecast.
+ *
+ *   "increasing"   — monotone non-decreasing; log-linear CAGR is meaningful.
+ *   "decreasing"   — monotone non-increasing; likely scope change, divestiture,
+ *                    or sunset segment — no forecast anchor should be derived.
+ *   "non_monotone" — peak or trough strictly inside the window — likely scope
+ *                    change, accounting reclassification, or one-time event.
+ *   "insufficient" — fewer than 3 positive data points — no shape can be
+ *                    inferred at all.
+ *
+ * Threshold: a year-over-year change within ±2 % is treated as "flat" so that
+ * trivial measurement noise does not flip the shape classification.
+ */
+export type SeriesShape = "increasing" | "decreasing" | "non_monotone" | "insufficient";
+
+export function classifySeriesShape(data: TrendPoint[]): SeriesShape {
+  const valid = data.filter((d) => d.value > 0).sort((a, b) => a.year - b.year);
+  if (valid.length < 3) return "insufficient";
+
+  const FLAT_THRESHOLD = 0.02; // ±2 % YoY counts as flat
+  let sawIncrease = false;
+  let sawDecrease = false;
+
+  for (let i = 1; i < valid.length; i++) {
+    const prev = valid[i - 1].value;
+    const curr = valid[i].value;
+    const change = (curr - prev) / prev;
+    if (change > FLAT_THRESHOLD) sawIncrease = true;
+    if (change < -FLAT_THRESHOLD) sawDecrease = true;
+  }
+
+  if (sawIncrease && sawDecrease) return "non_monotone";
+  if (sawIncrease) return "increasing";
+  if (sawDecrease) return "decreasing";
+  // All YoY changes were within ±2 % — treat as effectively flat / increasing
+  // so the log-linear CAGR (≈ 0 %) gets through as a valid signal.
+  return "increasing";
+}
+
+// ---------------------------------------------------------------------------
+// Robust growth estimator — log-linear regression
+// ---------------------------------------------------------------------------
+
+/**
+ * Annualised growth rate estimated by fitting ln(y) = α + β·t across ALL
+ * data points and returning `(exp(β) - 1) × 100`. Unlike `computeCagr`, this
+ * uses every observation and is robust to a single outlier year — much closer
+ * to what an analyst means by "historical growth rate".
+ *
+ * Returns null when fewer than 2 positive data points are available or when
+ * the regression is numerically degenerate (zero variance in years).
+ *
+ * Note: this still requires positive values; segments that hit zero at any
+ * point are filtered out (logarithm undefined). Callers should classify the
+ * series with `classifySeriesShape` first — for a strictly declining series
+ * the regression slope will be negative and the result will be a negative
+ * growth rate that should not be used to anchor a forward forecast.
+ */
+export function computeLogLinearGrowthPct(data: TrendPoint[]): number | null {
+  const valid = data.filter((d) => d.value > 0).sort((a, b) => a.year - b.year);
+  if (valid.length < 2) return null;
+
+  // Need at least 2 distinct years — otherwise the regression is degenerate
+  // (zero variance in x), which our linearRegression helper silently returns
+  // as slope=0 rather than NaN. Refuse explicitly so callers get null
+  // (the "no signal" path) instead of a fake 0% growth rate.
+  const distinctYears = new Set(valid.map((d) => d.year));
+  if (distinctYears.size < 2) return null;
+
+  const ts = valid.map((d) => d.year);
+  const ys = valid.map((d) => Math.log(d.value));
+  const { slope } = linearRegression(ts, ys);
+
+  if (!isFinite(slope)) return null;
+  return (Math.exp(slope) - 1) * 100;
 }

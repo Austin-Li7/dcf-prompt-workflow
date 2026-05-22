@@ -32,6 +32,7 @@ import {
   getMfFileResults,
   deleteMfSession,
 } from "./extraction-state";
+import { extractWithBisectRetry } from "./chunk-bisect-retry";
 import {
   RateLimitError,
   UsageExhaustedError,
@@ -169,25 +170,36 @@ async function extractChunk(
   hintsText: string | null,
   onRateLimit: (retryIn: number, attempt: number) => void,
 ): Promise<IndustrialChunkSummary> {
-  const response = await postJson<ChunkExtractionResponse>(
-    "/api/extract-history",
-    {
-      action: "extract-chunk",
-      chunkContent,
-      chunkMetadata: { chunkId, sourceFile, chunkIndex, totalChunks },
-      architecture: options.architecture,
-      provider: options.provider,
-      apiKey: options.apiKey,
-      workflowMode: "industrial-pdf",
-      hintsText: hintsText ?? undefined,
-    },
-    onRateLimit,
-  );
+  // Delegate MAX_TOKENS recovery to the shared helper (chunk-bisect-retry.ts).
+  // The fetcher closure encapsulates the HTTP call; the helper handles
+  // truncation detection, chunk halving, recursive retry, and result merging.
+  // postJson throws on non-2xx, so the truncation message from the route's
+  // 422 response surfaces as a thrown Error which the helper inspects.
+  return extractWithBisectRetry<IndustrialChunkSummary>(
+    chunkContent,
+    chunkId,
+    async (content, id) => {
+      const response = await postJson<ChunkExtractionResponse>(
+        "/api/extract-history",
+        {
+          action: "extract-chunk",
+          chunkContent: content,
+          chunkMetadata: { chunkId: id, sourceFile, chunkIndex, totalChunks },
+          architecture: options.architecture,
+          provider: options.provider,
+          apiKey: options.apiKey,
+          workflowMode: "industrial-pdf",
+          hintsText: hintsText ?? undefined,
+        },
+        onRateLimit,
+      );
 
-  if (!response.summary) {
-    throw new Error(response.error ?? "No summary returned from extract-chunk.");
-  }
-  return response.summary as IndustrialChunkSummary;
+      if (!response.summary) {
+        throw new Error(response.error ?? "No summary returned from extract-chunk.");
+      }
+      return response.summary as IndustrialChunkSummary;
+    },
+  );
 }
 
 // =============================================================================

@@ -72,7 +72,7 @@ function buildTextReport(companyName: string, categories: CategoryCompetitionEnt
     lines.push(`${i + 1}. CATEGORY: ${c.category}`);
     lines.push(subDivider);
     lines.push(`   Primary Competitor:  ${c.primaryCompetitor}`);
-    lines.push(`   Competitive Status:  ${c.competitiveStatus}`);
+    lines.push(`   ${companyName}'s Competitive Position:  ${c.competitiveStatus}  (vs. ${c.primaryCompetitor})`);
     lines.push(`   Basis for Pairing:   ${c.basisForPairing}`);
     lines.push("");
     lines.push("   FORCES:");
@@ -881,7 +881,10 @@ export default function Step3Competition() {
                     </div>
                   </label>
                   <label className="block">
-                    <span className="text-xs text-zinc-500">Competitive status</span>
+                    <span className="text-xs text-zinc-500">
+                      {(state.profile.companyName || "Company")}&rsquo;s competitive position
+                      {current.primaryCompetitor ? ` (vs. ${current.primaryCompetitor})` : ""}
+                    </span>
                     <select
                       value={current.competitiveStatus}
                       onChange={(event) => updateCurrentCategory("competitiveStatus", event.target.value)}
@@ -1205,7 +1208,7 @@ export default function Step3Competition() {
 
                     <div className="border-t border-zinc-800 px-4 py-3">
                       <div className="mb-2 text-xs text-zinc-500">
-                        <span className="text-zinc-400">Status:</span> {cat.competitiveStatus} &middot;{" "}
+                        <span className="text-zinc-400">{(state.profile.companyName || "Company")}&rsquo;s position:</span> {cat.competitiveStatus} &middot;{" "}
                         <span className="text-zinc-400">Basis:</span> {cat.basisForPairing}
                       </div>
                       {(cat.verificationNote || cat.confidence || cat.sourceQuality) && (

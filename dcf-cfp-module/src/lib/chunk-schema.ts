@@ -19,7 +19,12 @@ export const ChunkRowSchema = z.object({
   revenue_usd_m: z.number().nullable(),
   operating_income_usd_m: z.number().nullable(),
   /** Short excerpt proving where the number came from (max 160 chars). */
-  source_excerpt: z.string().max(160),
+  // Auto-truncate to 160 chars: models routinely paste slightly-longer excerpts
+  // and rejecting the whole chunk over a 5-char overflow is wasteful.
+  source_excerpt: z.preprocess(
+    (v) => (typeof v === "string" && v.length > 160 ? v.slice(0, 160) : v),
+    z.string().max(160),
+  ),
   confidence: z.enum(["high", "medium", "low"]),
 });
 
@@ -122,7 +127,12 @@ export const BankChunkRowSchema = z.object({
   cash_and_hqla_usd_m: z.number().nullable(),
   htm_bonds_usd_m: z.number().nullable(),
   unrealized_losses_htm_usd_m: z.number().nullable(),
-  source_excerpt: z.string().max(160),
+  // Auto-truncate to 160 chars: models routinely paste slightly-longer excerpts
+  // and rejecting the whole chunk over a 5-char overflow is wasteful.
+  source_excerpt: z.preprocess(
+    (v) => (typeof v === "string" && v.length > 160 ? v.slice(0, 160) : v),
+    z.string().max(160),
+  ),
   confidence: z.enum(["high", "medium", "low"]),
 });
 
@@ -162,7 +172,12 @@ export const IndustrialChunkRowSchema = z.object({
   /** Headcount as reported (integer, or null if not disclosed). */
   headcount: z.number().int().nullable(),
   /** Short excerpt proving where the number came from (max 160 chars). */
-  source_excerpt: z.string().max(160),
+  // Auto-truncate to 160 chars: models routinely paste slightly-longer excerpts
+  // and rejecting the whole chunk over a 5-char overflow is wasteful.
+  source_excerpt: z.preprocess(
+    (v) => (typeof v === "string" && v.length > 160 ? v.slice(0, 160) : v),
+    z.string().max(160),
+  ),
   confidence: z.enum(["high", "medium", "low"]),
 });
 

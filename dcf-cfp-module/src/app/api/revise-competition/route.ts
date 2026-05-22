@@ -93,6 +93,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
       userFeedback,
       "Task:",
       "- Update only fields affected by the user feedback.",
+      "- competitive_status reflects the SUBJECT company's standing in this category (Leader / Challenger / Unclear) RELATIVE TO primary_competitor — never the competitor's own standing.",
       "- Preserve category_id, category, mapped_from_step1_ids, existing claim/source identifiers, and the structured shape.",
       "- Keep Review Prompt V2 honesty: if evidence is weak, lower confidence/source_quality and set human_review_required=true.",
       "- Competitor pairing must still be judged by direct overlap, revenue scale, and market position.",

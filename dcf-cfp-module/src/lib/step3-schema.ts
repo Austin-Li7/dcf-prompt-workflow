@@ -77,6 +77,14 @@ export const Step3CategorySchema = z.object({
   materiality: z.enum(["HIGH", "MEDIUM", "LOW"]),
   pairing_status: z.enum(["VALIDATED", "PROVISIONAL", "LOW_EVIDENCE"]).default("PROVISIONAL"),
   primary_competitor: z.string().min(1),
+  /**
+   * The SUBJECT company's standing in this category, measured relative to
+   * `primary_competitor`. "Leader" = the subject leads; "Challenger" = the
+   * subject trails the competitor; "Unclear" = relative position is
+   * indeterminate. This is NOT the competitor's own standing. Downstream
+   * (Step 5 forecast risk context, Step 8 valuation colour-coding) reads it
+   * as the subject's position, so an inversion would mislead the valuation.
+   */
   competitive_status: z.enum(["Leader", "Challenger", "Unclear"]),
   basis_for_pairing: boundedStr(320),
   basis_claim_ids: z.array(z.string().min(1)).min(1),

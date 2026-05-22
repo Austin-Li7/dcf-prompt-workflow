@@ -24,6 +24,7 @@ const STEP3_SYSTEM_PROMPT = [
   'The top-level schema_version field must be exactly "v5.5".',
   "Use materiality compression: analyze only categories that can affect forecast assumptions.",
   "Every competitor pairing must be grounded in direct segment overlap, revenue scale, or verified market position.",
+  "competitive_status describes the SUBJECT company (the company named in the task) — i.e. whether the subject is the Leader or Challenger in that category, measured RELATIVE TO primary_competitor. It is NOT the competitor's own standing. Use 'Unclear' only when the subject's relative position genuinely cannot be determined from sources.",
   "Prefer official filings, company releases, and reputable market research. Do not fabricate URLs.",
   "If evidence is weak or overlap is partial, set lower confidence and human_review_required=true.",
   "Every category, pairing basis, and force must cite claim_id and source_ids.",

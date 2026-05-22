@@ -22,6 +22,7 @@ import type { LLMProvider, WorkflowMode } from "@/types/cfp";
 import type { BankChunkSummary } from "./chunk-schema";
 import type { Step2BankStructuredResult } from "./step2-bank-schema";
 import { chunkPdfText } from "./extraction-chunker";
+import { extractWithBisectRetry } from "./chunk-bisect-retry";
 import { buildHintPromptSection, type FilingHints, type FilingTypeHints } from "./filing-hints";
 import type { DetectedFiling } from "./filing-detector";
 import {
@@ -262,25 +263,34 @@ async function extractChunk(
   hintsText: string | null,
   onRateLimit: (retryIn: number, attempt: number) => void,
 ): Promise<BankChunkSummary> {
-  const response = await postJson<ChunkExtractionResponse>(
-    "/api/extract-history",
-    {
-      action: "extract-chunk",
-      chunkContent,
-      chunkMetadata: { chunkId, sourceFile, chunkIndex, totalChunks },
-      architecture: options.architecture,
-      provider: options.provider,
-      apiKey: options.apiKey,
-      workflowMode: "bank",
-      hintsText: hintsText ?? undefined,
-    },
-    onRateLimit,
-  );
+  // Delegate MAX_TOKENS recovery to the shared helper (chunk-bisect-retry.ts).
+  // The fetcher closure encapsulates the HTTP call; the helper handles
+  // truncation detection, chunk halving, recursive retry, and result merging.
+  return extractWithBisectRetry<BankChunkSummary>(
+    chunkContent,
+    chunkId,
+    async (content, id) => {
+      const response = await postJson<ChunkExtractionResponse>(
+        "/api/extract-history",
+        {
+          action: "extract-chunk",
+          chunkContent: content,
+          chunkMetadata: { chunkId: id, sourceFile, chunkIndex, totalChunks },
+          architecture: options.architecture,
+          provider: options.provider,
+          apiKey: options.apiKey,
+          workflowMode: "bank",
+          hintsText: hintsText ?? undefined,
+        },
+        onRateLimit,
+      );
 
-  if (!response.summary) {
-    throw new Error(response.error ?? "No summary returned from extract-chunk.");
-  }
-  return response.summary as BankChunkSummary;
+      if (!response.summary) {
+        throw new Error(response.error ?? "No summary returned from extract-chunk.");
+      }
+      return response.summary as BankChunkSummary;
+    },
+  );
 }
 
 // =============================================================================

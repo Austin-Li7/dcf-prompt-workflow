@@ -375,7 +375,11 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
     apiKey,
     prompt: userPrompt,
     systemPrompt,
-    maxTokens: isBank ? 32768 : isIndustrialPdf ? 32768 : 8192,
+    // Gemini 2.5 Flash's hard cap is 65536 output tokens; bank/industrial
+    // chunk summaries are wide (≥ 24 numeric fields per row × many rows) and
+    // were truncating at 32768. Default mode keeps the previous budget because
+    // its row shape is much narrower.
+    maxTokens: isBank ? 65536 : isIndustrialPdf ? 65536 : 8192,
     responseSchema,
     responseToolName: "submit_chunk_summary",
     responseToolDescription: "Return the extracted financial rows for this data chunk.",

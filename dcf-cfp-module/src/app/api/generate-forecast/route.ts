@@ -188,26 +188,52 @@ function formatSegmentTrendCeiling(
 
   const parts: string[] = [
     "",
-    `BACKEND TREND CEILING for "${targetSegment}" (logistic S-curve regression — deterministic, no LLM):`,
+    `BACKEND TREND ANALYSIS for "${targetSegment}" (logistic S-curve regression — deterministic, no LLM):`,
   ];
 
+  // Branch on what kind of trend signal we actually have. Three cases:
+  //   1. Logistic fit succeeded → real plateau ceiling, behaves as a forward
+  //      growth limit (the original intent).
+  //   2. Fit failed but series is monotone increasing → informational
+  //      historical CAGR only; the prompt must NOT treat it as a ceiling.
+  //   3. Fit failed and series is declining / non-monotone / too short →
+  //      no number at all; tell the model to derive growth from other inputs.
   if (r.fit_ok && r.calculated_plateau_ceiling_usd_m != null) {
     parts.push(`  Plateau ceiling: $${r.calculated_plateau_ceiling_usd_m.toFixed(0)}M`);
     parts.push(`  Next-year algorithmic growth limit: ${r.modeled_next_year_growth_limit_pct?.toFixed(1) ?? "n/a"}%`);
     parts.push(`  Saturation detected: ${r.is_plateau_detected ? "YES — segment is ≥80% of plateau" : "No"}`);
     parts.push(`  Fit quality (R²): ${r.fit_quality_r2?.toFixed(3) ?? "n/a"}`);
+    parts.push(
+      "STRATEGIC OVERRIDE RULE: If your modeled yoy_growth_pct exceeds the algorithmic growth limit above,",
+      "  you MUST populate growth_justification with the specific named catalyst breaking the mathematical curve",
+      "  (e.g. 'Competitor X filed for bankruptcy, releasing Y% of TAM' or 'New product launch expands addressable market by $ZM').",
+      "  Vague optimism ('strong demand', 'market tailwinds') is not a valid override.",
+      "  If growth_justification is null and yoy_growth_pct > algorithmic limit, set workflow_status to NEEDS_REVIEW.",
+    );
+  } else if (r.historical_cagr_pct != null) {
+    // Informational only — never frame as a ceiling. Sanity floor (C1) still
+    // applies: a positive log-linear CAGR is a fine *context* signal even
+    // when modest; we don't gate it. Negative CAGRs are blocked upstream by
+    // the shape classifier (they'd surface only via fit_ok=true plateau).
+    parts.push(`  No plateau fit. Series shape: ${r.series_shape ?? "unknown"}.`);
+    parts.push(`  Historical CAGR (log-linear, INFORMATIONAL — do not use as a forward ceiling): ${r.historical_cagr_pct.toFixed(1)}%`);
+    parts.push(`  Review note: ${r.review_note}`);
+    parts.push(
+      "FORECAST GUIDANCE: derive yoy_growth_pct from Step 3 (competitive position) and Step 4",
+      "  (synergies, capital allocation, management guidance). Do not anchor your forecast to the historical CAGR above.",
+      "  If you choose to project growth above the historical CAGR, document the specific catalyst in growth_justification.",
+    );
   } else {
-    const fallback = r.modeled_next_year_growth_limit_pct;
-    parts.push(`  No plateau fit (${r.review_note}). CAGR fallback: ${fallback != null ? fallback.toFixed(1) + "%" : "unknown"}`);
+    // Declining, non-monotone, or insufficient — no number is safe to emit.
+    parts.push(`  No plateau fit. Series shape: ${r.series_shape ?? "unknown"}.`);
+    parts.push(`  ${r.review_note}`);
+    parts.push(
+      "FORECAST GUIDANCE: the historical revenue series is not a reliable trend anchor for this segment.",
+      "  Derive yoy_growth_pct from Step 3 (competitive position), Step 4 (synergies, capital allocation),",
+      "  and any management guidance in Step 1. Document the specific drivers in growth_justification.",
+      "  Set workflow_status to NEEDS_REVIEW so an analyst confirms the chosen growth rate.",
+    );
   }
-
-  parts.push(
-    "STRATEGIC OVERRIDE RULE: If your modeled yoy_growth_pct exceeds the algorithmic growth limit above,",
-    "  you MUST populate growth_justification with the specific named catalyst breaking the mathematical curve",
-    "  (e.g. 'Competitor X filed for bankruptcy, releasing Y% of TAM' or 'New product launch expands addressable market by $ZM').",
-    "  Vague optimism ('strong demand', 'market tailwinds') is not a valid override.",
-    "  If growth_justification is null and yoy_growth_pct > algorithmic limit, set workflow_status to NEEDS_REVIEW.",
-  );
 
   return parts.join("\n");
 }

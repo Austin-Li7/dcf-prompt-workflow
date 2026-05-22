@@ -557,8 +557,31 @@ export interface SegmentTrendResult {
   calculated_plateau_ceiling_usd_m: number | null;
   /** True when the last observed value is ≥80% of the modeled plateau — saturation is the binding constraint. */
   is_plateau_detected: boolean;
-  /** Discrete growth rate the model predicts from last observed year → next year (%). Null when insufficient data. */
+  /**
+   * Forward-looking growth ceiling derived from the logistic plateau, in % per year.
+   * Populated **only when `fit_ok: true`** — i.e. there is a real S-curve plateau
+   * the segment is approaching. When the logistic fit fails this field is null;
+   * any backward-looking growth signal is exposed via `historical_cagr_pct` instead.
+   */
   modeled_next_year_growth_limit_pct: number | null;
+  /**
+   * Backward-looking historical growth rate (log-linear regression across all
+   * positive data points), in % per year. Populated **only when the logistic
+   * fit fails AND the series shape is "increasing"** — otherwise null.
+   *
+   * This is INFORMATIONAL ONLY. Callers must not treat it as a forecast ceiling:
+   * a positive value just means history was growing on average; it does not
+   * imply the segment will keep growing at that rate.
+   */
+  historical_cagr_pct: number | null;
+  /**
+   * Classified shape of the underlying time series. Used by prompt formatters
+   * to decide whether to surface a growth number to the LLM at all. See the
+   * `SeriesShape` enum in `src/lib/logistic-regression.ts` for semantics.
+   *
+   * Null only for legacy artifacts produced before this field existed.
+   */
+  series_shape: "increasing" | "decreasing" | "non_monotone" | "insufficient" | null;
   /** Year of maximum growth rate on the logistic curve (may be future). Null when fit failed. */
   inflection_year: number | null;
   /** Year from which the plateau model should govern forecasts (user override or auto-detected inflection). */
@@ -639,6 +662,7 @@ export interface PorterForces {
 export interface CategoryCompetitionEntry {
   category: string;
   primaryCompetitor: string;
+  /** The SUBJECT company's standing in this category relative to `primaryCompetitor` (Leader/Challenger/Unclear) — NOT the competitor's standing. */
   competitiveStatus: string;
   basisForPairing: string;
   forces: PorterForces;
@@ -694,6 +718,7 @@ export interface Step3StructuredCategory {
   materiality: "HIGH" | "MEDIUM" | "LOW";
   pairing_status: "VALIDATED" | "PROVISIONAL" | "LOW_EVIDENCE";
   primary_competitor: string;
+  /** The SUBJECT company's standing in this category relative to `primary_competitor` (Leader/Challenger/Unclear) — NOT the competitor's standing. */
   competitive_status: "Leader" | "Challenger" | "Unclear";
   basis_for_pairing: string;
   basis_claim_ids: string[];
@@ -746,6 +771,7 @@ export interface Step3ReviewCategory {
   sources: Step3Source[];
   editable: {
     primaryCompetitor: string;
+    /** The SUBJECT company's standing in this category relative to `primaryCompetitor` (Leader/Challenger/Unclear) — NOT the competitor's standing. */
     competitiveStatus: "Leader" | "Challenger" | "Unclear";
     basisForPairing: string;
   };
