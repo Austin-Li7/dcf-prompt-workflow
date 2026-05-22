@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   GEMINI_STEP5_RESPONSE_SCHEMA,
   STEP5_RESPONSE_SCHEMA,
@@ -338,7 +339,7 @@ Rules:
 ${modeRules}
 ${liquidityConstraint}`;
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       prompt,

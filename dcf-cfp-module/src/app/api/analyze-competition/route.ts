@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep3ReviewState,
   GEMINI_STEP3_RESPONSE_SCHEMA,
@@ -85,7 +86,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompet
       );
     }
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: STEP3_SYSTEM_PROMPT,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA,
   parseStep3Category,
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
       "- Always note in verification_note: licenses held (bank charter, money transmitter, broker-dealer), and any pending regulation that could shift the competitive dynamic.",
     ].join("\n");
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: REVISE_SYSTEM_PROMPT,

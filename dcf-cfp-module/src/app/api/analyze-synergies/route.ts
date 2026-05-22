@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep4ReviewState,
   GEMINI_STEP4_RESPONSE_SCHEMA,
@@ -109,7 +110,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynerg
       return NextResponse.json({ paths: [], error: "No API key found for the selected provider.", requiresApiKey: true }, { status: 401 });
     }
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: STEP4_SYSTEM_PROMPT,

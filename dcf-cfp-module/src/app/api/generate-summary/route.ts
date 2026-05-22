@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import type { LLMProvider, HistoricalData, HistoricalMarginPoint } from "@/types/cfp";
 import type {
   GenerateSummaryResponse,
@@ -283,7 +284,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
     ].join("\n");
 
     if (mode === "INDUSTRIAL") {
-      const result = await callLLM({
+      const result = await guardedCallLLM({
         provider: llmProvider,
         apiKey,
         prompt: `${INDUSTRIAL_PROMPT_TASKS}\n\n${dataBlock}`,
@@ -301,7 +302,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
     }
 
     if (mode === "BANK") {
-      const result = await callLLM({
+      const result = await guardedCallLLM({
         provider: llmProvider,
         apiKey,
         prompt: `${BANK_PROMPT_TASKS}\n\n${dataBlock}`,
@@ -320,7 +321,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
 
     // HYBRID: run industrial + bank prompts in parallel
     const [industrialResult, bankResult] = await Promise.all([
-      callLLM({
+      guardedCallLLM({
         provider: llmProvider,
         apiKey,
         prompt: `${INDUSTRIAL_PROMPT_TASKS}\n\nNote: Analyze industrial/non-financial segments only.\n\n${dataBlock}`,
@@ -328,7 +329,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
         responseSchema: INDUSTRIAL_SCHEMA,
         responseToolName: "submit_summary_insights",
       }),
-      callLLM({
+      guardedCallLLM({
         provider: llmProvider,
         apiKey,
         prompt: `${BANK_PROMPT_TASKS}\n\nNote: Analyze bank/financial segments only.\n\n${dataBlock}`,

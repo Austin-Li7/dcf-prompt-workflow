@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep4ReviewState,
   GEMINI_STEP4_RESPONSE_SCHEMA,
@@ -141,7 +142,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapita
       ? recentNews.trim()
       : "No recent news provided.";
 
-    const result = await callLLM({
+    const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: STEP4_CAPITAL_SYSTEM_PROMPT,
