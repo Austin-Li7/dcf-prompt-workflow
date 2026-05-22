@@ -87,6 +87,99 @@ test("compacts verbose claim source snippets at the Step 4 schema boundary", () 
   assert.equal(parsed.claims[0].source_snippet?.length, 220);
 });
 
+test("parseStep4StructuredResult heals synergies with undeclared source_ids instead of throwing", () => {
+  // Simulates the most common Step 4 error: LLM writes a source_id in a synergy
+  // that it never added to the top-level sources array.
+  const payload = structuredClone(fixture);
+  payload.synergy_registry[0].financial_signal.source_ids = ["source:undeclared-ref"];
+
+  // parseStep4StructuredResult (via normalizeStep4StructuredPayload) should heal it
+  const parsed = parseStep4StructuredResult(payload);
+
+  // The undeclared source_id should now exist in the sources array
+  assert.ok(
+    parsed.sources.some((s) => s.source_id === "source:undeclared-ref"),
+    "auto-declared source should appear in sources array",
+  );
+  // A validation warning should be present
+  assert.ok(
+    parsed.validation_warnings.some((w) => w.code === "UNDECLARED_SOURCE_REFS_HEALED"),
+    "should add UNDECLARED_SOURCE_REFS_HEALED warning",
+  );
+});
+
+test("parseStep4StructuredResult heals synergies with undeclared claim_ids instead of throwing", () => {
+  const payload = structuredClone(fixture);
+  payload.synergy_registry[0].basis_claim_ids = ["S4-MISSING-CLAIM"];
+
+  const parsed = parseStep4StructuredResult(payload);
+
+  assert.ok(
+    parsed.claims.some((c) => c.claim_id === "S4-MISSING-CLAIM"),
+    "auto-declared claim should appear in claims array",
+  );
+  assert.ok(
+    parsed.validation_warnings.some((w) => w.code === "UNDECLARED_CLAIM_REFS_HEALED"),
+    "should add UNDECLARED_CLAIM_REFS_HEALED warning",
+  );
+});
+
+test("parseStep4StructuredResult heals capital metrics with undeclared source_ids", () => {
+  const payload = structuredClone(fixture);
+  payload.capital_allocation.capital_metrics[0].source_ids = ["source:capital-missing"];
+
+  const parsed = parseStep4StructuredResult(payload);
+
+  assert.ok(
+    parsed.sources.some((s) => s.source_id === "source:capital-missing"),
+    "auto-declared capital metric source should appear in sources array",
+  );
+  assert.ok(
+    parsed.validation_warnings.some((w) => w.code === "UNDECLARED_SOURCE_REFS_HEALED"),
+  );
+});
+
+test("parseStep4StructuredResult expands claim IDs found in capital metric source_ids arrays", () => {
+  // This is the exact error pattern from real LLM output:
+  //   capital_metrics[x].source_ids = ["src:real", "claim_1", "claim_9"]
+  // The LLM confuses the two ID namespaces.  The healer should expand claim_1
+  // to its actual source_ids from the claims array, not create a synthetic source.
+  const payload = structuredClone(fixture);
+  // claim S4-C1 already cites "source:apple:10k:services" in the fixture
+  const realClaimId = payload.claims[0].claim_id; // e.g. "S4-C1"
+  const realSourceFromClaim = payload.claims[0].source_ids[0]; // e.g. "source:apple:10k:services"
+
+  // Inject the claim ID where a source ID should be
+  payload.capital_allocation.capital_metrics[0].source_ids = [realClaimId];
+
+  const parsed = parseStep4StructuredResult(payload);
+
+  // The capital metric's source_ids should have been expanded to the claim's actual sources
+  const metricSourceIds = parsed.capital_allocation.capital_metrics[0].source_ids;
+  assert.ok(
+    metricSourceIds.includes(realSourceFromClaim),
+    `source_ids should be expanded from claim ${realClaimId} to its actual sources`,
+  );
+  assert.equal(
+    metricSourceIds.includes(realClaimId),
+    false,
+    "the raw claim_id should no longer appear in source_ids after expansion",
+  );
+  assert.ok(
+    parsed.validation_warnings.some((w) => w.code === "CLAIM_ID_USED_AS_SOURCE_REF"),
+    "should add CLAIM_ID_USED_AS_SOURCE_REF warning",
+  );
+});
+
+test("Step4StructuredSchema.parse still rejects undeclared refs when called directly (superRefine still strict)", () => {
+  // Ensures that parseStep4StructuredResult healing is in the normalize layer,
+  // not in the schema itself — so calling the schema directly still hard-fails.
+  const payload = structuredClone(fixture);
+  payload.synergy_registry[0].financial_signal.source_ids = ["source:missing"];
+
+  assert.throws(() => Step4StructuredSchema.parse(payload));
+});
+
 test("normalizes multi-id capital synergy links instead of blocking Step 4", () => {
   const payload = structuredClone(fixture);
   payload.synergy_registry = [

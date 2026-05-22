@@ -28,10 +28,18 @@
  *   and the results are merged.
  *
  * Layer 3 — Response completeness:
- *   Inspects finishReason. On truncation (max_tokens / length / MAX_TOKENS),
- *   re-runs the call with the prompt split into smaller halves and merges
- *   the structured results. Falls back to text continuation for non-structured
- *   calls.
+ *   Triggers on two signals:
+ *   (a) The result has finishReason = max_tokens / length / MAX_TOKENS.
+ *   (b) invoke() THREW a truncation error (e.g. Gemini structured output
+ *       hits MAX_TOKENS and parseStructuredJsonText throws instead of
+ *       returning — the guard catches that throw and converts it here).
+ *   Recovery strategy:
+ *   • mergeStructuredResults provided → split prompt, retry each half,
+ *     merge structured payloads.
+ *   • responseSchema provided but no mergeStructuredResults → retry the
+ *     full call once with an added "be more concise" instruction so the
+ *     JSON fits in the output window.
+ *   • Text-only → ask the LLM to continue from where it stopped.
  *
  * Usage:
  *   import { guardedCallLLM } from "@/lib/llm-guard";
@@ -80,6 +88,22 @@ export const TRUNCATION_REASON_RE = /max_tokens|^length$|MAX_TOKENS/i;
 
 export function isTruncated(result: { finishReason?: string }): boolean {
   return TRUNCATION_REASON_RE.test(result.finishReason ?? "");
+}
+
+/**
+ * Returns true when an error *thrown* by invoke() signals a provider truncation.
+ *
+ * Gemini structured output is the primary case: when the JSON output is cut off,
+ * `parseStructuredJsonText` in llm-service.ts throws with a message like:
+ *   "Structured output was truncated because Gemini hit MAX_TOKENS."
+ * rather than returning a result with finishReason="MAX_TOKENS" — so the guard's
+ * normal `isTruncated(result)` check never sees it.
+ *
+ * Pattern is identical to `isTruncationError` in chunk-bisect-retry.ts so both
+ * modules stay in sync with the error strings produced by llm-service.ts.
+ */
+function isTruncationErrorMessage(message: string): boolean {
+  return /Structured output was truncated|MAX_TOKENS|hit the token limit/i.test(message);
 }
 
 // =============================================================================
@@ -465,7 +489,20 @@ export async function guardedCallLLM(
     );
     mainResult = mergeCallResults(chunkResults, mergeStructuredResults);
   } else {
-    mainResult = await invoke({ provider, apiKey, prompt: activePrompt, systemPrompt, ...rest });
+    // Wrap in try-catch so that providers that *throw* on truncation (e.g. Gemini
+    // structured output hitting MAX_TOKENS) are caught here and converted into a
+    // synthetic truncated result that Layer 3 can then recover from.
+    try {
+      mainResult = await invoke({ provider, apiKey, prompt: activePrompt, systemPrompt, ...rest });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isTruncationErrorMessage(msg)) throw err; // non-truncation errors propagate normally
+      console.warn(
+        "[llm-guard] Layer 3: invoke() threw a truncation error — converting to synthetic truncated result for Layer 3 recovery:",
+        msg,
+      );
+      mainResult = { text: "", finishReason: "max_tokens" };
+    }
   }
 
   // ─── Layer 2: Understanding confirmation ──────────────────────────────────
@@ -538,26 +575,62 @@ export async function guardedCallLLM(
   }
 
   // ─── Layer 3: Response completeness check ─────────────────────────────────
+  // Triggers on two signals:
+  //   (a) finishReason === max_tokens / length / MAX_TOKENS from a normal return.
+  //   (b) invoke() THREW a truncation error — caught above and stored as a
+  //       synthetic { text: "", finishReason: "max_tokens" } result.
   if (isTruncated(mainResult)) {
     log.outputTruncated = true;
     console.info(
-      `[llm-guard] Layer 3: response truncated (finishReason=${mainResult.finishReason}) — retrying with split`,
+      `[llm-guard] Layer 3: response truncated (finishReason=${mainResult.finishReason}) — triggering recovery`,
     );
 
     if (mergeStructuredResults) {
-      // Re-run with halved chunk size so each sub-call fits within the output cap
+      // ── Path A: structured output + merge function ─────────────────────────
+      // Re-run with halved chunk size so each sub-call fits within the output cap.
       log.outputSplitRetry = true;
       const halfTokens = Math.floor(limit * 0.4);
       const halves = splitPromptIntoParts(activePrompt, halfTokens, dataSectionStart);
 
+      console.info(`[llm-guard] Layer 3: split retry — ${halves.length} halves`);
       const halfResults = await Promise.all(
         halves.map((halfPrompt) =>
           invoke({ provider, apiKey, prompt: halfPrompt, systemPrompt, ...rest }),
         ),
       );
       mainResult = mergeCallResults(halfResults, mergeStructuredResults);
+    } else if (rest.responseSchema != null) {
+      // ── Path B: structured output without a merge function ─────────────────
+      // The schema mandates a single coherent JSON blob — splitting and merging
+      // isn't safe without a merge function.  Instead, re-run the full call once
+      // with an added instruction to be maximally concise so the output fits in
+      // the provider's token window.
+      console.info("[llm-guard] Layer 3: structured output (no merge fn) — concise retry");
+      try {
+        const conciseResult = await invoke({
+          provider,
+          apiKey,
+          prompt: [
+            "Your previous response was truncated because it exceeded the output token limit.",
+            "Please repeat your response but be maximally concise:",
+            "- Use the shortest valid JSON values — omit any prose commentary inside strings.",
+            "- Keep all required schema fields; omit optional fields whose value would be null.",
+            "- The entire JSON response MUST fit in a single output — do not truncate.",
+            "",
+            activePrompt,
+          ].join("\n"),
+          systemPrompt,
+          ...rest,
+        });
+        if (conciseResult.structuredData != null) {
+          mainResult = conciseResult;
+        }
+      } catch (err) {
+        console.warn("[llm-guard] Layer 3: concise retry failed —", err);
+      }
     } else {
-      // Text-only path: ask the LLM to continue from where it stopped
+      // ── Path C: text-only output ───────────────────────────────────────────
+      // Ask the LLM to continue from where it stopped.
       try {
         const continuation = await invoke({
           provider,

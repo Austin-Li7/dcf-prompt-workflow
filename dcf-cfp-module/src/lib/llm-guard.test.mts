@@ -332,6 +332,85 @@ test("Layer 3: split retry merges structured results when mergeStructuredResults
   assert.ok(merged.rows.includes("b"));
 });
 
+test("Layer 3: concise retry when invoke() throws a Gemini MAX_TOKENS truncation error", async () => {
+  // Simulates Gemini structured output: parseStructuredJsonText throws instead of
+  // returning a finishReason — the guard must catch it, set outputTruncated=true,
+  // then retry with a concise-retry prompt.
+  let call = 0;
+  const result = await guardedCallLLM(
+    makeOpts({
+      responseSchema: { type: "object" }, // triggers Path B (structured, no merge fn)
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        call++;
+        if (call === 1) {
+          throw new Error("Structured output was truncated because Gemini hit MAX_TOKENS. Try retrying with a smaller output or a higher token limit.");
+        }
+        // Concise retry succeeds
+        return makeResult({ structuredData: { answer: 42 }, finishReason: "stop" });
+      },
+    }),
+  );
+  assert.equal(result.guardLog.outputTruncated, true, "outputTruncated should be true");
+  assert.equal(result.guardLog.outputSplitRetry, false, "outputSplitRetry should be false for concise retry");
+  assert.deepEqual(result.structuredData, { answer: 42 }, "should return the concise retry result");
+});
+
+test("Layer 3: concise retry uses a prompt that instructs brevity", async () => {
+  const prompts: string[] = [];
+  await guardedCallLLM(
+    makeOpts({
+      responseSchema: { type: "object" },
+      skipConfirmation: true,
+      _callFn: async (o) => {
+        const p = (o as { prompt: string }).prompt;
+        prompts.push(p);
+        if (prompts.length === 1) {
+          throw new Error("Structured output was truncated because Gemini hit MAX_TOKENS.");
+        }
+        return makeResult({ structuredData: { ok: true } });
+      },
+    }),
+  );
+  const retryPrompt = prompts[1];
+  assert.ok(retryPrompt.includes("truncated"), "retry prompt should mention truncation");
+  assert.ok(retryPrompt.includes("concise") || retryPrompt.includes("concisely") || retryPrompt.toLowerCase().includes("concise"), "retry prompt should ask for brevity");
+});
+
+test("Layer 3: concise retry — non-truncation throws are NOT caught", async () => {
+  await assert.rejects(
+    () =>
+      guardedCallLLM(
+        makeOpts({
+          skipConfirmation: true,
+          _callFn: async () => {
+            throw new Error("Network timeout");
+          },
+        }),
+      ),
+    /Network timeout/,
+    "non-truncation errors should propagate",
+  );
+});
+
+test("Layer 3: concise retry failure does not throw — returns synthetic truncated result", async () => {
+  let call = 0;
+  const result = await guardedCallLLM(
+    makeOpts({
+      responseSchema: { type: "object" },
+      skipConfirmation: true,
+      _callFn: async () => {
+        call++;
+        // Both the main call and the concise retry fail
+        throw new Error("Structured output was truncated because Gemini hit MAX_TOKENS.");
+      },
+    }),
+  );
+  // Should not throw — returns the synthetic result (empty text, truncated reason cleared)
+  assert.equal(result.guardLog.outputTruncated, true);
+  assert.equal(call, 2, "should have attempted main + concise retry");
+});
+
 // ─── Layer 4 ──────────────────────────────────────────────────────────────────
 
 test("Layer 4: fires when prompt exceeds dilution threshold for provider", async () => {
