@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
-import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep4ReviewState,
@@ -11,7 +11,8 @@ import {
   projectStep4StructuredToPaths,
   STEP4_RESPONSE_SCHEMA,
 } from "@/lib/step4-schema";
-import type { LLMProvider, TrendAnalysisResult } from "@/types/cfp";
+import { buildStep2FinancialSummary } from "@/lib/step3-financial-context";
+import type { LLMProvider, TrendAnalysisResult, HistoricalExtractionRow, HistoricalData } from "@/types/cfp";
 import type { AnalyzeSynergiesResponse } from "@/types/cfp";
 
 // =============================================================================
@@ -50,12 +51,26 @@ function buildStep4Prompt(inputs: {
   step2Financials: unknown;
   step3Competition: unknown;
   trendAnalysis?: TrendAnalysisResult | null;
+  financialSummary: string | null;
 }): string {
+  const financialBlock = inputs.financialSummary
+    ? [
+        "",
+        inputs.financialSummary,
+        "SYNERGY ANCHORING — use these Step 2 baselines to quantify synergy magnitudes:",
+        "- Do not assert qualitative synergy scale without referencing these numbers.",
+        "- Cross-sell synergy: cite the disclosed multi-product attach rate or product-per-member delta.",
+        "- Cost synergy: anchor savings to an explicit margin or cost-line from Step 2 rows.",
+        "- Where a segment is at or near its S-curve ceiling, flag growth synergies as CAPPED or CONTEXT_ONLY.",
+      ].join("\n")
+    : "";
+
   return [
     "Task: Produce Step 4 Synergy & Driver Eligibility plus Step 4.5 Capital Allocation.",
     "Step 1 architecture input:",
     JSON.stringify(inputs.step1Architecture, null, 2),
-    "Step 2 historical financials input:",
+    financialBlock,
+    "Step 2 historical financials input (full detail):",
     JSON.stringify(inputs.step2Financials || {}, null, 2),
     "Step 3 competitive landscape input:",
     JSON.stringify(inputs.step3Competition || {}, null, 2),
@@ -92,11 +107,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeSynerg
       return NextResponse.json({ paths: [], error: "No API key found for the selected provider.", requiresApiKey: true }, { status: 401 });
     }
 
+    // S4-1: Extract Step 2 rows from the HistoricalData blob for financial anchoring
+    const history = step2Financials as HistoricalData | null;
+    const step2Rows: HistoricalExtractionRow[] = history?.rows ?? [];
+    const step2Trend = (history?.trendAnalysis ?? (trendAnalysis as TrendAnalysisResult | null)) ?? null;
+    const financialSummary = buildStep2FinancialSummary(step2Rows, step2Trend);
+
     const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
       systemPrompt: STEP4_SYSTEM_PROMPT,
-      prompt: buildStep4Prompt({ step1Architecture, step2Financials, step3Competition, trendAnalysis: trendAnalysis as TrendAnalysisResult | null }),
+      prompt: buildStep4Prompt({ step1Architecture, step2Financials, step3Competition, trendAnalysis: step2Trend, financialSummary }),
       maxTokens: 12288,
       responseSchema:
         llmProvider === "gemini" ? GEMINI_STEP4_RESPONSE_SCHEMA : STEP4_RESPONSE_SCHEMA,

@@ -248,6 +248,8 @@ export default function Step4Synergies() {
   const [capApproved, setCapApproved] = useState<boolean[]>([]);
   const [checkpointsApproved, setCheckpointsApproved] = useState(false);
   const [newsText, setNewsText] = useState(state.synergies.recentNews || "");
+  const [isFetchingNews, setIsFetchingNews] = useState(false);
+  const [fetchNewsError, setFetchNewsError] = useState<string | null>(null);
 
   // ---- Shared ----
   const [isLoading, setIsLoading] = useState(false);
@@ -349,7 +351,7 @@ export default function Step4Synergies() {
     setErrorMsg(null); setIsLoading(true);
     try {
       const res = await fetch("/api/analyze-capital", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: step4Structured?.synergy_registry ?? paths, recentNews: newsText, trendAnalysis: state.history.trendAnalysis ?? null, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
+        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: step4Structured?.synergy_registry ?? paths, recentNews: newsText, trendAnalysis: state.history.trendAnalysis ?? null, companyType: state.profile.step1StructuredResult?.company_type ?? null, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeCapitalResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
       if (d.paths?.length) {
@@ -373,6 +375,40 @@ export default function Step4Synergies() {
       setCapApproved(new Array(d.data.investmentMatrix.length).fill(false)); setCapIdx(0); setCheckpointsApproved(false); resetChat(); setPhase("capital-review");
     } catch (e: unknown) { setErrorMsg(e instanceof Error ? e.message : "Failed."); } finally { setIsLoading(false); }
   }, [state.profile.architectureJson, state.history, paths, newsText, activeApiKey, settings.llmProvider, step4Structured, step4Review]);
+
+  // ================================================================
+  // PHASE 3b — Auto-fetch news via Gemini Google Search grounding
+  // ================================================================
+  const fetchNews = useCallback(async () => {
+    setFetchNewsError(null);
+    setIsFetchingNews(true);
+    try {
+      const segments = state.profile.architectureJson?.architecture.map((s) => s.segment) ?? [];
+      const res = await fetch("/api/fetch-news", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          company: state.profile.companyName,
+          companyType: state.profile.step1StructuredResult?.company_type ?? null,
+          segments,
+          apiKey: activeApiKey,
+        }),
+      });
+      const d: { summary: string; sources: { title: string; url: string }[]; error?: string; requiresApiKey?: boolean } = await res.json();
+      if (!res.ok) {
+        if (d.requiresApiKey) throw new Error("Gemini API key required for news search. Open Settings to add your Gemini key.");
+        throw new Error(d.error || `Server error (${res.status})`);
+      }
+      const sourcesBlock = d.sources.length > 0
+        ? "\n\n---\nSources:\n" + d.sources.map((s) => `• ${s.title}: ${s.url}`).join("\n")
+        : "";
+      setNewsText(d.summary + sourcesBlock);
+    } catch (e: unknown) {
+      setFetchNewsError(e instanceof Error ? e.message : "News fetch failed.");
+    } finally {
+      setIsFetchingNews(false);
+    }
+  }, [state.profile, activeApiKey]);
 
   // ================================================================
   // PHASE 4 — Review capital entries
@@ -596,10 +632,21 @@ export default function Step4Synergies() {
               <div className="flex items-center gap-2 text-emerald-400"><CheckCircle2 size={18} /><span className="text-sm font-medium">All {paths.length} synergy paths approved</span></div>
 
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-5 space-y-4">
-                <div className="flex items-center gap-2"><Newspaper size={20} className="text-amber-400" /><h4 className="text-lg font-semibold text-zinc-100">Include Recent News or Management Commentary</h4></div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2"><Newspaper size={20} className="text-amber-400" /><h4 className="text-lg font-semibold text-zinc-100">Include Recent News or Management Commentary</h4></div>
+                  <button
+                    onClick={fetchNews}
+                    disabled={isFetchingNews || isLoading}
+                    title="Search for recent news using Gemini + Google Search (requires Gemini API key)"
+                    className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+                  >
+                    {isFetchingNews ? <><Loader2 size={13} className="animate-spin" /> Searching...</> : <><Zap size={13} /> Auto-Fetch with Google Search</>}
+                  </button>
+                </div>
                 <p className="text-xs text-zinc-500">Paste recent press releases, M&amp;A announcements, or earnings call snippets to ensure the model reflects real-time strategy. For banks and financial companies, include: Fed rate decisions or 10-year Treasury yield moves, credit default rate trends, student loan policy changes, deposit outflows, ALM disclosures, or management commentary on capital ratios (Tier 1, CET1).</p>
+                {fetchNewsError && <div className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/30 p-2 text-xs text-amber-300"><AlertCircle size={13} className="mt-0.5 shrink-0" /> {fetchNewsError}</div>}
                 <textarea
-                  rows={6} value={newsText} onChange={(e) => setNewsText(e.target.value)} placeholder="(Optional) Paste news, earnings snippets, or commentary here... For banks: include Fed rate decisions, 10-year Treasury moves, credit default rates, student loan policy, deposit outflows, or capital ratio updates."
+                  rows={6} value={newsText} onChange={(e) => setNewsText(e.target.value)} placeholder="(Optional) Paste news, earnings snippets, or commentary here — or click Auto-Fetch above to search Google automatically. For banks: include Fed rate decisions, 10-year Treasury moves, credit default rates, student loan policy, deposit outflows, or capital ratio updates."
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y" />
               </div>
 

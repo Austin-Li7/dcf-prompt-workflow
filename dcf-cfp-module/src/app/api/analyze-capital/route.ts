@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
-import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep4ReviewState,
@@ -12,8 +12,19 @@ import {
   STEP4_RESPONSE_SCHEMA,
 } from "@/lib/step4-schema";
 import { computeCapExEfficiency, formatCapExEfficiency } from "@/lib/capex-efficiency";
-import type { LLMProvider, TrendAnalysisResult } from "@/types/cfp";
+import { buildStep2FinancialSummary } from "@/lib/step3-financial-context";
+import type { LLMProvider, TrendAnalysisResult, HistoricalExtractionRow, HistoricalData } from "@/types/cfp";
 import type { AnalyzeCapitalResponse, CapitalAllocationData } from "@/types/cfp";
+
+// S4-3: Company-type-aware output token budget.
+// Hybrid companies need bank + industrial capital arms simultaneously.
+// Layer 3 of the LLM Guard retries on truncation, but a realistic ceiling
+// reduces the frequency of those retries.
+function resolveMaxTokens(companyType: string | null | undefined): number {
+  if (companyType === "hybrid") return 16384;
+  if (companyType === "financial_bank" || companyType === "financial_other") return 14336;
+  return 12288; // industrial / unknown — current default
+}
 
 // =============================================================================
 // POST /api/analyze-capital
@@ -54,6 +65,8 @@ const STEP4_CAPITAL_SYSTEM_PROMPT = [
   // Bank news topics to flag
   "BANK NEWS TOPICS: When processing recent news, flag material changes in: credit default rates, student loan policy shifts, Fed rate trajectory, 10-year Treasury yield moves, deposit outflows, capital adequacy ratios, and regulatory enforcement actions.",
   "Include review_summary and validation_warnings suitable for a human review UI.",
+  // S4-3: Hybrid output priority ordering — bank capital first to ensure it's never truncated
+  "HYBRID OUTPUT ORDER: For hybrid companies, emit the bank-mode capital_allocation entries FIRST in the output, before industrial CapEx entries. Bank regulatory capital (CET1, RWA, ALM risk) must be complete before industrial CapEx detail appears.",
   "No markdown, commentary, or prose outside the structured response.",
 ].join(" ");
 
@@ -63,15 +76,27 @@ function buildStep4CapitalPrompt(inputs: {
   step4Synergies: unknown;
   recentNews: string;
   trendAnalysis?: TrendAnalysisResult | null;
+  financialSummary: string | null;
 }): string {
   const capexEfficiency = computeCapExEfficiency(inputs.step2Financials, inputs.step1Architecture);
+
+  const financialBlock = inputs.financialSummary
+    ? [
+        "",
+        inputs.financialSummary,
+        "CAPITAL ANCHORING — use these Step 2 baselines for ALM and capital efficiency assessment:",
+        "- NIM trend and NII scale are the primary bank capital levers; cite them when assessing regulatory capital adequacy.",
+        "- For bank segments, HTM bond exposure and deposit concentration from Step 2 rows directly drive ALM risk rating.",
+      ].join("\n")
+    : "";
 
   return [
     "Task: Produce the finalized Step 4 Synergy & Driver Eligibility plus Step 4.5 Capital Allocation structured result.",
     `Recent news / management commentary: ${inputs.recentNews}`,
     "Step 1 architecture input:",
     JSON.stringify(inputs.step1Architecture, null, 2),
-    "Step 2 historical financials input:",
+    financialBlock,
+    "Step 2 historical financials input (full detail):",
     JSON.stringify(inputs.step2Financials || {}, null, 2),
     "Current Step 4 synergy review input:",
     JSON.stringify(inputs.step4Synergies || [], null, 2),
@@ -103,7 +128,7 @@ function buildStep4CapitalPrompt(inputs: {
 export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapitalResponse>> {
   try {
     const body = await req.json();
-    const { step1Architecture, step2Financials, step4Synergies, recentNews, trendAnalysis, apiKey: runtimeKey, llmProvider = "claude" as LLMProvider } = body;
+    const { step1Architecture, step2Financials, step4Synergies, recentNews, trendAnalysis, companyType, apiKey: runtimeKey, llmProvider = "claude" as LLMProvider } = body;
 
     if (!step1Architecture) {
       return NextResponse.json(
@@ -124,6 +149,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapita
       ? recentNews.trim()
       : "No recent news provided.";
 
+    // S4-1: Extract Step 2 financial summary for anchoring capital analysis
+    const history = step2Financials as HistoricalData | null;
+    const step2Rows: HistoricalExtractionRow[] = history?.rows ?? [];
+    const step2Trend = (history?.trendAnalysis ?? (trendAnalysis as TrendAnalysisResult | null)) ?? null;
+    const financialSummary = buildStep2FinancialSummary(step2Rows, step2Trend);
+
+    // S4-3: Scale output budget by company complexity
+    const maxTokens = resolveMaxTokens(companyType as string | null | undefined);
+
     const result = await guardedCallLLM({
       provider: llmProvider,
       apiKey,
@@ -133,9 +167,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapita
         step2Financials,
         step4Synergies,
         recentNews: newsBlock,
-        trendAnalysis: trendAnalysis as TrendAnalysisResult | null,
+        trendAnalysis: step2Trend,
+        financialSummary,
       }),
-      maxTokens: 12288,
+      maxTokens,
       responseSchema:
         llmProvider === "gemini" ? GEMINI_STEP4_RESPONSE_SCHEMA : STEP4_RESPONSE_SCHEMA,
       responseToolName: "submit_step4_structured_result",
