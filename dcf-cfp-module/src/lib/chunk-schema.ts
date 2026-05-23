@@ -112,6 +112,10 @@ export const BankChunkRowSchema = z.object({
   provision_for_credit_losses_usd_m: z.number().nullable(),
   net_income_usd_m: z.number().nullable(),
   book_value_equity_usd_m: z.number().nullable(),
+  // TCE components — balance-sheet items at consolidated level. Default null when LLM omits them.
+  goodwill_usd_m: z.number().nullable().default(null),
+  intangible_assets_usd_m: z.number().nullable().default(null),
+  preferred_equity_usd_m: z.number().nullable().default(null),
   total_rwa_usd_m: z.number().nullable(),
   tier1_capital_ratio_pct: z.number().nullable(),
   cet1_ratio_pct: z.number().nullable(),

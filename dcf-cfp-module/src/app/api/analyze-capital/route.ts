@@ -3,6 +3,7 @@ import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-serv
 import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep4ReviewState,
+  formatTrendCeilings,
   GEMINI_STEP4_RESPONSE_SCHEMA,
   parseStep4StructuredResult,
   projectStep4StructuredToCapital,
@@ -54,43 +55,6 @@ const STEP4_CAPITAL_SYSTEM_PROMPT = [
   "Include review_summary and validation_warnings suitable for a human review UI.",
   "No markdown, commentary, or prose outside the structured response.",
 ].join(" ");
-
-function formatTrendCeilings(trendAnalysis: TrendAnalysisResult | null | undefined): string {
-  if (!trendAnalysis || Object.keys(trendAnalysis.segments).length === 0) return "";
-
-  // Three lines per segment depending on what trend signal we actually have:
-  //   1. Logistic fit OK → plateau ceiling + forward growth limit (the real ceiling).
-  //   2. Fit failed but historical_cagr_pct populated → informational CAGR, NOT a ceiling.
-  //   3. Fit failed and no historical CAGR → say so explicitly; don't fabricate a number.
-  // The old format passed a CAGR-fallback negative number as a "growth limit"
-  // for declining / non-monotone segments — that mis-framing made the LLM
-  // anchor forecasts to backward-looking decline rates.
-  const lines = Object.entries(trendAnalysis.segments).map(([seg, r]) => {
-    if (r.fit_ok && r.calculated_plateau_ceiling_usd_m != null) {
-      const ceiling = `plateau $${r.calculated_plateau_ceiling_usd_m.toFixed(0)}M`;
-      const growth = r.modeled_next_year_growth_limit_pct != null
-        ? `next-year growth limit ${r.modeled_next_year_growth_limit_pct.toFixed(1)}%`
-        : "growth limit unknown";
-      const sat = r.is_plateau_detected ? " [SATURATED]" : "";
-      const quality = r.fit_quality_r2 != null ? ` R²=${r.fit_quality_r2.toFixed(2)}` : "";
-      return `  - ${seg}: ${ceiling}, ${growth}${sat}${quality}`;
-    }
-    if (r.historical_cagr_pct != null) {
-      return `  - ${seg}: no plateau fit (shape=${r.series_shape}); historical CAGR ${r.historical_cagr_pct.toFixed(1)}% [INFORMATIONAL, not a ceiling]`;
-    }
-    return `  - ${seg}: no reliable trend (shape=${r.series_shape}); derive growth from synergies/competition/management guidance`;
-  });
-  return [
-    "",
-    "BACKEND TREND ANALYSIS (logistic S-curve regression on Step 2 data — no LLM, deterministic):",
-    ...lines,
-    "STRATEGIC OVERRIDE RULE: If any synergy driver or capital allocation would push a segment with a plateau-derived growth limit above that limit,",
-    "you MUST document a growth_justification naming the specific catalyst breaking the mathematical curve",
-    "(e.g. 'Competitor bankruptcy releases 15% TAM share', 'New product launch expands addressable market').",
-    "Narrative optimism without a named catalyst is not a valid override.",
-    "Lines tagged [INFORMATIONAL] or 'no reliable trend' carry NO ceiling — derive growth from other Step 3/4 signals.",
-  ].join("\n");
-}
 
 function buildStep4CapitalPrompt(inputs: {
   step1Architecture: unknown;

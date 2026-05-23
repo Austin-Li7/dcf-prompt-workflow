@@ -17,6 +17,14 @@ const ForceRatingSchema = z.enum(["Low", "Medium", "High"]);
 
 const SourceQualitySchema = z.enum(["Official", "External", "Mixed", "Unverified"]);
 
+/** Truncate at the last word boundary before maxLen and append "…". */
+function truncateAtWord(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  const cut = s.slice(0, maxLen - 1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut) + "…";
+}
+
 /**
  * Auto-truncates to maxLen instead of hard-rejecting.
  * Empty / whitespace-only strings fall back to the fallback value.
@@ -25,7 +33,7 @@ const boundedStr = (maxLen: number, fallback = "—") =>
   z.preprocess((v) => {
     if (typeof v !== "string") return v;
     if (v.trim() === "") return fallback;
-    if (v.length > maxLen) return v.slice(0, maxLen);
+    if (v.length > maxLen) return truncateAtWord(v, maxLen);
     return v;
   }, z.string().min(1).max(maxLen));
 
@@ -35,7 +43,7 @@ const nullableBoundedStr = (maxLen: number) =>
     if (v == null) return null;
     if (typeof v !== "string") return v;
     if (v.trim() === "") return null;
-    if (v.length > maxLen) return v.slice(0, maxLen);
+    if (v.length > maxLen) return truncateAtWord(v, maxLen);
     return v;
   }, z.string().min(1).max(maxLen).nullable());
 
@@ -52,7 +60,7 @@ const SourceSchema = z.object({
   name: z.string().min(1),
   url: z.string().min(1).nullable(),
   locator: z.string().min(1).nullable(),
-  excerpt: z.string().min(1).transform((value) => value.slice(0, 260)).nullable(),
+  excerpt: z.string().min(1).transform((value) => truncateAtWord(value, 260)).nullable(),
 });
 
 const ClaimSchema = z.object({
@@ -60,7 +68,7 @@ const ClaimSchema = z.object({
   text: boundedStr(260),
   source_ids: z.array(z.string().min(1)).min(1),
   evidence_level: EvidenceLevelSchema,
-  source_snippet: z.string().min(1).transform((value) => value.slice(0, 220)).nullable(),
+  source_snippet: z.string().min(1).transform((value) => truncateAtWord(value, 220)).nullable(),
 });
 
 const ForceDetailStructuredSchema = z.object({
@@ -602,7 +610,7 @@ function truncateCategoryJustifications(payload: unknown): unknown {
       const f = force as Record<string, unknown>;
       clipped[key] =
         typeof f.justification === "string" && f.justification.length > 255
-          ? { ...f, justification: f.justification.slice(0, 252) + "…" }
+          ? { ...f, justification: truncateAtWord(f.justification, 260) }
           : f;
     } else {
       clipped[key] = force;
@@ -659,7 +667,7 @@ export function projectStep3StructuredToCategories(
   return result.categories.map((category) => projectStep3CategoryToLegacy(category));
 }
 
-const HARD_STOP_CODES = new Set(["CATEGORY_MISMATCH", "SNIPPET_MISMATCH"]);
+const HARD_STOP_CODES = new Set(["CATEGORY_MISMATCH", "SNIPPET_MISMATCH", "SEGMENT_COVERAGE_INCOMPLETE"]);
 
 function deriveWorkflowStatus(result: Step3StructuredResult): Step3WorkflowStatus {
   const hasHardStop = result.validation_warnings.some(

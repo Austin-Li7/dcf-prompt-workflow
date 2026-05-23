@@ -28,14 +28,27 @@ export type BankMetricKey =
   | "non_interest_income_usd_m"
   | "provision_for_credit_losses_usd_m"
   | "net_income_usd_m"
+  // Balance-sheet stocks (year-end snapshots)
   | "book_value_equity_usd_m"
+  | "goodwill_usd_m"
+  | "intangible_assets_usd_m"
+  | "preferred_equity_usd_m"
   | "total_rwa_usd_m"
+  | "total_assets_usd_m"
+  // Liquidity balance-sheet stocks (primarily in annual footnotes)
+  | "total_loans_usd_m"
+  | "total_deposits_usd_m"
+  | "retail_insured_deposits_usd_m"
+  | "wholesale_uninsured_deposits_usd_m"
+  | "cash_and_hqla_usd_m"
+  | "htm_bonds_usd_m"
+  | "unrealized_losses_htm_usd_m"
+  // Annualised / point-in-time ratios
   | "tier1_capital_ratio_pct"
   | "cet1_ratio_pct"
   | "net_interest_margin_pct"
   | "efficiency_ratio_pct"
-  | "return_on_avg_equity_pct"
-  | "total_assets_usd_m";
+  | "return_on_avg_equity_pct";
 
 /**
  * How each metric accumulates over time — determines Q4 derivation behaviour.
@@ -54,8 +67,19 @@ export const BANK_METRIC_FLOW_TYPE: Record<BankMetricKey, MetricFlowType> = {
   net_income_usd_m: "flow",
   // Balance-sheet stocks (year-end snapshot)
   book_value_equity_usd_m: "stock",
+  goodwill_usd_m: "stock",
+  intangible_assets_usd_m: "stock",
+  preferred_equity_usd_m: "stock",
   total_rwa_usd_m: "stock",
   total_assets_usd_m: "stock",
+  // Liquidity balance-sheet stocks (year-end snapshots; primarily in 10-K footnotes)
+  total_loans_usd_m: "stock",
+  total_deposits_usd_m: "stock",
+  retail_insured_deposits_usd_m: "stock",
+  wholesale_uninsured_deposits_usd_m: "stock",
+  cash_and_hqla_usd_m: "stock",
+  htm_bonds_usd_m: "stock",
+  unrealized_losses_htm_usd_m: "stock",
   // Annualised / point-in-time ratios
   tier1_capital_ratio_pct: "ratio",
   cet1_ratio_pct: "ratio",
@@ -218,13 +242,23 @@ export function buildQ4DerivedRow(
       provision_for_credit_losses_usd_m: row.provision_for_credit_losses_usd_m ?? null,
       net_income_usd_m: row.net_income_usd_m ?? null,
       book_value_equity_usd_m: row.book_value_equity_usd_m ?? null,
+      goodwill_usd_m: row.goodwill_usd_m ?? null,
+      intangible_assets_usd_m: row.intangible_assets_usd_m ?? null,
+      preferred_equity_usd_m: row.preferred_equity_usd_m ?? null,
       total_rwa_usd_m: row.total_rwa_usd_m ?? null,
+      total_assets_usd_m: row.total_assets_usd_m ?? null,
+      total_loans_usd_m: row.total_loans_usd_m ?? null,
+      total_deposits_usd_m: row.total_deposits_usd_m ?? null,
+      retail_insured_deposits_usd_m: row.retail_insured_deposits_usd_m ?? null,
+      wholesale_uninsured_deposits_usd_m: row.wholesale_uninsured_deposits_usd_m ?? null,
+      cash_and_hqla_usd_m: row.cash_and_hqla_usd_m ?? null,
+      htm_bonds_usd_m: row.htm_bonds_usd_m ?? null,
+      unrealized_losses_htm_usd_m: row.unrealized_losses_htm_usd_m ?? null,
       tier1_capital_ratio_pct: row.tier1_capital_ratio_pct ?? null,
       cet1_ratio_pct: row.cet1_ratio_pct ?? null,
       net_interest_margin_pct: row.net_interest_margin_pct ?? null,
       efficiency_ratio_pct: row.efficiency_ratio_pct ?? null,
       return_on_avg_equity_pct: row.return_on_avg_equity_pct ?? null,
-      total_assets_usd_m: row.total_assets_usd_m ?? null,
     };
   };
 
@@ -270,6 +304,9 @@ export function buildQ4DerivedRow(
     provision_for_credit_losses_usd_m: q4Metrics.provision_for_credit_losses_usd_m ?? null,
     net_income_usd_m: q4Metrics.net_income_usd_m ?? null,
     book_value_equity_usd_m: q4Metrics.book_value_equity_usd_m ?? null,
+    goodwill_usd_m: q4Metrics.goodwill_usd_m ?? null,
+    intangible_assets_usd_m: q4Metrics.intangible_assets_usd_m ?? null,
+    preferred_equity_usd_m: q4Metrics.preferred_equity_usd_m ?? null,
     total_rwa_usd_m: q4Metrics.total_rwa_usd_m ?? null,
     tier1_capital_ratio_pct: q4Metrics.tier1_capital_ratio_pct ?? null,
     cet1_ratio_pct: q4Metrics.cet1_ratio_pct ?? null,
@@ -277,6 +314,14 @@ export function buildQ4DerivedRow(
     efficiency_ratio_pct: q4Metrics.efficiency_ratio_pct ?? null,
     return_on_avg_equity_pct: q4Metrics.return_on_avg_equity_pct ?? null,
     total_assets_usd_m: q4Metrics.total_assets_usd_m ?? null,
+    // Liquidity fields (stock — Q4 = 10-K year-end value)
+    total_loans_usd_m: q4Metrics.total_loans_usd_m ?? null,
+    total_deposits_usd_m: q4Metrics.total_deposits_usd_m ?? null,
+    retail_insured_deposits_usd_m: q4Metrics.retail_insured_deposits_usd_m ?? null,
+    wholesale_uninsured_deposits_usd_m: q4Metrics.wholesale_uninsured_deposits_usd_m ?? null,
+    cash_and_hqla_usd_m: q4Metrics.cash_and_hqla_usd_m ?? null,
+    htm_bonds_usd_m: q4Metrics.htm_bonds_usd_m ?? null,
+    unrealized_losses_htm_usd_m: q4Metrics.unrealized_losses_htm_usd_m ?? null,
   };
 }
 

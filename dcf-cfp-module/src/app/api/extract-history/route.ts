@@ -102,10 +102,16 @@ const CHUNK_SYSTEM_PROMPT = [
 const BANK_CHUNK_SYSTEM_PROMPT = [
   "You are a bank financial data extraction assistant.",
   "Extract NII-driven metrics: net interest income (nii_usd_m), non-interest income, provision for credit losses,",
-  "net income, book value of equity (total GAAP equity), goodwill, other intangible assets, preferred equity,",
+  "net income, book value of equity (total GAAP equity),",
+  "goodwill_usd_m (goodwill on the balance sheet), intangible_assets_usd_m (other intangible assets, net),",
+  "preferred_equity_usd_m (preferred stock / preferred equity at liquidation value),",
   "total risk-weighted assets (total_rwa_usd_m),",
   "Tier 1 capital ratio (%), CET1 ratio (%), net interest margin (%), efficiency ratio (%),",
   "return on average equity (%), and total assets — per segment per quarter.",
+  "IMPORTANT: Capital ratios (CET1, Tier 1, NIM, RWA) and balance-sheet totals (total assets, goodwill,",
+  "intangibles, preferred equity, book equity) are typically disclosed at the CONSOLIDATED level only —",
+  "not per segment. Create ONE row with segment='Consolidated' to carry these consolidated metrics.",
+  "Use per-segment rows ONLY for income metrics that the filing explicitly discloses by segment.",
   "Also extract liquidity balance-sheet items (typically in annual footnotes, use null if not found):",
   "total_loans_usd_m (total net loans / loan portfolio), total_deposits_usd_m (total customer deposits),",
   "retail_insured_deposits_usd_m (FDIC-insured or retail deposit portion),",
@@ -139,7 +145,12 @@ const BANK_REDUCE_SYSTEM_PROMPT = [
   "Also capture liquidity fields from annual balance-sheet footnotes (null if absent):",
   "total_loans_usd_m, total_deposits_usd_m, retail_insured_deposits_usd_m,",
   "wholesale_uninsured_deposits_usd_m, cash_and_hqla_usd_m, htm_bonds_usd_m, unrealized_losses_htm_usd_m.",
-  "Map rows to Step 1 canonical banking segments. At least one primary income metric must be non-null per row.",
+  "SEGMENT RULE: Balance-sheet items and capital ratios (total_assets, goodwill, intangibles,",
+  "preferred_equity, book_value_equity, total_rwa, CET1, Tier1, NIM, efficiency_ratio, ROAE)",
+  "are consolidated-level disclosures — assign them to segment='Consolidated', not to individual segments.",
+  "Per-segment rows carry only income metrics the filing explicitly discloses by segment.",
+  "Map per-segment income rows to Step 1 canonical banking segment names exactly.",
+  "At least one primary income metric must be non-null per row.",
   "Be concise: keep each review_note under 100 characters, sources.excerpt under 80 characters.",
   "No prose outside the structured response.",
 ].join(" ");
@@ -305,12 +316,20 @@ async function handleExtractChunk(body: Record<string, unknown>): Promise<NextRe
           : "",
         `Metrics to extract per segment per quarter (USD millions for monetary values, % for ratios):`,
         `nii_usd_m, non_interest_income_usd_m, provision_for_credit_losses_usd_m, net_income_usd_m,`,
-        `book_value_equity_usd_m, goodwill_usd_m, intangible_assets_usd_m, preferred_equity_usd_m,`,
+        `book_value_equity_usd_m, goodwill_usd_m (goodwill on balance sheet),`,
+        `intangible_assets_usd_m (other intangible assets, net), preferred_equity_usd_m (preferred stock),`,
         `total_rwa_usd_m, tier1_capital_ratio_pct, cet1_ratio_pct,`,
         `net_interest_margin_pct, efficiency_ratio_pct, return_on_avg_equity_pct, total_assets_usd_m.`,
         `Liquidity fields (annual balance-sheet footnotes; null if absent):`,
         `total_loans_usd_m, total_deposits_usd_m, retail_insured_deposits_usd_m,`,
         `wholesale_uninsured_deposits_usd_m, cash_and_hqla_usd_m, htm_bonds_usd_m, unrealized_losses_htm_usd_m.`,
+        `SEGMENT RULES:`,
+        `- Use segment='Consolidated' for balance-sheet and capital metrics (total_assets, goodwill,`,
+        `  intangibles, preferred_equity, book_value_equity, total_rwa, CET1, Tier1, RWA)`,
+        `  when the filing only discloses these at the consolidated/company-wide level.`,
+        `- Use per-segment rows ONLY for income metrics the filing explicitly breaks out by segment`,
+        `  (NII, non-interest income, provision, net income by segment).`,
+        `- segment names must exactly match Step 1 canonical names above (do not invent variants).`,
         `Set chunk_id to "${chunkId}". Use null for any figure not explicitly stated.`,
         `source_excerpt: copy the exact text snippet (≤ 160 chars) proving the figure.`,
         ``,
@@ -454,7 +473,7 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
     ...s,
     rows: Array.isArray(s.rows)
       ? (s.rows as Array<Record<string, unknown>>).filter(
-          (r) => r.fiscal_year === targetYear || r.fiscal_year === 0,
+          (r) => r.fiscal_year === targetYear,
         )
       : [],
   })).filter((s) => s.rows.length > 0);
@@ -487,6 +506,12 @@ async function handleReduce(body: Record<string, unknown>): Promise<NextResponse
         `- Monetary values in USD millions; ratio fields are percentages (e.g. 12.5 for 12.5%).`,
         `- At least one of nii_usd_m, non_interest_income_usd_m, net_income_usd_m must be non-null per row.`,
         `- Keep review_note under 100 characters per row. Keep sources.excerpt under 80 characters.`,
+        `- SEGMENT RULE: Use segment='Consolidated' for balance-sheet and capital metrics that the filing`,
+        `  only discloses at the company-wide level (total_assets, goodwill, intangible_assets,`,
+        `  preferred_equity, book_value_equity, total_rwa, cet1_ratio, tier1_capital, NIM, efficiency_ratio).`,
+        `  Per-segment rows carry only income metrics explicitly disclosed by segment in the filing.`,
+        `- SEGMENT NAMES: Use exactly the canonical Step 1 segment names listed above.`,
+        `  Rename any filing variant to the matching canonical name (e.g. "SoFi Lending" → "Lending").`,
         ``,
         `Chunk summaries (${summariesForPrompt.length} chunks with FY ${targetYear} rows):`,
         JSON.stringify(summariesForPrompt, null, 2),
@@ -793,9 +818,16 @@ async function handleGenerateHints(body: Record<string, unknown>): Promise<NextR
         `    "net_interest_margin_pct": { "section": "...", "labelVariants": ["..."] },`,
         `    "efficiency_ratio_pct": { "section": "...", "labelVariants": ["..."] },`,
         `    "return_on_avg_equity_pct": { "section": "...", "labelVariants": ["..."] },`,
-        `    "total_assets_usd_m": { "section": "...", "labelVariants": ["..."] }`,
+        `    "total_assets_usd_m": { "section": "...", "labelVariants": ["..."] },`,
+        `    "total_loans_usd_m": { "section": "...", "labelVariants": ["Total loans", "Net loans", "Loan portfolio"] },`,
+        `    "total_deposits_usd_m": { "section": "...", "labelVariants": ["Total deposits", "Deposits"] },`,
+        `    "retail_insured_deposits_usd_m": { "section": "...", "labelVariants": ["Insured deposits", "FDIC-insured", "Retail deposits"] },`,
+        `    "wholesale_uninsured_deposits_usd_m": { "section": "...", "labelVariants": ["Uninsured deposits", "Brokered deposits", "Wholesale deposits"] },`,
+        `    "cash_and_hqla_usd_m": { "section": "...", "labelVariants": ["Cash and equivalents", "HQLA", "Liquid assets"] },`,
+        `    "htm_bonds_usd_m": { "section": "...", "labelVariants": ["Held-to-maturity", "HTM securities"] },`,
+        `    "unrealized_losses_htm_usd_m": { "section": "...", "labelVariants": ["Unrealized losses on HTM", "Gross unrealized losses"] }`,
         `  },`,
-        `  "generalNotes": "brief notes about filing structure, fiscal year end, currency",`,
+        `  "generalNotes": "brief notes about filing structure, fiscal year end, currency, and which entity (holding co vs bank subsidiary) the balance sheet belongs to",`,
         `  "keyTableKeywords": ["keyword1", "keyword2"],`,
         `  "version": 1,`,
         `  "lastUpdatedByFile": "${fileName}"`,
@@ -816,10 +848,7 @@ async function handleGenerateHints(body: Record<string, unknown>): Promise<NextR
 
   let hints: unknown;
   try {
-    const text = llmResult.text.trim();
-    // Strip possible markdown fences
-    const clean = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
-    hints = JSON.parse(clean);
+    hints = parseStructuredJsonText(llmResult.text, { provider, finishReason: llmResult.finishReason, finishMessage: llmResult.finishMessage });
   } catch (err) {
     console.error("[extract-history/generate-hints] Parse error:", err);
     return NextResponse.json(

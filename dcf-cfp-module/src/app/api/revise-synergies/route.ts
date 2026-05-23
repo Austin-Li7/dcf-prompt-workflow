@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ZodError } from "zod";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import { guardedCallLLM } from "@/lib/llm-guard";
 import {
@@ -117,6 +118,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseSynergi
       responseToolName: "submit_step4_synergy_revision",
       responseToolDescription:
         "Submit the revised Step 4 synergy entry preserving source grounding and driver eligibility.",
+      skipConfirmation: true,
+      skipContextCompression: true,
     });
 
     const revisedStructured = parseStep4Synergy(extractStructuredPayload(result, llmProvider));
@@ -129,8 +132,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseSynergi
   } catch (err: unknown) {
     console.error("[revise-synergies] Error:", err);
     let message = err instanceof Error ? err.message : "An unexpected error occurred.";
-    if (message.startsWith("[") || message.startsWith("{")) {
-      message = "The revision response didn't match the expected format. Please try again.";
+    if (err instanceof ZodError) {
+      const fields = err.issues.map((i) => `${i.path.join(".") || "root"}: ${i.message}`).join("; ");
+      message = `Structured result validation failed — ${fields}`;
     }
     return NextResponse.json(
       { path: null as never, error: message },

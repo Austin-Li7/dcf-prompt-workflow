@@ -173,6 +173,7 @@ export default function Step3Competition() {
         body: JSON.stringify({
           companyName: state.profile.companyName,
           architecture: state.profile.architectureJson,
+          companyType: state.profile.step1StructuredResult?.company_type ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),
@@ -1348,6 +1349,9 @@ function Step3LineageNote({
           <>
             <span className="font-mono text-xs text-zinc-200">{highMed.length} of {categories.length} material</span>
             {topComp && <><br /><span className="text-xs text-zinc-400">Top: {topComp}</span></>}
+            {segmentCount > 0 && categories.length < segmentCount && (
+              <><br /><span className="text-xs text-amber-400">⚠ {segmentCount - categories.length} segment{segmentCount - categories.length !== 1 ? "s" : ""} missing Porter coverage</span></>
+            )}
           </>
         ) : (
           <span className="text-xs text-zinc-500">No analysis yet</span>

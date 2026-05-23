@@ -75,6 +75,7 @@ export interface BusinessArchitecture {
 
 export interface SegmentArchitectureEntry {
   segment: string;
+  workflow_mode?: WorkflowMode;
   businessLines: BusinessLine[];
 }
 

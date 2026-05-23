@@ -43,6 +43,7 @@ import {
   type PerFileResult,
 } from "@/lib/multi-file-pipeline";
 import { injectDerivedQ4Rows } from "@/lib/filing-hints";
+import { normalizeSegmentNames } from "@/lib/segment-normalizer";
 import { projectStep2BankStructuredToRows } from "@/lib/step2-bank-schema";
 import { deleteMfSession } from "@/lib/extraction-state";
 import type { FilingHints } from "@/types/cfp";
@@ -280,6 +281,9 @@ export default function Step2FilingUploader({
         const projected = projectStep2BankStructuredToRows(structuredResult, filing.filingType);
         allRows.push(...projected.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
       }
+
+      // Normalize segment names against Step 1 canonical set
+      normalizeSegmentNames(allRows, architecture);
 
       // Inject derived Q4 rows
       const withQ4 = injectDerivedQ4Rows(allRows, uid);

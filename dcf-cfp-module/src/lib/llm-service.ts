@@ -61,13 +61,67 @@ export function parseStructuredJsonText(
   text: string,
   context: { provider: LLMProvider; finishReason?: string; finishMessage?: string },
 ): unknown {
+  // Attempt 1: raw parse (fast path — covers the majority of calls)
   try {
     return JSON.parse(text);
-  } catch (error) {
+  } catch (firstError) {
+    // Attempt 2: strip markdown fences (some models wrap output in ```json … ```)
+    const trimmed = text.trim();
+    const stripped = trimmed
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
+    if (stripped !== trimmed) {
+      try {
+        return JSON.parse(stripped);
+      } catch {
+        // fall through to attempt 3
+      }
+    }
+
+    // Attempt 3: strip control characters that are illegal in JSON strings but can
+    // appear in PDF-extracted text embedded in the LLM response (form-feed \x0C,
+    // carriage-control \x00-\x08, vertical-tab \x0B, shift-in/out \x0E-\x1F).
+    // Note: \x09 (tab), \x0A (LF), \x0D (CR) are legal in JSON — leave them.
+    const sanitized = stripped.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ");
+    try {
+      return JSON.parse(sanitized);
+    } catch {
+      // fall through to structural repair attempts
+    }
+
+    // Attempt 4: remove trailing commas before } or ] — models occasionally emit
+    // JavaScript-style trailing commas which are illegal in JSON.
+    const noTrailingCommas = sanitized.replace(/,(\s*[}\]])/g, "$1");
+    if (noTrailingCommas !== sanitized) {
+      try {
+        return JSON.parse(noTrailingCommas);
+      } catch {
+        // fall through
+      }
+    }
+
+    // Attempt 5: quote unquoted property names — models very occasionally emit
+    // JavaScript-style bare keys (e.g. { key: "value" } instead of { "key": "value" }).
+    // Only match identifiers immediately after { or , and before : to avoid
+    // corrupting string values.
+    const quotedKeys = noTrailingCommas.replace(
+      /([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)/g,
+      '$1"$2"$3',
+    );
+    if (quotedKeys !== noTrailingCommas) {
+      try {
+        return JSON.parse(quotedKeys);
+      } catch {
+        // fall through to truncation checks
+      }
+    }
+
+    // Truncation-specific errors — surface a human-readable message instead of the raw SyntaxError
     if (
       context.provider === "gemini" &&
       context.finishReason === "MAX_TOKENS" &&
-      error instanceof SyntaxError
+      firstError instanceof SyntaxError
     ) {
       throw new Error(
         `Structured output was truncated because Gemini hit MAX_TOKENS. ${context.finishMessage ?? "Try retrying with a smaller output or a higher token limit."}`.trim(),
@@ -77,14 +131,14 @@ export function parseStructuredJsonText(
     if (
       context.provider === "deepseek" &&
       context.finishReason === "length" &&
-      error instanceof SyntaxError
+      firstError instanceof SyntaxError
     ) {
       throw new Error(
         "Structured output was truncated because DeepSeek hit the token limit. Try retrying or reduce the number of target years.",
       );
     }
 
-    throw error;
+    throw firstError;
   }
 }
 

@@ -60,11 +60,6 @@
 import { callLLM } from "./llm-service.ts";
 import type { CallLLMOptions, CallLLMResult } from "./llm-service.ts";
 import type { LLMProvider } from "@/types/cfp";
-
-// =============================================================================
-// Token estimation (same heuristic as extraction-chunker.ts)
-// =============================================================================
-
 /** 4 chars ≈ 1 token for English / financial text. */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);

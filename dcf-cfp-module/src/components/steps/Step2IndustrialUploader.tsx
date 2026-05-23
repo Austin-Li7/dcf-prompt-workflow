@@ -43,6 +43,7 @@ import {
   type IndustrialPerFileResult,
 } from "@/lib/multi-file-industrial-pipeline";
 import { injectIndustrialDerivedQ4Rows } from "@/lib/filing-hints";
+import { normalizeSegmentNames } from "@/lib/segment-normalizer";
 import { projectStep2IndustrialStructuredToRows } from "@/lib/step2-industrial-schema";
 import { deleteMfSession } from "@/lib/extraction-state";
 import type { FilingHints, HistoricalExtractionRow } from "@/types/cfp";
@@ -253,6 +254,9 @@ export default function Step2IndustrialUploader({
         const projected = projectStep2IndustrialStructuredToRows(structuredResult, filing.filingType);
         allRows.push(...projected.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
       }
+
+      // Normalize segment names against Step 1 canonical set
+      normalizeSegmentNames(allRows, architecture);
 
       // Inject derived Q4 rows (Annual − Q1 − Q2 − Q3 for flow metrics; year-end for headcount)
       const withQ4 = injectIndustrialDerivedQ4Rows(allRows, uid);

@@ -5,6 +5,7 @@ import type {
   CapitalAllocationData,
   Step4ReviewState,
   Step4WorkflowStatus,
+  TrendAnalysisResult,
 } from "../types/cfp.ts";
 
 /** Truncates to maxLen instead of hard-failing — same pattern as step2-bank-schema.ts */
@@ -937,4 +938,51 @@ export function buildStep4ReviewState(result: Step4StructuredResult): Step4Revie
       capitalMetricIds: warning.capital_metric_ids,
     })),
   };
+}
+
+// =============================================================================
+// Shared prompt utility — trend ceiling block injected into Step 4 prompts
+// =============================================================================
+
+/**
+ * Formats the deterministic logistic-regression trend results into a prompt block
+ * for both the synergies (Step 4) and capital allocation (Step 4.5) routes.
+ *
+ * Three branches per segment:
+ *   1. Fit succeeded  → plateau ceiling + next-year growth limit (the hard ceiling).
+ *   2. Fit failed, CAGR available → informational CAGR tagged [INFORMATIONAL, not a ceiling].
+ *   3. No usable signal → explicit "no reliable trend" so the LLM doesn't fabricate one.
+ *
+ * CAGR fallbacks are never passed as growth limits — doing so caused the LLM to
+ * anchor forecasts to backward-looking decline rates for non-monotone segments.
+ */
+export function formatTrendCeilings(trendAnalysis: TrendAnalysisResult | null | undefined): string {
+  if (!trendAnalysis || Object.keys(trendAnalysis.segments).length === 0) return "";
+
+  const lines = Object.entries(trendAnalysis.segments).map(([seg, r]) => {
+    if (r.fit_ok && r.calculated_plateau_ceiling_usd_m != null) {
+      const ceiling = `plateau $${r.calculated_plateau_ceiling_usd_m.toFixed(0)}M`;
+      const growth = r.modeled_next_year_growth_limit_pct != null
+        ? `next-year growth limit ${r.modeled_next_year_growth_limit_pct.toFixed(1)}%`
+        : "growth limit unknown";
+      const sat = r.is_plateau_detected ? " [SATURATED]" : "";
+      const quality = r.fit_quality_r2 != null ? ` R²=${r.fit_quality_r2.toFixed(2)}` : "";
+      return `  - ${seg}: ${ceiling}, ${growth}${sat}${quality}`;
+    }
+    if (r.historical_cagr_pct != null) {
+      return `  - ${seg}: no plateau fit (shape=${r.series_shape}); historical CAGR ${r.historical_cagr_pct.toFixed(1)}% [INFORMATIONAL, not a ceiling]`;
+    }
+    return `  - ${seg}: no reliable trend (shape=${r.series_shape}); derive growth from synergies/competition/management guidance`;
+  });
+
+  return [
+    "",
+    "BACKEND TREND ANALYSIS (logistic S-curve regression on Step 2 data — no LLM, deterministic):",
+    ...lines,
+    "STRATEGIC OVERRIDE RULE: If any synergy driver or capital allocation would push a segment with a plateau-derived growth limit above that limit,",
+    "you MUST document a growth_justification naming the specific catalyst breaking the mathematical curve",
+    "(e.g. 'Competitor bankruptcy releases 15% TAM share', 'New product launch expands addressable market').",
+    "Narrative optimism without a named catalyst is not a valid override.",
+    "Lines tagged [INFORMATIONAL] or 'no reliable trend' carry NO ceiling — derive growth from other Step 3/4 signals.",
+  ].join("\n");
 }

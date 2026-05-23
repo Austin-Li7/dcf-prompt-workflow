@@ -23,18 +23,16 @@ function compactText(maxLength: number) {
 const SourceSchema = z.object({
   document: z.string().min(1),
   section: z.string().min(1),
-  page: z.string().min(1).optional(),
+  page: z.preprocess((v) => (v === "" ? undefined : v), z.string().min(1).optional()),
 });
 
 const ClaimSchema = z.object({
   claim_id: z.string().min(1),
   text: z.string().min(1),
-  // S4: LLM may send "" instead of null — preprocess empty string → null before schema runs
   source_snippet: z.preprocess(
     (v) => (v === "" ? null : v),
     compactText(180).nullable(),
   ),
-  // S5: same guard as source_snippet
   source_location: z.preprocess(
     (v) => (v === "" ? null : v),
     z.string().min(1).nullable(),
@@ -112,11 +110,11 @@ export const Step1StructuredSchema = z
     }),
     analysis_view: z.object({
       segments: z.array(AnalysisSegmentSchema),
-      excluded_items: z.array(ExcludedItemSchema).default([]),         // S1
-      canonical_name_registry: z.record(z.string().min(1), z.string().min(1)).default({}), // S2
+      excluded_items: z.array(ExcludedItemSchema).default([]),
+      canonical_name_registry: z.record(z.string().min(1), z.string().min(1)).default({}),
     }),
     claims: z.array(ClaimSchema),
-    sources: z.array(SourceSchema).default([]),                        // S3
+    sources: z.array(SourceSchema).default([]),
   })
   .superRefine((payload, ctx) => {
     const claimIds = new Set(payload.claims.map((claim) => claim.claim_id));
@@ -383,6 +381,7 @@ export function projectStructuredStep1ToArchitecture(
   return {
     architecture: result.analysis_view.segments.map((segment) => ({
       segment: segment.canonical_name,
+      ...(segment.workflow_mode ? { workflow_mode: segment.workflow_mode } : {}),
       businessLines: segment.offerings.map((offering) => ({
         name: offering.canonical_name,
         products: offering.products,

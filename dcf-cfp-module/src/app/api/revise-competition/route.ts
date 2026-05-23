@@ -122,6 +122,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReviseCompeti
       responseToolName: "submit_step3_category_revision",
       responseToolDescription:
         "Submit the revised Step 3 structured category while preserving source grounding fields.",
+      skipConfirmation: true,
+      skipContextCompression: true,
     });
 
     const revisedStructuredCategory = parseStep3Category(
