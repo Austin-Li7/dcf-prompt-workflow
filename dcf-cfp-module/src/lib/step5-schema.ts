@@ -233,8 +233,30 @@ function sanitizeSchemaForGemini(value: unknown): unknown {
   return sanitized;
 }
 
-export const GEMINI_STEP5_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
-  STEP5_RESPONSE_SCHEMA,
+/** Force every object property to appear in `required` so Gemini cannot silently
+ *  omit optional/nullable fields (e.g. nim_pct, fcfe_usd_m). Fields that are
+ *  `nullable: true` in the sanitized schema still accept null — the constraint
+ *  only prevents the key from being absent entirely. */
+function forceRequireAllProperties(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => forceRequireAllProperties(item));
+  }
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(record)) {
+    result[key] = forceRequireAllProperties(val);
+  }
+  if (result.type === "object" && result.properties && typeof result.properties === "object") {
+    const propertyNames = Object.keys(result.properties as Record<string, unknown>);
+    const existing = Array.isArray(result.required) ? (result.required as string[]) : [];
+    result.required = Array.from(new Set([...existing, ...propertyNames]));
+  }
+  return result;
+}
+
+export const GEMINI_STEP5_RESPONSE_SCHEMA = forceRequireAllProperties(
+  sanitizeSchemaForGemini(STEP5_RESPONSE_SCHEMA),
 ) as Record<string, unknown>;
 
 function normalizeStep5StructuredPayload(payload: unknown): unknown {

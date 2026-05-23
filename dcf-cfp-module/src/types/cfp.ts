@@ -1210,6 +1210,10 @@ export interface GenerateForecastResponse {
   nextAction?: Step5NextAction;
   error?: string;
   requiresApiKey?: boolean;
+  /** S5-1: Set when this is a bank/FCFE segment but the model omitted required
+   *  FCFE fields (nim_pct, net_income_usd_m, fcfe_usd_m). A non-null value here
+   *  means bank enterprise value will be zero in Step 8 unless the user regenerates. */
+  bankFcfeWarning?: string;
 }
 
 /** Global state for Step 5 */

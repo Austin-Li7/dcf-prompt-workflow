@@ -30,7 +30,7 @@ function cloneProducts(p: ProductForecast[]): ProductForecast[] {
 }
 
 /**
- * Apply a sensitivity % to the AI baseline to produce user-active numbers.
+ * S5-3 (industrial): Apply a growth-rate sensitivity % to the AI baseline.
  * For each quarter: adjust yoyGrowth by adding sensitivityPct, then recompute
  * absolute revenueM by chaining from Q1Y1's baseline value.
  */
@@ -65,6 +65,53 @@ function applySensitivity(
         }
         adjusted.push({ ...base, revenueM: Math.round(newRevenue * 10) / 10, yoyGrowth: Math.round(adjustedGrowth * 10) / 10 });
         prevRevenue = newRevenue;
+      }
+    }
+    return { ...prod, forecast: adjusted };
+  });
+}
+
+/**
+ * S5-3 (bank): Apply a NIM sensitivity in basis points to the AI baseline.
+ * NII (revenue) scales proportionally to the NIM change: newNII = baseNII × (newNIM / baseNIM).
+ * Net income and FCFE scale by the same factor (approximate — assumes fixed OpEx and PCL).
+ * Falls back to growth-rate adjustment when nimPct is not available.
+ */
+function applyBankSensitivity(
+  baseline: ProductForecast[],
+  nimDeltaBps: number,  // e.g. +25 = NIM rose 25 bps = +0.25 percentage points
+  overrides: Map<string, number>,
+): ProductForecast[] {
+  const nimDeltaPct = nimDeltaBps / 100; // bps → percentage-point delta
+  return baseline.map(prod => {
+    const adjusted: ForecastQuarterPoint[] = [];
+    for (let i = 0; i < prod.forecast.length; i++) {
+      const base = prod.forecast[i];
+      const key = `${prod.productName}|${base.year}|${base.quarter}`;
+      const overrideVal = overrides.get(key);
+      if (overrideVal !== undefined) {
+        adjusted.push({ ...base, revenueM: overrideVal });
+      } else if (base.nimPct != null && base.nimPct > 0) {
+        // Scale NII proportionally to NIM change
+        const newNimPct = base.nimPct + nimDeltaPct;
+        const scaleFactor = newNimPct / base.nimPct;
+        adjusted.push({
+          ...base,
+          nimPct: Math.round(newNimPct * 1000) / 1000,
+          revenueM: Math.round(base.revenueM * scaleFactor * 10) / 10,
+          netIncomeM: base.netIncomeM != null ? Math.round(base.netIncomeM * scaleFactor * 10) / 10 : null,
+          provisionForCreditLossesM: base.provisionForCreditLossesM,
+          regulatoryCapitalIncreaseM: base.regulatoryCapitalIncreaseM,
+          fcfeM: base.fcfeM != null ? Math.round(base.fcfeM * scaleFactor * 10) / 10 : null,
+        });
+      } else {
+        // Fallback when nimPct absent: treat 50 bps ≈ 1% growth adjustment
+        const growthAdj = (nimDeltaBps / 50) * 1.0;
+        const baseRatio = i > 0 ? base.revenueM / (prod.forecast[i - 1]?.revenueM || 1) : 1;
+        const newRevenue = i === 0
+          ? base.revenueM
+          : (adjusted[i - 1]?.revenueM ?? base.revenueM) * baseRatio * (1 + growthAdj / 100);
+        adjusted.push({ ...base, revenueM: Math.round(newRevenue * 10) / 10, yoyGrowth: Math.round((base.yoyGrowth + growthAdj) * 10) / 10 });
       }
     }
     return { ...prod, forecast: adjusted };
@@ -112,12 +159,16 @@ export default function Step5Forecast() {
   // ---- Dual state architecture ----
   const [aiBaseline, setAiBaseline] = useState<ProductForecast[]>([]);
   const [userActive, setUserActive] = useState<ProductForecast[]>([]);
-  const [sensitivity, setSensitivity] = useState(0);
+  // S5-3: separate sliders — industrial uses growth % (−10 to +10), bank uses NIM bps (−50 to +50)
+  const [sensitivity, setSensitivity] = useState(0);          // industrial growth % delta
+  const [bankSensitivityBps, setBankSensitivityBps] = useState(0); // bank NIM bps delta
   const [overrides, setOverrides] = useState<Map<string, number>>(new Map());
   const [reviewSummary, setReviewSummary] = useState<Step5ReviewSummary | null>(null);
   const [structuredResult, setStructuredResult] = useState<Step5StructuredResult | null>(null);
   const [workflowStatus, setWorkflowStatus] = useState<Step5WorkflowStatus | null>(null);
   const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
+  // S5-1: bank FCFE completeness warning
+  const [bankFcfeWarning, setBankFcfeWarning] = useState<string | null>(null);
 
   // ---- Approved segments accumulator ----
   const [approvedSegments, setApprovedSegments] = useState<SegmentForecastBundle[]>(
@@ -162,7 +213,7 @@ export default function Step5Forecast() {
   // Generate forecast for current segment
   // ================================================================
   const handleGenerate = useCallback(async () => {
-    setErrorMsg(null); setIsLoading(true);
+    setErrorMsg(null); setBankFcfeWarning(null); setIsLoading(true);
     try {
       const res = await fetch("/api/generate-forecast", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -174,6 +225,8 @@ export default function Step5Forecast() {
           trendAnalysis: state.history.trendAnalysis ?? null,
           targetSegment: currentSegment,
           liquidityRiskRating: state.wacc.liquidityAssessment?.rating ?? null,
+          // S5-4: pass approved results for cross-segment consistency anchoring
+          approvedStructuredResults: approvedStructuredResults,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),
@@ -188,18 +241,26 @@ export default function Step5Forecast() {
       setWorkflowStatus(d.workflowStatus ?? null);
       setReviewAcknowledged(false);
       setSensitivity(0);
+      setBankSensitivityBps(0);
       setOverrides(new Map());
+      // S5-1: surface FCFE completeness warning
+      setBankFcfeWarning(d.bankFcfeWarning ?? null);
       setPhase("forecast");
     } catch (e: unknown) { setErrorMsg(e instanceof Error ? e.message : "Failed."); }
     finally { setIsLoading(false); }
-  }, [state.profile.architectureJson, state.history, state.competition, state.synergies, currentSegment, activeApiKey, settings.llmProvider]);
+  }, [state.profile.architectureJson, state.history, state.competition, state.synergies, currentSegment, activeApiKey, settings.llmProvider, approvedStructuredResults]);
 
   // ================================================================
-  // Sensitivity slider change
+  // Sensitivity slider changes (S5-3: separate sliders per mode)
   // ================================================================
   const handleSensitivityChange = (val: number) => {
     setSensitivity(val);
     setUserActive(applySensitivity(aiBaseline, val, overrides));
+  };
+
+  const handleBankSensitivityChange = (val: number) => {
+    setBankSensitivityBps(val);
+    setUserActive(applyBankSensitivity(aiBaseline, val, overrides));
   };
 
   // ================================================================
@@ -210,7 +271,12 @@ export default function Step5Forecast() {
     const newOverrides = new Map(overrides);
     newOverrides.set(key, value);
     setOverrides(newOverrides);
-    setUserActive(applySensitivity(aiBaseline, sensitivity, newOverrides));
+    // Use the right sensitivity function based on current segment mode
+    if (isBankFcfe) {
+      setUserActive(applyBankSensitivity(aiBaseline, bankSensitivityBps, newOverrides));
+    } else {
+      setUserActive(applySensitivity(aiBaseline, sensitivity, newOverrides));
+    }
   };
 
   // ================================================================
@@ -218,6 +284,7 @@ export default function Step5Forecast() {
   // ================================================================
   const handleReset = () => {
     setSensitivity(0);
+    setBankSensitivityBps(0);
     setOverrides(new Map());
     setUserActive(cloneProducts(aiBaseline));
   };
@@ -253,11 +320,13 @@ export default function Step5Forecast() {
       setAiBaseline([]);
       setUserActive([]);
       setSensitivity(0);
+      setBankSensitivityBps(0);
       setOverrides(new Map());
       setReviewSummary(null);
       setStructuredResult(null);
       setWorkflowStatus(null);
       setReviewAcknowledged(false);
+      setBankFcfeWarning(null);
       setPhase("setup");
     } else {
       setPhase("dashboard");
@@ -314,7 +383,8 @@ export default function Step5Forecast() {
     setApprovedStructuredResults([]);
     setAiBaseline([]); setUserActive([]);
     setReviewSummary(null); setStructuredResult(null); setWorkflowStatus(null); setReviewAcknowledged(false);
-    setSensitivity(0); setOverrides(new Map());
+    setSensitivity(0); setBankSensitivityBps(0); setOverrides(new Map());
+    setBankFcfeWarning(null);
     setPhase("setup"); setErrorMsg(null);
   };
 
@@ -492,21 +562,72 @@ export default function Step5Forecast() {
                 </div>
               )}
 
-              {/* Sensitivity slider */}
+              {/* S5-1: Bank FCFE completeness warning */}
+              {bankFcfeWarning && (
+                <div className="rounded-lg border border-red-700/50 bg-red-950/30 p-4 text-sm text-red-200">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+                    <div className="flex-1">
+                      <p className="font-semibold text-red-300">Bank FCFE fields incomplete — zero bank EV risk</p>
+                      <p className="mt-1 text-xs text-red-300/80">{bankFcfeWarning}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      onClick={handleGenerate}
+                      disabled={isLoading}
+                      className="flex items-center gap-1.5 rounded bg-red-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-600 disabled:opacity-50">
+                      {isLoading ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                      Regenerate Forecast
+                    </button>
+                    <button
+                      onClick={() => setBankFcfeWarning(null)}
+                      className="rounded border border-red-700/50 px-3 py-1.5 text-xs text-red-400 hover:border-red-600">
+                      Proceed with Incomplete Data
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* S5-3: Dual sensitivity sliders — bank uses NIM bps, industrial uses growth % */}
               <div className="rounded-xl border border-zinc-700 bg-zinc-900/80 p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <SlidersHorizontal size={16} className="text-blue-400" />
-                  <span className="text-sm font-medium text-zinc-300">Scenario Sensitivity</span>
-                  <span className={`ml-auto text-sm font-bold tabular-nums ${sensitivity === 0 ? "text-zinc-400" : sensitivity > 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {sensitivity > 0 ? "+" : ""}{sensitivity}%
+                  <span className="text-sm font-medium text-zinc-300">
+                    {isBankFcfe ? "NIM Sensitivity" : "Growth Rate Sensitivity"}
                   </span>
+                  {isBankFcfe ? (
+                    <span className={`ml-auto text-sm font-bold tabular-nums ${bankSensitivityBps === 0 ? "text-zinc-400" : bankSensitivityBps > 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {bankSensitivityBps > 0 ? "+" : ""}{bankSensitivityBps} bps
+                    </span>
+                  ) : (
+                    <span className={`ml-auto text-sm font-bold tabular-nums ${sensitivity === 0 ? "text-zinc-400" : sensitivity > 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {sensitivity > 0 ? "+" : ""}{sensitivity}%
+                    </span>
+                  )}
                 </div>
-                <input type="range" min={-10} max={10} step={0.5} value={sensitivity}
-                  onChange={(e) => handleSensitivityChange(Number(e.target.value))}
-                  className="w-full accent-blue-500" />
-                <div className="flex justify-between text-xs text-zinc-600">
-                  <span>-10% Bear</span><span>0% Base</span><span>+10% Bull</span>
-                </div>
+                {isBankFcfe ? (
+                  <>
+                    <input type="range" min={-50} max={50} step={5} value={bankSensitivityBps}
+                      onChange={(e) => handleBankSensitivityChange(Number(e.target.value))}
+                      className="w-full accent-sky-500" />
+                    <div className="flex justify-between text-xs text-zinc-600">
+                      <span>−50 bps NIM compression</span><span>0 Base</span><span>+50 bps NIM expansion</span>
+                    </div>
+                    <p className="text-xs text-zinc-500">
+                      Adjusts NIM and proportionally scales NII (revenue), Net Income, and FCFE. PCL and regulatory capital remain at model baseline.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <input type="range" min={-10} max={10} step={0.5} value={sensitivity}
+                      onChange={(e) => handleSensitivityChange(Number(e.target.value))}
+                      className="w-full accent-blue-500" />
+                    <div className="flex justify-between text-xs text-zinc-600">
+                      <span>−10% Bear</span><span>0% Base</span><span>+10% Bull</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Reset button */}

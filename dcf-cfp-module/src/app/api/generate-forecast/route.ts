@@ -19,6 +19,7 @@ import type {
   SynergiesAndDrivers,
   TrendAnalysisResult,
 } from "@/types/cfp";
+import type { Step5StructuredResult } from "@/lib/step5-schema";
 
 // =============================================================================
 // Legacy parse helpers (kept for fallback path)
@@ -86,44 +87,79 @@ function leanArchitecture(arch: BusinessArchitecture | null | undefined) {
 }
 
 /**
- * Keep only the last 2 confirmed fiscal years and only the fields the LLM
- * needs to anchor its forecast. Excludes: id, yoyGrowth, notes, review
- * status fields, sourceName/Link/Type, and structuredResults (which are
- * large LLM artifacts from Step 2 and not needed here — baselineContext
- * already extracts the key revenue anchors).
+ * S5-2: Tiered history compression.
+ * - Recent 2 fiscal years: full row detail (quarterly rows preserved) so the
+ *   LLM can see NIM, CET1, and PCL trends needed for FCFE construction.
+ * - Older fiscal years: one annual-summary row per segment/year — just the
+ *   key revenue/NII/NIM/NI fields. This preserves S-curve inflection data
+ *   without flooding the context with redundant quarterly rows.
+ *
+ * Excludes in all cases: id, yoyGrowth, notes, review status fields,
+ * sourceName/Link/Type, and structuredResults (handled by baselineContext).
  */
 function leanHistory(history: HistoricalData | null | undefined) {
   if (!history) return null;
   const rows = history.rows ?? [];
   const sortedYears = [...new Set(rows.map((r) => r.fiscalYear))].sort((a, b) => b - a);
-  const keepYears = new Set(sortedYears.slice(0, 2));
+  const recentYears = new Set(sortedYears.slice(0, 2));
+  const olderYears = sortedYears.slice(2);
+
+  // Shared field mapper — full detail
+  const mapRow = (r: (typeof rows)[number], quarterOverride?: string | null) => ({
+    fiscalYear: r.fiscalYear,
+    quarter: quarterOverride !== undefined ? quarterOverride : r.quarter,
+    segment: r.segment,
+    productCategory: r.productCategory,
+    productName: r.productName,
+    revenue: r.revenue,
+    operatingIncome: r.operatingIncome,
+    // Bank fields — include only when populated
+    ...(r.nii_usd_m != null ? { nii_usd_m: r.nii_usd_m } : {}),
+    ...(r.net_interest_margin_pct != null ? { net_interest_margin_pct: r.net_interest_margin_pct } : {}),
+    ...(r.provision_for_credit_losses_usd_m != null ? { provision_for_credit_losses_usd_m: r.provision_for_credit_losses_usd_m } : {}),
+    ...(r.net_income_usd_m != null ? { net_income_usd_m: r.net_income_usd_m } : {}),
+    ...(r.cet1_ratio_pct != null ? { cet1_ratio_pct: r.cet1_ratio_pct } : {}),
+    ...(r.book_value_equity_usd_m != null ? { book_value_equity_usd_m: r.book_value_equity_usd_m } : {}),
+    ...(r.goodwill_usd_m != null ? { goodwill_usd_m: r.goodwill_usd_m } : {}),
+    ...(r.intangible_assets_usd_m != null ? { intangible_assets_usd_m: r.intangible_assets_usd_m } : {}),
+    ...(r.preferred_equity_usd_m != null ? { preferred_equity_usd_m: r.preferred_equity_usd_m } : {}),
+    // Industrial fields — include only when populated
+    ...(r.capex_usd_m != null ? { capex_usd_m: r.capex_usd_m } : {}),
+    ...(r.gross_profit_usd_m != null ? { gross_profit_usd_m: r.gross_profit_usd_m } : {}),
+    ...(r.depreciation_amortization_usd_m != null ? { depreciation_amortization_usd_m: r.depreciation_amortization_usd_m } : {}),
+  });
+
+  // Recent 2 years — preserve all rows (quarterly granularity for NIM/CET1 trends)
+  const recentRows = rows.filter((r) => recentYears.has(r.fiscalYear)).map((r) => mapRow(r));
+
+  // Older years — one annual-summary row per segment per fiscal year
+  const olderRows: ReturnType<typeof mapRow>[] = [];
+  for (const year of olderYears) {
+    const yearRows = rows.filter((r) => r.fiscalYear === year);
+    // Group by segment
+    const bySegment = new Map<string, typeof yearRows>();
+    for (const r of yearRows) {
+      const seg = r.segment ?? "";
+      bySegment.set(seg, [...(bySegment.get(seg) ?? []), r]);
+    }
+    for (const [, segRows] of bySegment) {
+      // Pick best annual row: prefer null quarter (true annual), then Q4, then last
+      const annual =
+        segRows.find((r) => !r.quarter) ??
+        segRows.find((r) => r.quarter === "Q4" || r.quarter === "FY" || r.quarter === "Annual") ??
+        segRows[segRows.length - 1];
+      if (annual) {
+        olderRows.push(mapRow(annual, null)); // null quarter = annual summary
+      }
+    }
+  }
+
   return {
     confirmedYears: history.confirmedYears ?? [],
-    rows: rows
-      .filter((r) => keepYears.has(r.fiscalYear))
-      .map((r) => ({
-        fiscalYear: r.fiscalYear,
-        quarter: r.quarter,
-        segment: r.segment,
-        productCategory: r.productCategory,
-        productName: r.productName,
-        revenue: r.revenue,
-        operatingIncome: r.operatingIncome,
-        // Bank fields — include only when populated
-        ...(r.nii_usd_m != null ? { nii_usd_m: r.nii_usd_m } : {}),
-        ...(r.net_interest_margin_pct != null ? { net_interest_margin_pct: r.net_interest_margin_pct } : {}),
-        ...(r.provision_for_credit_losses_usd_m != null ? { provision_for_credit_losses_usd_m: r.provision_for_credit_losses_usd_m } : {}),
-        ...(r.net_income_usd_m != null ? { net_income_usd_m: r.net_income_usd_m } : {}),
-        ...(r.cet1_ratio_pct != null ? { cet1_ratio_pct: r.cet1_ratio_pct } : {}),
-        ...(r.book_value_equity_usd_m != null ? { book_value_equity_usd_m: r.book_value_equity_usd_m } : {}),
-        ...(r.goodwill_usd_m != null ? { goodwill_usd_m: r.goodwill_usd_m } : {}),
-        ...(r.intangible_assets_usd_m != null ? { intangible_assets_usd_m: r.intangible_assets_usd_m } : {}),
-        ...(r.preferred_equity_usd_m != null ? { preferred_equity_usd_m: r.preferred_equity_usd_m } : {}),
-        // Industrial fields — include only when populated
-        ...(r.capex_usd_m != null ? { capex_usd_m: r.capex_usd_m } : {}),
-        ...(r.gross_profit_usd_m != null ? { gross_profit_usd_m: r.gross_profit_usd_m } : {}),
-        ...(r.depreciation_amortization_usd_m != null ? { depreciation_amortization_usd_m: r.depreciation_amortization_usd_m } : {}),
-      })),
+    rows: [...recentRows, ...olderRows],
+    ...(olderYears.length > 0
+      ? { _note: `Older years (${olderYears.join(", ")}) shown as one annual-summary row per segment for S-curve inflection context.` }
+      : {}),
   };
 }
 
@@ -173,6 +209,63 @@ function leanSynergies(synergies: SynergiesAndDrivers | null | undefined) {
     capitalCeilingUsdM: ceiling,
     workflowStatus: synergies.step4Review?.workflowStatus ?? null,
   };
+}
+
+/**
+ * S5-4: Build a cross-segment consistency block from already-approved segments.
+ * The LLM must align macro assumptions (NIM trajectory, growth rates) across
+ * segments in the same company — contradictory assumptions indicate a model error.
+ */
+function buildCrossSegmentAnchors(approvedResults: Step5StructuredResult[]): string {
+  if (!approvedResults || approvedResults.length === 0) return "";
+
+  const lines: string[] = [
+    "",
+    "CROSS-SEGMENT CONSISTENCY ANCHORS (from already-approved segments — maintain alignment):",
+  ];
+
+  for (const result of approvedResults) {
+    const isBank = result.valuation_method === "FCFE";
+    const ftRows = result.machine_artifact.forecast_table;
+    if (ftRows.length === 0) continue;
+
+    // For SEGMENT_ANNUAL mode, each row is a fiscal year; for quarterly modes, dedupe by year
+    const seenYears = new Set<string>();
+    const annualRows = ftRows.filter((r) => {
+      if (seenYears.has(r.fiscal_year)) return false;
+      seenYears.add(r.fiscal_year);
+      return true;
+    });
+
+    const segName = ftRows[0]?.segment ?? "?";
+    if (isBank) {
+      const nimParts = annualRows
+        .map((r) => (r.nim_pct != null ? `${r.fiscal_year}:${r.nim_pct.toFixed(2)}%` : null))
+        .filter(Boolean)
+        .join(", ");
+      const fcfeParts = annualRows
+        .map((r) => (r.fcfe_usd_m != null ? `${r.fiscal_year}:$${r.fcfe_usd_m.toFixed(0)}M` : null))
+        .filter(Boolean)
+        .join(", ");
+      lines.push(
+        `  - "${segName}" (FCFE/bank): NIM trajectory=${nimParts || "n/a"}; FCFE trajectory=${fcfeParts || "n/a"}`,
+      );
+    } else {
+      const growthParts = annualRows
+        .map((r) => `${r.fiscal_year}:${r.yoy_growth_pct.toFixed(1)}%`)
+        .join(", ");
+      lines.push(`  - "${segName}" (FCFF/industrial): Revenue growth=${growthParts}`);
+    }
+  }
+
+  lines.push(
+    "Consistency rule: segments within the same company share the same macro environment.",
+    "  - If an industrial segment assumes 8%+ growth, the macro must support bank NIM stability.",
+    "  - If bank NIM is projected to compress, industrial pricing power should also be tempered.",
+    "  - Flag contradictory assumptions in review_summary.warnings.",
+  );
+
+  return lines.join("\n");
 }
 
 /**
@@ -272,6 +365,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
       trendAnalysis,
       targetSegment,
       liquidityRiskRating,
+      approvedStructuredResults,
       apiKey: runtimeKey,
       llmProvider = "claude" as LLMProvider,
     } = body;
@@ -302,6 +396,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
 
     const isBankMode = detectBankMode(step2History as HistoricalData, targetSegment);
     const trendCeilingBlock = formatSegmentTrendCeiling(trendAnalysis as TrendAnalysisResult | null, targetSegment);
+    // S5-4: Cross-segment consistency anchors from already-approved segments
+    const crossSegmentBlock = buildCrossSegmentAnchors(
+      Array.isArray(approvedStructuredResults) ? (approvedStructuredResults as Step5StructuredResult[]) : [],
+    );
 
     // DeepSeek V3 hard-caps output at 8 192 tokens.
     // Instruct it to produce a minimal-but-valid artifact that fits within that budget.
@@ -334,7 +432,7 @@ ${outputConstraint}
 Step 1 architecture:
 ${JSON.stringify(archLean)}
 
-Step 2 historical baseline (last 2 fiscal years):
+Step 2 historical baseline (recent 2 fiscal years in full detail; older years as annual summaries for S-curve inflection context):
 ${JSON.stringify(historyLean)}
 
 Step 3 competition — Porter's Five Forces ratings per category:
@@ -346,6 +444,7 @@ ${JSON.stringify(synergiesLean)}
 Authoritative Step 2 baseline anchors (FY+1 must start from baselineRevenueUsdM):
 ${JSON.stringify(baselineContext)}
 ${trendCeilingBlock}
+${crossSegmentBlock}
 
 Rules:
 - schema_version must be exactly "v5.5".
@@ -457,12 +556,47 @@ ${liquidityConstraint}`;
       );
     }
 
+    // S5-1: Validate bank FCFE field completeness.
+    // If this is a bank/FCFE segment but the model omitted nim_pct / net_income_usd_m /
+    // fcfe_usd_m, the downstream Step 8 valuation will produce zero bank EV.
+    // Surface a clear warning rather than silently producing a broken DCF.
+    let bankFcfeWarning: string | undefined;
+    if (isBankMode || structuredResult.valuation_method === "FCFE") {
+      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const tgt = norm(targetSegment);
+      const segRows = structuredResult.machine_artifact.forecast_table.filter((r) => {
+        const src = norm(r.segment);
+        return src === tgt || (tgt.length >= 5 && (src.includes(tgt) || tgt.includes(src)));
+      });
+      const missingFields = new Set<string>();
+      let nullRowCount = 0;
+      for (const row of segRows) {
+        const missing: string[] = [];
+        if (row.nim_pct == null) missing.push("NIM %");
+        if (row.net_income_usd_m == null) missing.push("Net Income");
+        if (row.fcfe_usd_m == null) missing.push("FCFE");
+        if (missing.length > 0) {
+          nullRowCount++;
+          missing.forEach((f) => missingFields.add(f));
+        }
+      }
+      if (missingFields.size > 0) {
+        bankFcfeWarning =
+          `Bank FCFE fields missing in ${nullRowCount} of ${segRows.length} forecast row(s): ` +
+          `${Array.from(missingFields).join(", ")}. ` +
+          `Step 8 will compute zero bank enterprise value unless these fields are populated. ` +
+          `Regenerate the forecast (the schema now forces Gemini to emit all fields) or ` +
+          `check that Step 2 bank data is complete before retrying.`;
+      }
+    }
+
     return NextResponse.json({
       products,
       structuredResult,
       reviewSummary: structuredResult.review_summary,
       workflowStatus: structuredResult.machine_artifact.workflow_status,
       nextAction: structuredResult.machine_artifact.next_action,
+      ...(bankFcfeWarning ? { bankFcfeWarning } : {}),
     });
   } catch (err: unknown) {
     console.error("[generate-forecast] Error:", err);
