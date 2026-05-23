@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
+import { extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import { guardedCallLLM } from "@/lib/llm-guard";
 import {
   buildStep3ReviewState,
@@ -8,16 +8,25 @@ import {
   projectStep3StructuredToCategories,
   STEP3_RESPONSE_SCHEMA,
 } from "@/lib/step3-schema";
-import type { LLMProvider, AnalyzeCompetitionResponse, BusinessArchitecture } from "@/types/cfp";
+import { buildStep2FinancialSummary } from "@/lib/step3-financial-context";
+import type {
+  LLMProvider,
+  AnalyzeCompetitionResponse,
+  BusinessArchitecture,
+  HistoricalExtractionRow,
+  TrendAnalysisResult,
+} from "@/types/cfp";
 
 // =============================================================================
 // POST /api/analyze-competition
 // =============================================================================
 // Accepts JSON body:
-//   - companyName       (string)
-//   - architecture      (BusinessArchitecture — Step 1 architecture JSON, now includes workflow_mode)
-//   - companyType       (string | null — e.g. "hybrid", "financial_bank", "industrial")
-//   - apiKey            (string, optional)
+//   - companyName         (string)
+//   - architecture        (BusinessArchitecture — Step 1 architecture JSON)
+//   - companyType         (string | null — e.g. "hybrid", "financial_bank", "industrial")
+//   - step2Rows           (HistoricalExtractionRow[], optional — confirmed Step 2 history rows)
+//   - step2TrendAnalysis  (TrendAnalysisResult | null, optional — S-curve fit results)
+//   - apiKey              (string, optional)
 // =============================================================================
 
 const STEP3_SYSTEM_PROMPT = [
@@ -57,6 +66,7 @@ function buildStep3Prompt(
   companyName: string,
   architecture: BusinessArchitecture,
   companyType: string | null,
+  financialSummary: string | null,
 ): string {
   const segmentCount = architecture.architecture.length;
   const hybridNote =
@@ -66,11 +76,24 @@ function buildStep3Prompt(
       ? `\nCOMPANY TYPE: financial_bank — all segments are NII-driven and charter-regulated. Apply bank-mode Porter force logic throughout.`
       : "";
 
+  const financialBlock = financialSummary
+    ? [
+        "",
+        financialSummary,
+        "FINANCIAL BENCHMARKING INSTRUCTIONS:",
+        "- Where a segment's NIM or revenue CAGR is materially above peer median, acknowledge the financial premium in verification_note and factor it into Competitive Rivalry and competitive_status ratings.",
+        "- Where an S-curve plateau is DETECTED, flag growth constraint risk in the category's verification_note.",
+        "- Prefer these Step 2 numbers over general industry estimates when sizing scale relative to competitors.",
+        "- Do NOT fabricate competitor financials — if competitor revenue is unknown, state so and lower confidence.",
+      ].join("\n")
+    : "";
+
   return [
     "Task: Produce Step 3 Competitive Landscape and Porter's Five Forces.",
     `Company: ${companyName}`,
     companyType ? `Company type: ${companyType}` : "",
     hybridNote,
+    financialBlock,
     "",
     `MANDATORY: Produce exactly ${segmentCount} or more Porter categories — one per segment below. Do NOT merge segments.`,
     "Segment coverage table (each segment MUST have its own category in your output):",
@@ -102,12 +125,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompet
       companyName,
       architecture,
       companyType = null,
+      step2Rows = [],
+      step2TrendAnalysis = null,
       apiKey: runtimeKey,
       llmProvider = "claude" as LLMProvider,
     }: {
       companyName: string;
       architecture: BusinessArchitecture;
       companyType?: string | null;
+      step2Rows?: HistoricalExtractionRow[];
+      step2TrendAnalysis?: TrendAnalysisResult | null;
       apiKey?: string;
       llmProvider?: LLMProvider;
     } = body;
@@ -118,6 +145,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompet
         { status: 400 },
       );
     }
+
+    const financialSummary = buildStep2FinancialSummary(step2Rows, step2TrendAnalysis);
 
     const { apiKey, needsKey } = resolveApiKey(llmProvider, runtimeKey);
     if (needsKey) {
@@ -136,7 +165,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompet
           provider: llmProvider,
           apiKey,
           systemPrompt: STEP3_SYSTEM_PROMPT,
-          prompt: buildStep3Prompt(companyName, architecture, companyType),
+          prompt: buildStep3Prompt(companyName, architecture, companyType, financialSummary),
           maxTokens: 12288,
           responseSchema:
             llmProvider === "gemini" ? GEMINI_STEP3_RESPONSE_SCHEMA : STEP3_RESPONSE_SCHEMA,
@@ -156,13 +185,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompet
     }
     if (!structuredResult) throw lastError;
 
-    // Inject a validation_warning when the model produced fewer categories than Step 1 segments.
-    // This ensures the review gate surfaces the gap rather than silently passing.
+    // Check every segment has at least one Porter category — run unconditionally so a
+    // model that produces the right *count* but covers one segment twice still gets caught.
     const segmentCount = Array.isArray(architecture?.architecture) ? architecture.architecture.length : 0;
-    if (segmentCount > 0 && structuredResult.categories.length < segmentCount) {
+    if (segmentCount > 0) {
+      const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       const missing = architecture.architecture
         .filter((seg) => !structuredResult!.categories.some((c) =>
-          c.mapped_from_step1_ids.some((id) => id.toLowerCase().includes(seg.segment.toLowerCase())) ||
+          c.mapped_from_step1_ids.some((id) => {
+            const idLower = id.toLowerCase();
+            const segLower = seg.segment.toLowerCase();
+            return idLower.includes(segLower) || idLower.includes(slugify(seg.segment));
+          }) ||
           c.category.toLowerCase().includes(seg.segment.toLowerCase())
         ))
         .map((seg) => seg.segment);

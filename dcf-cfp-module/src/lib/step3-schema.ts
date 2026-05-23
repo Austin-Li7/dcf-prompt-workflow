@@ -300,8 +300,47 @@ function sanitizeSchemaForGemini(value: unknown): unknown {
   return sanitized;
 }
 
-export const GEMINI_STEP3_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
-  STEP3_RESPONSE_SCHEMA,
+/**
+ * Walks the sanitized schema and adds every property name to its parent
+ * object's `required` array. Gemini Flash omits fields that are absent from
+ * `required` (e.g. fields with Zod `.default()` are not required in the JSON
+ * schema). Forcing all fields as required while keeping `nullable: true` on
+ * optional ones tells Gemini to always emit the key (even as null) rather
+ * than silently dropping it.
+ */
+function forceRequireAllProperties(schema: unknown): unknown {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+  const rec = schema as Record<string, unknown>;
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rec)) {
+    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      const props = value as Record<string, unknown>;
+      const recurredProps: Record<string, unknown> = {};
+      for (const [propKey, propSchema] of Object.entries(props)) {
+        recurredProps[propKey] = forceRequireAllProperties(propSchema);
+      }
+      result[key] = recurredProps;
+    } else if (Array.isArray(value)) {
+      result[key] = value.map(forceRequireAllProperties);
+    } else {
+      result[key] = forceRequireAllProperties(value);
+    }
+  }
+
+  if (result.properties && typeof result.properties === "object" && !Array.isArray(result.properties)) {
+    const propNames = Object.keys(result.properties as Record<string, unknown>);
+    const existing = Array.isArray(result.required)
+      ? (result.required as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+    result.required = [...new Set([...existing, ...propNames])];
+  }
+
+  return result;
+}
+
+export const GEMINI_STEP3_RESPONSE_SCHEMA = forceRequireAllProperties(
+  sanitizeSchemaForGemini(STEP3_RESPONSE_SCHEMA),
 ) as Record<string, unknown>;
 
 export const STEP3_CATEGORY_RESPONSE_SCHEMA =
@@ -309,8 +348,8 @@ export const STEP3_CATEGORY_RESPONSE_SCHEMA =
     ? generatedCategorySchema.definitions.Step3Category
     : generatedCategorySchema;
 
-export const GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
-  STEP3_CATEGORY_RESPONSE_SCHEMA,
+export const GEMINI_STEP3_CATEGORY_RESPONSE_SCHEMA = forceRequireAllProperties(
+  sanitizeSchemaForGemini(STEP3_CATEGORY_RESPONSE_SCHEMA),
 ) as Record<string, unknown>;
 
 function normalizeStep3StructuredPayload(payload: unknown): unknown {

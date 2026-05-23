@@ -174,6 +174,8 @@ export default function Step3Competition() {
           companyName: state.profile.companyName,
           architecture: state.profile.architectureJson,
           companyType: state.profile.step1StructuredResult?.company_type ?? null,
+          step2Rows: state.history.rows ?? [],
+          step2TrendAnalysis: state.history.trendAnalysis ?? null,
           apiKey: activeApiKey,
           llmProvider: settings.llmProvider,
         }),
