@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
-  Loader2, Download, AlertTriangle, AlertCircle, CheckCircle2,
+  Loader2, AlertTriangle, AlertCircle, CheckCircle2,
   TrendingUp, Flame, Shield, BarChart3, FileSpreadsheet, CalendarClock, RefreshCw,
 } from "lucide-react";
 import * as XLSX from "xlsx";
@@ -93,8 +93,12 @@ export default function Step6Summary() {
   }, [hasForecast, rows, insights, handleGenerateInsights]);
 
   // ---- Save to context ----
+  const [saved, setSaved] = useState(false);
+  // Reset saved badge whenever insights change so stale "Saved" doesn't show
+  useEffect(() => { setSaved(false); }, [insights]);
   const handleSave = () => {
     dispatch({ type: "SET_SUMMARY", payload: { aggregatedRows: rows, insights } });
+    setSaved(true);
   };
 
   // ---- Master Excel export (3+ sheets) ----
@@ -195,7 +199,7 @@ export default function Step6Summary() {
 
   // ==========================================================================
   return (
-    <StepShell stepNumber={6} title="Executive Summary" subtitle="Consolidated 5-year master forecast with strategic AI insights.">
+    <StepShell stepNumber={6} title="Executive Summary" subtitle="Consolidated 5-year master forecast with strategic AI insights." nextDisabled={!insights}>
       {!hasForecast && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/30 p-4 text-sm text-amber-300">
           <AlertTriangle size={18} className="mt-0.5 shrink-0" />
@@ -207,7 +211,7 @@ export default function Step6Summary() {
         <div className="space-y-8">
 
           <Step6LineageNote
-            approved={state.summary.insights !== null}
+            approved={insights !== null}
             rows={rows}
           />
 
@@ -328,26 +332,6 @@ export default function Step6Summary() {
             </section>
           )}
 
-          {hasStructuredArtifact && (
-            <section className="rounded-lg border border-blue-700/30 bg-blue-950/20 p-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <h3 className="text-sm font-semibold uppercase tracking-wider text-blue-300">
-                    Handoff to Step 7 WACC
-                  </h3>
-                  <p className="mt-1 text-xs text-blue-100/80">
-                    Forecast artifacts are saved, annual consolidated revenue is available, and Step 7 can consume the validated forecast with warnings visible.
-                  </p>
-                </div>
-                <button
-                  onClick={() => dispatch({ type: "SET_STEP", payload: 7 })}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
-                >
-                  Continue to WACC
-                </button>
-              </div>
-            </section>
-          )}
 
           {/* ===== LOADING STATE (auto-trigger, no insights yet) ===== */}
           {!insights && (
@@ -462,20 +446,15 @@ export default function Step6Summary() {
             <div className="flex flex-wrap items-center gap-3">
               {insights && (
                 <button onClick={handleSave}
-                  className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-500">
-                  <CheckCircle2 size={16} /> Save Summary to Framework
+                  className={`flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-white transition-colors ${saved ? "bg-emerald-600 hover:bg-emerald-500" : "bg-blue-600 hover:bg-blue-500"}`}>
+                  <CheckCircle2 size={16} /> {saved ? "Saved ✓" : "Save Summary to Framework"}
                 </button>
               )}
 
               <button onClick={handleExport}
                 className="flex items-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20">
                 <FileSpreadsheet size={18} />
-                Export Complete Model (Executive Format)
-              </button>
-
-              <button onClick={handleExport}
-                className="flex items-center gap-2 rounded-lg border border-blue-600/50 bg-blue-600/10 px-5 py-2.5 text-sm font-medium text-blue-400 hover:bg-blue-600/20">
-                <Download size={16} /> Download .xlsx
+                Export Complete Model (Excel)
               </button>
             </div>
           </section>

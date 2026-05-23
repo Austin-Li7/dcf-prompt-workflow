@@ -138,7 +138,7 @@ export function getStep5StructuredResults(forecastState: ForecastState): Step5St
 export function buildStep5AssumptionRows(forecastState: ForecastState): Step5AssumptionExportRow[] {
   return getStep5StructuredResults(forecastState).flatMap((result) => {
     const segmentLabel = artifactSegmentLabel(result);
-    return result.machine_artifact.assumptions.map((assumption) => ({
+    return (result.machine_artifact.assumptions ?? []).map((assumption) => ({
       segment: segmentLabel,
       assumption_id: assumption.id,
       statement: assumption.statement,
@@ -156,7 +156,7 @@ export function buildStep5WeakSensitivityRows(
 ): Step5WeakSensitivityExportRow[] {
   return getStep5StructuredResults(forecastState).flatMap((result) => {
     const segmentLabel = artifactSegmentLabel(result);
-    return result.machine_artifact.weak_inference_sensitivity.map((entry) => ({
+    return (result.machine_artifact.weak_inference_sensitivity ?? []).map((entry) => ({
       segment: segmentLabel,
       assumption_id: entry.assumption_id,
       evidence_level: entry.evidence_level,
@@ -180,8 +180,8 @@ export function buildStep5ReviewWarningRows(forecastState: ForecastState): Step5
       next_action: artifact.next_action,
     }));
 
-    const forecastFlags = artifact.forecast_table.flatMap((row) =>
-      row.flags.map((flag) => ({
+    const forecastFlags = (artifact.forecast_table ?? []).flatMap((row) =>
+      (row.flags ?? []).map((flag) => ({
         segment: row.segment,
         source: "forecast_flag" as const,
         warning: `${row.fiscal_year} ${row.category}: ${flag}`,

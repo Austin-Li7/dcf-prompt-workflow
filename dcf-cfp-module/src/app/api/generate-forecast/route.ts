@@ -140,13 +140,13 @@ function leanCompetition(competition: CompetitiveLandscape | null | undefined) {
       primaryCompetitor: c.primaryCompetitor,
       competitiveStatus: c.competitiveStatus,
       materiality: c.materiality ?? null,
-      forces: {
-        rivalry: c.forces.rivalry.rating,
-        newEntrants: c.forces.newEntrants.rating,
-        suppliers: c.forces.suppliers.rating,
-        buyers: c.forces.buyers.rating,
-        substitutes: c.forces.substitutes.rating,
-      },
+      forces: c.forces ? {
+        rivalry: c.forces.rivalry?.rating ?? null,
+        newEntrants: c.forces.newEntrants?.rating ?? null,
+        suppliers: c.forces.suppliers?.rating ?? null,
+        buyers: c.forces.buyers?.rating ?? null,
+        substitutes: c.forces.substitutes?.rating ?? null,
+      } : null,
     })),
   };
 }
@@ -360,6 +360,7 @@ Rules:
 - If capitalCeilingUsdM is set, keep FY5 base revenue below that value or set workflow_status to NEEDS_REVIEW with a warning.
 - NEVER set workflow_status to BLOCKED. For segments with no standalone disclosed revenue, set NEEDS_REVIEW, generate a best-effort proxy estimate, and document the proxy in review_summary.warnings.
 - Keep review_summary concise: one_line ≤ 260 chars; each highlight/warning ≤ 220 chars.
+- yoy_growth_pct MUST be a whole-number percentage (e.g. 8.5 for 8.5% growth, 52.0 for 52% growth). Never use decimal fraction form (e.g. 0.085 is wrong; 8.5 is correct).
 - No prose outside the structured response.
 
 ${modeRules}

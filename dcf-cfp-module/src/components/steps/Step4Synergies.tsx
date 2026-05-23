@@ -349,19 +349,23 @@ export default function Step4Synergies() {
     setErrorMsg(null); setIsLoading(true);
     try {
       const res = await fetch("/api/analyze-capital", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: paths, recentNews: newsText, trendAnalysis: state.history.trendAnalysis ?? null, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
+        body: JSON.stringify({ step1Architecture: state.profile.architectureJson, step2Financials: state.history, step4Synergies: step4Structured?.synergy_registry ?? paths, recentNews: newsText, trendAnalysis: state.history.trendAnalysis ?? null, apiKey: activeApiKey, llmProvider: settings.llmProvider }) });
       const d: AnalyzeCapitalResponse = await res.json();
       if (!res.ok) { if (d.requiresApiKey) throw new Error("No API key configured. Open Settings (gear icon) to add your key."); throw new Error(d.error); }
       if (d.paths?.length) {
-        // Preserve the impactScore the user manually set during 4A review —
-        // the capital LLM re-runs the synergy logic and would overwrite it.
+        // Preserve the impactScore the user manually set during 4A review.
+        // Match by sourceBusiness+recipientBusiness rather than array index —
+        // the capital LLM may return paths in a different order.
         const incomingPaths = d.paths;
-        setPaths(prev =>
-          incomingPaths.map((newPath: CapabilityPenetrationPath, i: number) => ({
+        setPaths(prev => {
+          const prevScoreByKey = new Map(
+            prev.map(p => [`${p.sourceBusiness}|${p.recipientBusiness}`, p.impactScore]),
+          );
+          return incomingPaths.map((newPath: CapabilityPenetrationPath) => ({
             ...newPath,
-            impactScore: prev[i]?.impactScore ?? newPath.impactScore,
-          })),
-        );
+            impactScore: prevScoreByKey.get(`${newPath.sourceBusiness}|${newPath.recipientBusiness}`) ?? newPath.impactScore,
+          }));
+        });
       }
       setCapitalData(d.data);
       setStep4Structured(d.structuredResult ?? step4Structured);
@@ -464,7 +468,7 @@ export default function Step4Synergies() {
 
   // ==========================================================================
   return (
-    <StepShell stepNumber={4} title="Synergies & Capital Allocation" subtitle="Map capability penetration, score impact, then analyze capital allocation with real-time news.">
+    <StepShell stepNumber={4} title="Synergies & Capital Allocation" subtitle="Map capability penetration, score impact, then analyze capital allocation with real-time news." nextDisabled={!isFullySaved}>
       {!hasArch && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/30 p-4 text-sm text-amber-300">
           <AlertTriangle size={18} className="mt-0.5 shrink-0" />

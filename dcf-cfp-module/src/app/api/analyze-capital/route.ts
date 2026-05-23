@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ZodError } from "zod";
 import { callLLM, extractStructuredPayload, resolveApiKey } from "@/lib/llm-service";
 import { guardedCallLLM } from "@/lib/llm-guard";
 import {
@@ -163,7 +164,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapita
     return NextResponse.json({ data, paths, structuredResult, step4Review });
   } catch (err: unknown) {
     console.error("[analyze-capital] Error:", err);
-    const msg = err instanceof Error ? err.message : "An unexpected error occurred.";
+    let msg = err instanceof Error ? err.message : "An unexpected error occurred.";
+    if (err instanceof ZodError) {
+      const fields = err.issues.map((i) => `${i.path.join(".") || "root"}: ${i.message}`).join("; ");
+      msg = `Structured result validation failed — ${fields}`;
+    }
     return NextResponse.json(
       { data: emptyCapital, error: msg },
       { status: 500 },

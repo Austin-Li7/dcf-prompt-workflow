@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   Loader2, Download, Trash2, AlertTriangle, AlertCircle,
-  CheckCircle2, ArrowRight, Save, BarChart3, RotateCcw, SlidersHorizontal,
+  CheckCircle2, ArrowRight, Save, BarChart3, RotateCcw, SlidersHorizontal, Info,
 } from "lucide-react";
 import { downloadXlsx } from "@/lib/excel-utils";
 import StepShell from "./StepShell";
@@ -78,9 +78,8 @@ function hasDiverged(active: number, baseline: number): boolean {
 
 function shortDriver(driver: string): string {
   const first = driver.split("|")[0]?.trim() ?? driver;
-  const match = first.match(/^(A\d+):/i);
-  if (match) return `${match[1]} estimated baseline`;
-  return first.length > 42 ? `${first.slice(0, 42)}...` : first;
+  // Strip the "A1:" assumption prefix so the actual driver text is visible
+  return first.replace(/^A\d+:\s*/i, "").trim() || first;
 }
 
 function annualRevenue(prod: ProductForecast, year: number): number {
@@ -239,6 +238,16 @@ export default function Step5Forecast() {
     setApprovedSegments(updated);
     setApprovedStructuredResults(updatedStructuredResults);
 
+    // Persist after every approval so navigation away doesn't lose progress
+    dispatch({
+      type: "SET_FORECAST",
+      payload: {
+        segments: updated,
+        structuredResults: updatedStructuredResults,
+        approved: segIdx >= segments.length - 1,
+      },
+    });
+
     if (segIdx < segments.length - 1) {
       setSegIdx(segIdx + 1);
       setAiBaseline([]);
@@ -251,14 +260,6 @@ export default function Step5Forecast() {
       setReviewAcknowledged(false);
       setPhase("setup");
     } else {
-      dispatch({
-        type: "SET_FORECAST",
-        payload: {
-          segments: updated,
-          structuredResults: updatedStructuredResults,
-          approved: true,
-        },
-      });
       setPhase("dashboard");
     }
   };
@@ -319,7 +320,7 @@ export default function Step5Forecast() {
 
   // ==========================================================================
   return (
-    <StepShell stepNumber={5} title="20-Quarter Forecast" subtitle="AI-driven revenue projections per segment with sensitivity controls and manual overrides.">
+    <StepShell stepNumber={5} title="20-Quarter Forecast" subtitle="AI-driven revenue projections per segment with sensitivity controls and manual overrides." nextDisabled={!state.forecast.approved}>
       {!hasArch && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/30 p-4 text-sm text-amber-300">
           <AlertTriangle size={18} className="mt-0.5 shrink-0" />
@@ -385,6 +386,12 @@ export default function Step5Forecast() {
                     <span>{workflowStatus === "READY" ? "v5.5 forecast ready" : "v5.5 review required"}</span>
                   </div>
                   <p className="mt-2 text-xs opacity-90">{reviewSummary.one_line}</p>
+                  {reviewSummary.warnings.some(w => /ceiling|algorithmic.*limit|growth.*limit/i.test(w)) && (
+                    <div className="mt-2 flex items-start gap-1.5 rounded border border-amber-600/40 bg-amber-950/30 px-2 py-1.5 text-xs text-amber-300">
+                      <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                      <span>Step 5 revenue ceiling from Step 4 was exceeded. Growth justification required or set workflow to NEEDS_REVIEW.</span>
+                    </div>
+                  )}
                   {(reviewSummary.highlights.length > 0 || reviewSummary.warnings.length > 0) && (
                     <div className="mt-3 grid gap-2 md:grid-cols-2">
                       {reviewSummary.highlights.length > 0 && (
@@ -466,7 +473,7 @@ export default function Step5Forecast() {
                                 {row.fcfe_usd_m != null ? row.fcfe_usd_m.toLocaleString() : "—"}
                               </td>
                             )}
-                            <td className="px-3 py-2 text-zinc-500">{row.assumption_ids.join(", ")}</td>
+                            <td className="px-3 py-2 text-zinc-500 text-xs">{row.assumption_ids.join(" · ")}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -506,6 +513,13 @@ export default function Step5Forecast() {
               <button onClick={handleReset} className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300">
                 <RotateCcw size={12} /> Reset to AI Baseline
               </button>
+
+              {overrides.size > 0 && (
+                <div className="flex items-start gap-1.5 rounded border border-blue-600/30 bg-blue-950/30 px-2 py-1.5 text-xs text-blue-300">
+                  <Info size={12} className="mt-0.5 shrink-0" />
+                  <span>{overrides.size} manual override{overrides.size !== 1 ? "s" : ""} active — each override anchors that quarter and recalculates all subsequent quarters proportionally. Use "Reset to AI Baseline" to clear.</span>
+                </div>
+              )}
 
               {workflowStatus === "NEEDS_REVIEW" && (
                 <label className="flex items-start gap-3 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
@@ -583,7 +597,7 @@ export default function Step5Forecast() {
                                   {q.fcfeM != null ? q.fcfeM.toFixed(1) : "—"}
                                 </td>
                               )}
-                              <td className="px-2 py-1 text-zinc-500 max-w-[180px] truncate" title={q.strategicDriver}>{shortDriver(q.strategicDriver)}</td>
+                              <td className="px-2 py-1 text-zinc-500 max-w-[220px]" title={q.strategicDriver}>{shortDriver(q.strategicDriver)}</td>
                             </tr>
                           );
                         })}
@@ -666,9 +680,6 @@ export default function Step5Forecast() {
                 <button onClick={handleSave} className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-500">
                   <Save size={16} /> Save Again
                 </button>
-                <button onClick={() => dispatch({ type: "SET_STEP", payload: 6 })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-emerald-500">
-                  Continue to Step 6 <ArrowRight size={16} />
-                </button>
                 <button onClick={dlXlsx} className="flex items-center gap-2 rounded-lg border border-blue-600/50 bg-blue-600/10 px-5 py-2.5 text-sm font-medium text-blue-400 hover:bg-blue-600/20">
                   <Download size={16} /> Download Master Financial Model (Excel)
                 </button>
@@ -736,6 +747,9 @@ function Step5LineageNote({
             <span className="text-xs text-zinc-400">
               {confidence.strong_driver_revenue_pct.toFixed(0)}% strong inference
             </span>
+            <p className="mt-1.5 text-xs text-zinc-500 leading-relaxed">
+              <span className="text-zinc-400">Disclosed</span> = driver backed by management guidance or filings. <span className="text-zinc-400">Strong inference</span> = LLM-derived from comps/industry data with no direct disclosure.
+            </p>
           </>
         ) : (
           <span className="text-xs text-zinc-500">Computed after approval</span>

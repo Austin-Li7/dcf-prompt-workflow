@@ -103,6 +103,7 @@ export default function Step7WACC() {
 
   // ── Shared dashboard ────────────────────────────────────────────────────────
   const [showValuationDashboard, setShowValuationDashboard] = useState(false);
+  const [waccSaved, setWaccSaved] = useState(state.wacc.saved);
   const [terminalGrowth, setTerminalGrowth] = useState(state.wacc.terminalGrowth ?? 0.025);
   const [fcfMargin, setFcfMargin] = useState(state.wacc.fcfMargin ?? 0.25);
   const [fetchedAt, setFetchedAt] = useState<string | null>(state.wacc.fetchedAt ?? null);
@@ -294,7 +295,10 @@ export default function Step7WACC() {
     });
   }, [businessType, fetchedData, hybridIndustrialWeightedBeta, constants]);
   const industrialWaccCalc: WACCCalculation | null = industrialWaccResult?.calculation ?? null;
-  const industrialWaccWarnings: string[] = industrialWaccResult?.warnings ?? [];
+  // In hybrid mode bank interest costs are deposit interest (not corporate debt), so Yahoo Finance
+  // returns $0 interestExpense for banks. Suppress the Kd plausibility warning — it's not actionable.
+  const industrialWaccWarnings: string[] = (industrialWaccResult?.warnings ?? [])
+    .filter((w) => businessType !== "hybrid" || !w.includes("cost of debt"));
 
   const hasCalculation = businessType === "hybrid"
     ? (bankKeCalc !== null && industrialWaccCalc !== null)
@@ -348,6 +352,7 @@ export default function Step7WACC() {
         liquidityRiskSpread: isFinancialMode ? liquidityRiskSpread : 0,
       },
     });
+    setWaccSaved(true);
   };
   const handleComplete = () => {
     if (!hasCalculation) return;
@@ -431,6 +436,7 @@ export default function Step7WACC() {
             stressFlightPct={stressFlightPct}
             onStressFlightPctChange={setStressFlightPct}
             liveStress={liveStressResult}
+            wasSeeded={latestBankRow !== null}
           />
         )}
 
@@ -781,7 +787,7 @@ export default function Step7WACC() {
                         <th className="px-3 py-2 text-left font-medium">Segment</th>
                         <th className="px-3 py-2 text-center font-medium">Mode</th>
                         <th className="px-3 py-2 text-right font-medium">Beta</th>
-                        <th className="px-3 py-2 text-right font-medium">Est. Value ($M)</th>
+                        <th className="px-3 py-2 text-right font-medium" title="Used to weight betas across segments. Pre-filled with FY5 revenue as a size proxy — replace with segment equity estimates for accuracy.">Est. Value ($M) <Info size={11} className="inline mb-0.5 text-zinc-500" /></th>
                         <th className="px-3 py-2 w-10" />
                       </tr>
                     </thead>
@@ -965,20 +971,17 @@ export default function Step7WACC() {
           </section>
         )}
 
-        {/* ── Section E: Save / Complete ──────────────────────────────────── */}
+        {/* ── Section E: Save / Preview ───────────────────────────────────── */}
         {hasCalculation && (
           <div className="flex flex-wrap items-center gap-3">
             <button onClick={handleSave}
-              className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-500">
-              <Save size={16} /> Save to Master Framework
+              className={`flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-white transition-colors ${waccSaved ? "bg-emerald-600 hover:bg-emerald-500" : "bg-blue-600 hover:bg-blue-500"}`}>
+              <Save size={16} /> {waccSaved ? "Saved ✓" : "Save to Master Framework"}
             </button>
-            <div className="flex items-center gap-2 text-xs text-zinc-500">
-              <CheckCircle2 size={14} className="text-emerald-500" />
-              {businessType === "hybrid"
-                ? `Bank Ke ${bankKeCalc ? pct(bankKeCalc.wacc) : "—"} · Industrial WACC ${industrialWaccCalc ? pct(industrialWaccCalc.wacc) : "—"}`
-                : `${businessType === "financial" ? "Ke" : "WACC"}: ${calculation ? pct(calculation.wacc) : "—"}`
-              } — ready for DCF valuation
-            </div>
+            <button onClick={handleComplete}
+              className="flex items-center gap-2 rounded-lg border border-emerald-600/50 bg-emerald-600/10 px-5 py-2.5 text-sm font-medium text-emerald-400 hover:bg-emerald-600/20">
+              <BarChart3 size={16} /> {showValuationDashboard ? "Refresh Dashboard" : "Preview Valuation"}
+            </button>
           </div>
         )}
       </div>
@@ -1443,7 +1446,7 @@ function StressBar({ label, current, max, color }: {
 }
 
 function LiquidityAssessmentPanel({
-  inputs, onInputsChange, assessment, stressFlightPct, onStressFlightPctChange, liveStress,
+  inputs, onInputsChange, assessment, stressFlightPct, onStressFlightPctChange, liveStress, wasSeeded,
 }: {
   inputs: LiquidityInputs;
   onInputsChange: (v: LiquidityInputs) => void;
@@ -1451,6 +1454,7 @@ function LiquidityAssessmentPanel({
   stressFlightPct: number;
   onStressFlightPctChange: (v: number) => void;
   liveStress: StressTestResult;
+  wasSeeded?: boolean;
 }) {
   const set = (field: keyof LiquidityInputs) => (v: number | boolean) =>
     onInputsChange({ ...inputs, [field]: v });
@@ -1521,7 +1525,10 @@ function LiquidityAssessmentPanel({
       {/* Balance-sheet inputs */}
       <div className="rounded-lg border border-zinc-700/40 bg-zinc-900/40 p-4">
         <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-          Balance-Sheet Inputs <span className="ml-1 font-normal text-zinc-600">(USD Millions — pre-filled from Step 2)</span>
+          Balance-Sheet Inputs{wasSeeded
+            ? <span className="ml-1 font-normal text-zinc-600">(USD Millions — pre-filled from Step 2)</span>
+            : <span className="ml-1 font-normal text-amber-700/70">(USD Millions — enter manually; Step 2 bank data not found)</span>
+          }
         </p>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <LiquidityInputField label="Cash & HQLA"            value={inputs.cash_and_hqla_usd_m}                  onChange={set("cash_and_hqla_usd_m")} />
