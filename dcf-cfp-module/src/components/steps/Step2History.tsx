@@ -61,6 +61,7 @@ import type { Step2StructuredResult } from "@/lib/step2-schema";
 import type { Step2IndustrialStructuredResult } from "@/lib/step2-industrial-schema";
 import type { HistoricalExtractionRow, ExtractHistoryResponse, WorkflowMode, TrendAnalysisResult } from "@/types/cfp";
 import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
+import { applyBridgesToRows } from "@/lib/continuity-bridge-apply";
 
 // =============================================================================
 // Constants
@@ -195,10 +196,14 @@ export default function Step2History() {
   const [trendError, setTrendError] = useState<string | null>(null);
   const [steadyYearOverride, setSteadyYearOverride] = useState<number | "">("");
 
-  // ── Staging rows (editable before confirming to master) ──────────────────────
-  const [stagingRows, setStagingRows] = useState<HistoricalExtractionRow[]>([]);
-  const [stagingYears, setStagingYears] = useState<number[]>([]);
-  const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
+  // ── Staging rows — kept in separate bank / industrial buckets so that
+  //    re-running one uploader never clobbers the other mode's data.
+  const [bankStagingRows, setBankStagingRows] = useState<HistoricalExtractionRow[]>([]);
+  const [industrialStagingRows, setIndustrialStagingRows] = useState<HistoricalExtractionRow[]>([]);
+  const [bankStagingYears, setBankStagingYears] = useState<number[]>([]);
+  const [industrialStagingYears, setIndustrialStagingYears] = useState<number[]>([]);
+  const [bankStructuredResults, setBankStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
+  const [industrialStructuredResults, setIndustrialStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
 
   // ── Company type detection for upload mode ───────────────────────────────────
   const companyTypeForPdf = state.profile.step1StructuredResult?.company_type;
@@ -221,7 +226,23 @@ export default function Step2History() {
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
   const confirmedYears = state.history.confirmedYears;
-  const canAddMoreYears = confirmedYears.length < MAX_YEARS;
+
+  // Merged staging views — computed from the two independent buckets
+  const stagingRows = useMemo(() => {
+    if (isHybrid) return [...industrialStagingRows, ...bankStagingRows];
+    if (isBankOrFinancial) return bankStagingRows;
+    return industrialStagingRows;
+  }, [isHybrid, isBankOrFinancial, industrialStagingRows, bankStagingRows]);
+
+  const stagingYears = useMemo(() => {
+    const all = [...industrialStagingYears, ...bankStagingYears];
+    return [...new Set(all)].sort((a, b) => a - b);
+  }, [industrialStagingYears, bankStagingYears]);
+
+  const structuredResults = useMemo(
+    () => [...industrialStructuredResults, ...bankStructuredResults],
+    [industrialStructuredResults, bankStructuredResults],
+  );
 
   const hasStagingData = stagingRows.length > 0;
   const yearsToExtract = useMemo(() => {
@@ -317,12 +338,7 @@ export default function Step2History() {
           );
           return;
         }
-        if (confirmedYears.length + selectedYears.length > MAX_YEARS) {
-          setErrorMsg(
-            `Maximum of ${MAX_YEARS} distinct years reached. Remove history to add more.`,
-          );
-          return;
-        }
+        // No cumulative cap — use all available years across multiple runs.
         if (dataFiles.length === 0 && !textNotes.trim()) {
           setErrorMsg("Please upload a file or paste text notes.");
           return;
@@ -332,9 +348,12 @@ export default function Step2History() {
       setErrorMsg(null);
       setIsExtracting(true);
       setPipelinePhase({ phase: "preparing", step: 1, totalSteps: 1, detail: "Starting…" });
-      setStagingRows([]);
-      setStagingYears([]);
-      setStructuredResults([]);
+      setBankStagingRows([]);
+      setBankStagingYears([]);
+      setBankStructuredResults([]);
+      setIndustrialStagingRows([]);
+      setIndustrialStagingYears([]);
+      setIndustrialStructuredResults([]);
       setPausedSessionId(null);
 
       try {
@@ -369,15 +388,17 @@ export default function Step2History() {
           },
         };
 
-        const nextRows: HistoricalExtractionRow[] = [];
-        const nextStructuredResults: Step2StructuredResultForReview[] = [];
+        let nextBankRows: HistoricalExtractionRow[] = [];
+        let nextIndustrialRows: HistoricalExtractionRow[] = [];
+        let nextBankStructured: Step2StructuredResultForReview[] = [];
+        let nextIndustrialStructured: Step2StructuredResultForReview[] = [];
 
         const appendYearResults = (
           years: PipelineYearResult[],
           mode: WorkflowMode,
         ) => {
           for (const yearResult of years) {
-            const rows =
+            const projected =
               mode === "bank"
                 ? projectStep2BankStructuredToRows(
                     yearResult.structuredResult as Step2BankStructuredResult,
@@ -385,8 +406,14 @@ export default function Step2History() {
                 : projectStep2StructuredToRows(
                     yearResult.structuredResult as Step2StructuredResult,
                   );
-            nextRows.push(...rows.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 })));
-            nextStructuredResults.push(yearResult.structuredResult);
+            const withIds = projected.map((r) => ({ ...r, id: uid(), yoyGrowth: 0 }));
+            if (mode === "bank") {
+              nextBankRows = [...nextBankRows, ...withIds];
+              nextBankStructured = [...nextBankStructured, yearResult.structuredResult];
+            } else {
+              nextIndustrialRows = [...nextIndustrialRows, ...withIds];
+              nextIndustrialStructured = [...nextIndustrialStructured, yearResult.structuredResult];
+            }
           }
         };
 
@@ -420,14 +447,17 @@ export default function Step2History() {
           appendYearResults(result.years, workflowMode);
         }
 
-        if (nextRows.length === 0) {
+        if (nextBankRows.length + nextIndustrialRows.length === 0) {
           setErrorMsg("No rows were extracted across all target years.");
           return;
         }
 
-        setStagingRows(nextRows);
-        setStagingYears(selectedYears);
-        setStructuredResults(nextStructuredResults);
+        setBankStagingRows(nextBankRows);
+        setBankStagingYears(nextBankRows.length > 0 ? selectedYears : []);
+        setBankStructuredResults(nextBankStructured);
+        setIndustrialStagingRows(nextIndustrialRows);
+        setIndustrialStagingYears(nextIndustrialRows.length > 0 ? selectedYears : []);
+        setIndustrialStructuredResults(nextIndustrialStructured);
         setIncompleteSession(null);
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "UsageExhaustedError") {
@@ -461,23 +491,27 @@ export default function Step2History() {
     }
   }, [pipelinePhase]);
 
-  // ── Staging: edit a cell ─────────────────────────────────────────────────────
+  // ── Staging: edit a cell — route to the correct bucket by row id ─────────────
   const updateStagingCell = (
     id: string,
     field: keyof HistoricalExtractionRow,
     value: string | number | null,
   ) => {
-    setStagingRows((prev) =>
-      prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)),
-    );
+    const updater = (prev: HistoricalExtractionRow[]) =>
+      prev.map((row) => (row.id === id ? { ...row, [field]: value } : row));
+    if (bankStagingRows.some((r) => r.id === id)) {
+      setBankStagingRows(updater);
+    } else {
+      setIndustrialStagingRows(updater);
+    }
   };
 
   // ── Bank PDF uploader completion handler ────────────────────────────────────
   const handlePdfUploaderComplete = useCallback(
     (result: FilingUploaderResult) => {
-      setStagingRows(result.rows);
-      setStagingYears(result.stagingYears);
-      setStructuredResults(result.fileResults.map((fr) => fr.structuredResult));
+      setBankStagingRows(result.rows);
+      setBankStagingYears(result.stagingYears);
+      setBankStructuredResults(result.fileResults.map((fr) => fr.structuredResult));
       dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
       setTimeout(() => {
         document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
@@ -489,9 +523,9 @@ export default function Step2History() {
   // ── Industrial PDF uploader completion handler ───────────────────────────────
   const handleIndustrialUploaderComplete = useCallback(
     (result: IndustrialUploaderResult) => {
-      setStagingRows(result.rows);
-      setStagingYears(result.stagingYears);
-      setStructuredResults(result.fileResults.map((fr) => fr.structuredResult as Step2IndustrialStructuredResult));
+      setIndustrialStagingRows(result.rows);
+      setIndustrialStagingYears(result.stagingYears);
+      setIndustrialStructuredResults(result.fileResults.map((fr) => fr.structuredResult as unknown as Step2StructuredResultForReview));
       dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
       setTimeout(() => {
         document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
@@ -535,30 +569,33 @@ export default function Step2History() {
   // ── Confirm staging → append to master ──────────────────────────────────────
   const handleConfirm = () => {
     if (stagingRows.length === 0) return;
-    const newRows = [...masterRows, ...stagingRows];
+    const merged = [...masterRows, ...stagingRows];
+    // Apply any confirmed continuity bridges before committing to master
+    const bridgedRows = applyBridgesToRows(merged, state.history.continuity_bridges ?? []);
     dispatch({
       type: "SET_HISTORY",
       payload: {
-        rows: newRows,
+        rows: bridgedRows,
         confirmedYears: mergeHistoryYears(confirmedYears, stagingYears),
         structuredResults: [
           ...(state.history.structuredResults ?? []),
           ...structuredResults,
         ],
-        // Preserve existing fields when confirming new data
         filingHints: state.history.filingHints,
         trendAnalysis: state.history.trendAnalysis,
       },
     });
-    setStagingRows([]);
-    setStagingYears([]);
-    setStructuredResults([]);
+    setBankStagingRows([]);
+    setBankStagingYears([]);
+    setBankStructuredResults([]);
+    setIndustrialStagingRows([]);
+    setIndustrialStagingYears([]);
+    setIndustrialStructuredResults([]);
     setTargetYear("");
     setDataFiles([]);
     setTextNotes("");
     if (fileInputRef.current) fileInputRef.current.value = "";
-    // Run fresh trend analysis against the newly combined row set
-    void runTrendAnalysis(newRows, steadyYearOverride !== "" ? steadyYearOverride : null);
+    void runTrendAnalysis(bridgedRows, steadyYearOverride !== "" ? steadyYearOverride : null);
   };
 
   // ── Excel download ───────────────────────────────────────────────────────────
@@ -653,9 +690,9 @@ export default function Step2History() {
               </h3>
               <span className="flex items-center gap-2 text-xs text-zinc-500">
                 <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono">
-                  {confirmedYears.length}/{MAX_YEARS}
+                  {confirmedYears.length}
                 </span>
-                years confirmed
+                {confirmedYears.length === 1 ? "year" : "years"} confirmed
                 {confirmedYears.length > 0 && (
                   <span className="text-zinc-600">({confirmedYears.join(", ")})</span>
                 )}
@@ -711,12 +748,13 @@ export default function Step2History() {
                 }
                 seedHints={state.history.filingHints}
                 onComplete={(result) => {
-                  // Merge bank rows into staging (append to whatever industrial produced)
-                  setStagingRows((prev) => [...prev, ...result.rows]);
-                  setStagingYears((prev) => [
-                    ...new Set([...prev, ...result.stagingYears]),
-                  ].sort((a, b) => a - b));
+                  // Writes to the bank bucket — independent of industrial staging
+                  setBankStagingRows(result.rows);
+                  setBankStagingYears(result.stagingYears);
                   dispatch({ type: "SET_FILING_HINTS", payload: result.hints });
+                  setTimeout(() => {
+                    document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
+                  }, 100);
                 }}
               />
             )}
@@ -765,7 +803,11 @@ export default function Step2History() {
                   Historical Baseline Staging {stagingYears.length > 0 ? `— FY ${stagingYears.join(", ")}` : ""}
                 </h3>
                 <span className="rounded bg-amber-900/30 px-2 py-0.5 text-xs text-amber-300">
-                  {stagingRows.length} rows · {stagingYears.length} year(s) — review before confirming
+                  {stagingRows.length} rows · {stagingYears.length} year(s)
+                  {bankStagingRows.length > 0 && industrialStagingRows.length > 0 && (
+                    <span className="ml-1 text-blue-300">· bank + industrial</span>
+                  )}
+                  {" — review before confirming"}
                 </span>
               </div>
 
@@ -779,8 +821,18 @@ export default function Step2History() {
                     <tr>
                       <th className="px-3 py-2 font-medium">Qtr</th>
                       <th className="px-3 py-2 font-medium">Segment</th>
+                      {stagingRows.some((r) => r.workflow_mode === "bank") && (
+                        <th className="px-2 py-2 font-medium text-center">Mode</th>
+                      )}
                       <th className="px-3 py-2 font-medium text-right">Revenue ($M)</th>
                       <th className="px-3 py-2 font-medium text-right">Op. Income ($M)</th>
+                      {stagingRows.some((r) => r.workflow_mode === "bank") && (
+                        <>
+                          <th className="px-3 py-2 font-medium text-right">NII ($M)</th>
+                          <th className="px-3 py-2 font-medium text-right">NIM (%)</th>
+                          <th className="px-3 py-2 font-medium text-right">Book Equity ($M)</th>
+                        </>
+                      )}
                       {stagingRows.some((r) => r.workflow_mode === "industrial") && (
                         <>
                           <th className="px-3 py-2 font-medium text-right">Gross Profit ($M)</th>
@@ -796,12 +848,23 @@ export default function Step2History() {
                   <tbody className="divide-y divide-zinc-800">
                     {stagingRows.map((row) => {
                       const hasIndustrialCols = stagingRows.some((r) => r.workflow_mode === "industrial");
+                      const hasBankCols = stagingRows.some((r) => r.workflow_mode === "bank");
+                      const showModeCol = hasBankCols;
                       return (
                         <tr key={row.id} className="bg-zinc-900/50 hover:bg-zinc-800/50">
                           <td className="px-3 py-1.5 text-zinc-300">
                             {row.fiscalYear} {row.quarter}
                           </td>
                           <td className="max-w-[140px] truncate px-3 py-1.5 text-zinc-300">{row.segment}</td>
+                          {showModeCol && (
+                            <td className="px-2 py-1.5 text-center">
+                              {row.workflow_mode === "bank" ? (
+                                <span className="rounded-full bg-blue-900/40 px-2 py-0.5 text-[10px] font-medium text-blue-300">Bank</span>
+                              ) : (
+                                <span className="rounded-full bg-emerald-900/30 px-2 py-0.5 text-[10px] font-medium text-emerald-400">Indust.</span>
+                              )}
+                            </td>
+                          )}
                           <td className="px-1 py-1">
                             <input
                               type="number"
@@ -830,6 +893,21 @@ export default function Step2History() {
                               className="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right text-xs text-zinc-100 outline-none focus:border-blue-500"
                             />
                           </td>
+                          {hasBankCols && (
+                            <>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {formatNullableMetric(row.nii_usd_m ?? null)}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {row.net_interest_margin_pct != null
+                                  ? `${row.net_interest_margin_pct.toFixed(2)}%`
+                                  : "—"}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-zinc-400">
+                                {formatNullableMetric(row.book_value_equity_usd_m ?? null)}
+                              </td>
+                            </>
+                          )}
                           {hasIndustrialCols && (
                             <>
                               <td className="px-3 py-1.5 text-right text-zinc-400">

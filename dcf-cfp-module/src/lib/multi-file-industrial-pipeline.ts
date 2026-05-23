@@ -396,7 +396,7 @@ export async function runIndustrialPipeline(
     // ── 2. Chunk ─────────────────────────────────────────────────────────────
     onProgress({ phase: "chunking", fileIndex: fileIdx, totalFiles, fileName: filing.fileName });
 
-    const chunks = chunkPdfText(pdfText, filing.fileName, provider, options.architecture, filing.year);
+    const chunks = chunkPdfText(pdfText, filing.fileName, provider, options.architecture, filing.year, filing.filingType);
     totalChunksAllFiles += chunks.length;
 
     // ── 3. Build hints string ─────────────────────────────────────────────────

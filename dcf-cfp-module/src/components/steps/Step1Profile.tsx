@@ -19,7 +19,7 @@ import ReactMarkdown from "react-markdown";
 import StepShell from "./StepShell";
 import { useSettings } from "@/context/SettingsContext";
 import { useCFP } from "@/context/CFPContext";
-import { applyStep1ApprovalEdits, buildStep1ReviewState, markStep1ReviewApproved } from "@/lib/step1-review";
+import { applyStep1ApprovalEdits, buildCanonicalNameRegistry, markStep1ReviewApproved } from "@/lib/step1-review";
 import { projectStructuredStep1ToArchitecture } from "@/lib/step1-schema";
 import type {
   AnalyzeCompanyResponse,
@@ -189,8 +189,25 @@ export default function Step1Profile() {
         ...validUserSegments.map((name) => ({ segment: name, businessLines: [] })),
       ];
     }
-    // B6: use immutable helper instead of post-hoc mutation
-    const approvedReview = markStep1ReviewApproved(buildStep1ReviewState(approvedStructuredResult));
+    // S1-2: Preserve the server-computed review state (validation matrix, warnings,
+    // omission review) and apply the user's name/placement edits in-place.
+    // Rebuilding from scratch would discard server-side validation flags.
+    const approvedReview = markStep1ReviewApproved({
+      ...review,
+      canonicalNameRegistry: buildCanonicalNameRegistry(approvedStructuredResult.analysis_view.segments),
+      analysisView: {
+        ...review.analysisView,
+        segments: review.analysisView.segments.map((segment) => ({
+          ...segment,
+          suggestedName: segmentNames[segment.id]?.trim() || segment.suggestedName,
+          offerings: segment.offerings.map((offering) => ({
+            ...offering,
+            suggestedName: businessLineNames[offering.id]?.trim() || offering.suggestedName,
+            targetSegment: businessLineTargets[offering.id]?.trim() || offering.targetSegment,
+          })),
+        })),
+      },
+    });
 
     dispatch({
       type: "UPDATE_PROFILE",

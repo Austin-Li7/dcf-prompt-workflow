@@ -13,7 +13,8 @@ import {
 import type { LLMProvider } from "@/types/cfp";
 import type { AnalyzeCompanyResponse } from "@/types/cfp";
 
-const MAX_PAGES = 50;
+const MAX_PAGES_10K = 100; // 10-Ks are long; 100 pages covers Part I (Business) + MD&A opener
+const MAX_PAGES_10Q = 50;  // 10-Qs are shorter; 50 pages is sufficient
 const MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB per file
 const STEP1_MAX_OUTPUT_TOKENS = 32768;
 
@@ -42,6 +43,7 @@ const STEP1_SYSTEM_PROMPT = [
   "WORKFLOW MODE TAGGING: For every analysis_view segment, set workflow_mode='bank' when that segment's primary revenue driver is NII, net interest income, lending, deposits, or regulated capital.",
   "Set workflow_mode='industrial' when that segment earns primarily from product revenue, SaaS fees, platform fees, or non-NII services.",
   "For a hybrid company, tag each segment individually — some will be 'bank', others 'industrial'.",
+  "CRITICAL HYBRID RULE: If you assign workflow_mode='bank' to ANY segment AND workflow_mode='industrial' to ANY OTHER segment, you MUST set company_type='hybrid' at the top level. This rule overrides all other company_type classification logic without exception.",
   "Do not emit markdown, commentary, or prose outside the structured response.",
 ].join(" ");
 
@@ -148,21 +150,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
     const documentTexts: string[] = [];
     let filesReceived = false;
 
-    const parsePdfFile = async (file: FormDataEntryValue | null, label: string) => {
+    const parsePdfFile = async (file: FormDataEntryValue | null, label: string, maxPages: number) => {
       if (!file || !(file instanceof File) || file.size === 0) return;
       filesReceived = true;
       if (file.size > MAX_PDF_SIZE_BYTES) {
         throw new Error(`${label} exceeds the 50 MB size limit.`);
       }
       const arrayBuffer = await file.arrayBuffer();
-      const text = await extractPdfText(arrayBuffer, MAX_PAGES);
+      const text = await extractPdfText(arrayBuffer, maxPages);
       if (text.trim()) {
         documentTexts.push(`--- ${label} ---\n${text}`);
       }
     };
 
-    await parsePdfFile(tenKFiles[0] ?? null, "Form 10-K");
-    await parsePdfFile(tenQFiles[0] ?? null, "Form 10-Q");
+    await parsePdfFile(tenKFiles[0] ?? null, "Form 10-K", MAX_PAGES_10K);
+    await parsePdfFile(tenQFiles[0] ?? null, "Form 10-Q", MAX_PAGES_10Q);
 
     if (documentTexts.length === 0) {
       // R2: distinguish "no file" from "file uploaded but unreadable"
@@ -210,7 +212,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCompan
     });
 
     const structuredPayload = extractStructuredPayload(result, llmProvider);
-    const structuredResult = parseStep1StructuredResult(structuredPayload);
+    const parsedResult = parseStep1StructuredResult(structuredPayload);
+
+    // S1-3: Deterministic hybrid enforcement.
+    // Models sometimes correctly tag individual segments with workflow_mode='bank' and
+    // workflow_mode='industrial' but forget to set company_type='hybrid' at the top level.
+    // This post-processing step catches that inconsistency and corrects it deterministically.
+    const segmentModes = parsedResult.analysis_view.segments.map((s) => s.workflow_mode);
+    const hasBankSegment = segmentModes.includes("bank");
+    const hasIndustrialSegment = segmentModes.includes("industrial");
+    const structuredResult =
+      hasBankSegment && hasIndustrialSegment && parsedResult.company_type !== "hybrid"
+        ? { ...parsedResult, company_type: "hybrid" as const }
+        : parsedResult;
+
     const architectureJson = projectStructuredStep1ToArchitecture(structuredResult);
     const step1Review = buildStep1ReviewState(structuredResult);
 

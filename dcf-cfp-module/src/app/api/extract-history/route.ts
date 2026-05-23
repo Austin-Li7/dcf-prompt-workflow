@@ -19,6 +19,7 @@ import * as XLSX from "xlsx";
 const unpdf = require("unpdf") as typeof import("unpdf");
 import {
   buildStep2StructuredFromFixtureRecords,
+  buildStep2BankStructuredFromFixtureRecords,
   recordsFromDcfInputPayload,
 } from "@/lib/step2-fixture-ingest";
 import { callLLM, parseStructuredJsonText, resolveApiKey } from "@/lib/llm-service";
@@ -966,6 +967,22 @@ async function handleLegacy(req: NextRequest): Promise<NextResponse<ExtractHisto
   }
 
   const targetYearNumber = Number(targetYear.trim());
+
+  // Bank XLSX detection must run before industrial — industrial columns
+  // (product_category, product_name) are absent in bank spreadsheets, which
+  // causes the industrial fixture path to silently drop all rows.
+  for (const pf of parsedFiles) {
+    const bankFixture = buildStep2BankStructuredFromFixtureRecords(
+      pf.records,
+      targetYearNumber,
+      pf.name,
+    );
+    if (bankFixture) {
+      const rows = projectStep2BankStructuredToRows(bankFixture);
+      return NextResponse.json({ rows, structuredResult: bankFixture });
+    }
+  }
+
   for (const pf of parsedFiles) {
     const fixtureResult = buildStep2StructuredFromFixtureRecords(
       pf.records,

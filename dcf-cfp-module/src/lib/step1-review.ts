@@ -44,7 +44,7 @@ function flattenReportedNodes(
   ]);
 }
 
-function buildCanonicalNameRegistry(
+export function buildCanonicalNameRegistry(
   segments: Step1AnalysisSegment[],
   offeringOverrides = new Map<string, string>(),
   segmentOverrides = new Map<string, string>(),

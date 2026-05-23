@@ -437,7 +437,7 @@ export async function runMultiFilePipeline(
       fileName: filing.fileName,
     });
 
-    const chunks = chunkPdfText(pdfText, filing.fileName, provider, options.architecture, filing.year);
+    const chunks = chunkPdfText(pdfText, filing.fileName, provider, options.architecture, filing.year, filing.filingType);
     totalChunksAllFiles += chunks.length;
 
     // ── 3. Build hints string for prompt injection ───────────────────────────

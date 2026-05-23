@@ -623,6 +623,8 @@ export function chunkPdfText(
   architecture?: unknown,
   /** Optional fiscal year — used to boost pages mentioning that year */
   targetYear?: number,
+  /** Filing type: 10-K annual filings get a higher page budget than 10-Q */
+  filingType?: "10-K" | "10-Q",
 ): FileChunk[] {
   const maxTokens = getChunkTokenLimit(provider);
 
@@ -630,10 +632,14 @@ export function chunkPdfText(
   let workingText = text.trim();
   let pageNote = "";
   if (architecture) {
+    // 10-K annual filings are longer and pack financial statements across
+    // many more pages than a quarterly 10-Q — give them a larger page budget.
+    const maxPages = filingType === "10-K" ? 80 : 45;
     const { text: filtered, selected, total } = selectRelevantPages(
       workingText,
       architecture,
       targetYear,
+      maxPages,
     );
     if (total > 0 && selected < total) {
       workingText = filtered;
