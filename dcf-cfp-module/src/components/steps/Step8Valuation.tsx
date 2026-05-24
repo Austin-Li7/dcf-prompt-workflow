@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback } from "react";
+import { Fragment, useEffect, useMemo, useState, useCallback } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
@@ -28,6 +28,16 @@ import {
   downloadSave,
 } from "@/lib/company-saves";
 import { downloadMethodologyExport } from "@/lib/methodology-export";
+import {
+  buildValuationLineageDrivers,
+  type ValuationDriver,
+} from "@/lib/valuation-lineage";
+import {
+  loadEventImpactAdjustments,
+  saveEventImpactAdjustments,
+  type DriverAdjustment,
+  type EventImpactAdjustmentPackage,
+} from "@/lib/event-impact-adjustments";
 import type { CompanySave, ValuationSnapshot } from "@/types/cfp";
 
 // =============================================================================
@@ -74,6 +84,14 @@ function fmtDate(iso: string): string {
   });
 }
 
+function fmtAdjustmentValue(value: number | null, unit: DriverAdjustment["unit"]): string {
+  if (value == null) return "Requires rerun";
+  if (unit === "%") return `${(value * 100).toFixed(1)}%`;
+  if (unit === "USD_M") return `$${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}M`;
+  if (unit === "score") return value.toFixed(0);
+  return String(value);
+}
+
 // =============================================================================
 // Step 8 — DCF Valuation Dashboard
 // =============================================================================
@@ -95,6 +113,40 @@ export default function Step8Valuation() {
   const [savedRecord,      setSavedRecord]      = useState<CompanySave | null>(null);
   const [saveError,        setSaveError]        = useState<string | null>(null);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [eventImpactPackage, setEventImpactPackage] = useState<EventImpactAdjustmentPackage | null>(null);
+
+  useEffect(() => {
+    setEventImpactPackage(loadEventImpactAdjustments());
+  }, []);
+
+  const updateEventAdjustment = useCallback((id: string, patch: Partial<DriverAdjustment>) => {
+    setEventImpactPackage((pkg) => {
+      if (!pkg) return pkg;
+      const next = {
+        ...pkg,
+        generatedAt: new Date().toISOString(),
+        adjustments: pkg.adjustments.map((adjustment) =>
+          adjustment.id === id ? { ...adjustment, ...patch } : adjustment,
+        ),
+      };
+      saveEventImpactAdjustments(next);
+      return next;
+    });
+  }, []);
+
+  const applyEventAdjustment = useCallback((adjustment: DriverAdjustment) => {
+    if (adjustment.suggestedValue == null) return;
+    if (adjustment.driverId === "fcf-margin") {
+      setFcfMargin(adjustment.suggestedValue);
+      updateEventAdjustment(adjustment.id, { applied: true });
+    }
+    if (adjustment.driverId === "terminal-growth") {
+      setTerminalGrowth(adjustment.suggestedValue);
+      setIndustrialTerminalGrowth(adjustment.suggestedValue);
+      setFinancialTerminalGrowth(adjustment.suggestedValue);
+      updateEventAdjustment(adjustment.id, { applied: true });
+    }
+  }, [updateEventAdjustment]);
 
   const valuation = useMemo(
     () =>
@@ -116,6 +168,37 @@ export default function Step8Valuation() {
   const step5Artifacts  = useMemo(() => getStep5StructuredResults(state.forecast),  [state.forecast]);
   const assumptionRows  = useMemo(() => buildStep5AssumptionRows(state.forecast),    [state.forecast]);
   const reviewWarnings  = useMemo(() => buildStep5ReviewWarningRows(state.forecast), [state.forecast]);
+  const valuationDrivers = useMemo(
+    () =>
+      buildValuationLineageDrivers({
+        state,
+        valuationMode: valuation.valuationMode,
+        fcfMargin,
+        terminalGrowth,
+        bankFcfMargin,
+        financialTerminalGrowth,
+        industrialTerminalGrowth,
+        preferredStockUsdM,
+        minorityInterestUsdM,
+        wacc: valuation.wacc,
+        intrinsicValuePerShare: valuation.intrinsicValuePerShare,
+        eventAdjustments: eventImpactPackage?.adjustments,
+      }),
+    [
+      state,
+      valuation.valuationMode,
+      valuation.wacc,
+      valuation.intrinsicValuePerShare,
+      fcfMargin,
+      terminalGrowth,
+      bankFcfMargin,
+      financialTerminalGrowth,
+      industrialTerminalGrowth,
+      preferredStockUsdM,
+      minorityInterestUsdM,
+      eventImpactPackage,
+    ],
+  );
 
   // ── Step 2 historical baseline (last 2 confirmed fiscal years, total revenue) ─
   const historicalBaseline = useMemo(() => {
@@ -686,6 +769,14 @@ export default function Step8Valuation() {
           )}
         </section>
 
+        <EventDrivenAdjustmentsPanel
+          pkg={eventImpactPackage}
+          onUpdate={updateEventAdjustment}
+          onApply={applyEventAdjustment}
+        />
+
+        <ValuationLineagePanel drivers={valuationDrivers} />
+
         {/* ── Bottom info panels ───────────────────────────────────────────── */}
         <section className="grid gap-4 lg:grid-cols-3">
           <InfoPanel title="Market Sanity Check" icon={<BarChart3 size={15} />}>
@@ -1070,6 +1161,257 @@ function BridgeInput({
       onChange={(e) => onChange(Math.max(0, Number(e.target.value) || 0))}
       className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-right font-mono text-xs text-zinc-200 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
     />
+  );
+}
+
+function EventDrivenAdjustmentsPanel({
+  pkg,
+  onUpdate,
+  onApply,
+}: {
+  pkg: EventImpactAdjustmentPackage | null;
+  onUpdate: (id: string, patch: Partial<DriverAdjustment>) => void;
+  onApply: (adjustment: DriverAdjustment) => void;
+}) {
+  if (!pkg || pkg.adjustments.length === 0) return null;
+
+  const confidenceClass = (score: number) => {
+    if (score >= 75) return "text-emerald-300";
+    if (score >= 45) return "text-amber-300";
+    return "text-red-300";
+  };
+
+  const canApplyDirectly = (adjustment: DriverAdjustment) =>
+    adjustment.suggestedValue != null &&
+    (adjustment.driverId === "fcf-margin" || adjustment.driverId === "terminal-growth");
+
+  return (
+    <section className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-violet-300">
+            <SlidersHorizontal size={16} /> Event-Driven Parameter Adjustments
+          </h3>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            Suggestions from Step 0 events for {pkg.companyName} ({pkg.ticker}). Edit them here before relying on the final valuation.
+          </p>
+        </div>
+        <span className="rounded-full bg-zinc-950 px-3 py-1 text-xs font-medium text-zinc-400">
+          {pkg.adjustments.filter((adjustment) => adjustment.applied).length}/{pkg.adjustments.length} selected
+        </span>
+      </div>
+
+      <div className="mt-4 overflow-x-auto rounded-lg border border-zinc-800">
+        <table className="w-full min-w-[980px] text-left text-xs">
+          <thead className="bg-zinc-900 text-zinc-500">
+            <tr>
+              <th className="px-3 py-2 font-medium">Use in lineage</th>
+              <th className="px-3 py-2 font-medium">DCF parameter</th>
+              <th className="px-3 py-2 font-medium">Cached value</th>
+              <th className="px-3 py-2 font-medium">Suggested / editable value</th>
+              <th className="px-3 py-2 font-medium">Event</th>
+              <th className="px-3 py-2 font-medium">Why it matters</th>
+              <th className="px-3 py-2 font-medium">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800/70 bg-zinc-950/60">
+            {pkg.adjustments.map((adjustment) => (
+              <tr key={adjustment.id} className="align-top">
+                <td className="px-3 py-3">
+                  <input
+                    type="checkbox"
+                    checked={adjustment.applied}
+                    onChange={(event) => onUpdate(adjustment.id, { applied: event.target.checked })}
+                    className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 accent-violet-500"
+                  />
+                </td>
+                <td className="px-3 py-3">
+                  <p className="font-semibold text-zinc-100">{adjustment.driverLabel}</p>
+                  <p className={`mt-1 font-mono ${confidenceClass(adjustment.confidence)}`}>{adjustment.confidence}/100 confidence</p>
+                </td>
+                <td className="px-3 py-3 font-mono text-zinc-300">{fmtAdjustmentValue(adjustment.cachedValue, adjustment.unit)}</td>
+                <td className="px-3 py-3">
+                  {adjustment.unit === "%" && adjustment.suggestedValue != null ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={adjustment.driverId === "terminal-growth" ? 0 : 2}
+                        max={adjustment.driverId === "terminal-growth" ? 6 : 60}
+                        step={0.1}
+                        value={adjustment.suggestedValue * 100}
+                        onChange={(event) => onUpdate(adjustment.id, { suggestedValue: Number(event.target.value) / 100 })}
+                        className="w-28 accent-violet-500"
+                      />
+                      <input
+                        type="number"
+                        step={0.1}
+                        value={(adjustment.suggestedValue * 100).toFixed(1)}
+                        onChange={(event) => onUpdate(adjustment.id, { suggestedValue: Number(event.target.value) / 100 })}
+                        className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-zinc-100"
+                      />
+                      <span className="text-zinc-500">%</span>
+                    </div>
+                  ) : (
+                    <span className="font-mono text-zinc-300">{fmtAdjustmentValue(adjustment.suggestedValue, adjustment.unit)}</span>
+                  )}
+                </td>
+                <td className="px-3 py-3">
+                  <p className="font-medium text-zinc-200">{adjustment.sourceEventTitle}</p>
+                  <p className="mt-1 text-zinc-500">{adjustment.eventType}</p>
+                </td>
+                <td className="px-3 py-3 max-w-sm text-zinc-400">{adjustment.reason}</td>
+                <td className="px-3 py-3">
+                  {canApplyDirectly(adjustment) ? (
+                    <button
+                      onClick={() => onApply(adjustment)}
+                      className="rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-2 text-xs font-medium text-violet-200 hover:bg-violet-500/20"
+                    >
+                      Apply to Step 8
+                    </button>
+                  ) : (
+                    <span className="text-zinc-500">Rerun source step</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-3 text-xs text-zinc-500">
+        Direct apply is available for Step 8 assumptions such as FCF margin and terminal growth. Forecast growth, WACC, market data, and historical baseline still need their source steps rerun to change the actual model.
+      </p>
+    </section>
+  );
+}
+
+function ValuationLineagePanel({ drivers }: { drivers: ValuationDriver[] }) {
+  const directionClass = (direction: ValuationDriver["direction"]) => {
+    if (direction === "increases value") return "bg-emerald-500/10 text-emerald-300";
+    if (direction === "decreases value") return "bg-red-500/10 text-red-300";
+    if (direction === "mixed") return "bg-amber-500/10 text-amber-300";
+    return "bg-zinc-800 text-zinc-300";
+  };
+
+  const editabilityLabel = (editability: ValuationDriver["editability"]) => {
+    if (editability === "direct") return "Directly adjustable";
+    if (editability === "indirect") return "Step-driven";
+    return "Derived";
+  };
+
+  return (
+    <section className="rounded-xl border border-blue-800/40 bg-blue-950/10 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
+            <BarChart3 size={16} /> Valuation Driver Lineage
+          </h3>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            Traces each important DCF parameter from the workflow result that created it to the exact valuation lever it moves.
+          </p>
+        </div>
+        <span className="rounded-full bg-zinc-950 px-3 py-1 text-xs font-medium text-zinc-400">
+          {drivers.length} linked drivers
+        </span>
+      </div>
+
+      <div className="mt-5 overflow-x-auto rounded-lg border border-zinc-800">
+        <table className="w-full min-w-[1040px] text-left text-xs">
+          <thead className="bg-zinc-900 text-zinc-500">
+            <tr>
+              <th className="px-3 py-2 font-medium">Driver Group</th>
+              <th className="px-3 py-2 font-medium">DCF Parameter</th>
+              <th className="px-3 py-2 font-medium">Step Result</th>
+              <th className="px-3 py-2 font-medium">Parameter Used</th>
+              <th className="px-3 py-2 font-medium">Valuation Effect</th>
+              <th className="px-3 py-2 font-medium">Control</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800/70 bg-zinc-950/60">
+            {drivers.map((driver) => (
+              <Fragment key={driver.id}>
+                <tr key={`${driver.id}-summary`} className="align-top">
+                  <td className="px-3 py-3">
+                    <span className="rounded-full bg-blue-500/10 px-2 py-1 font-medium text-blue-300">
+                      {driver.group}
+                    </span>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {driver.sourceSteps.map((step) => (
+                        <span key={step} className="rounded-full bg-zinc-900 px-2 py-0.5 text-zinc-400">
+                          Step {step}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="px-3 py-3">
+                    <p className="font-semibold text-zinc-100">{driver.label}</p>
+                    <p className="mt-1 font-mono text-zinc-200">{driver.currentValue}</p>
+                    <p className="mt-1 max-w-xs text-zinc-500">{driver.explanation}</p>
+                  </td>
+                  <td className="px-3 py-3">
+                    <span className={`rounded-full px-2 py-1 font-medium ${directionClass(driver.direction)}`}>
+                      {driver.direction}
+                    </span>
+                    <p className="mt-2 max-w-xs text-zinc-500">{driver.affectedBy.join(" · ")}</p>
+                  </td>
+                  <td className="px-3 py-3 max-w-sm text-zinc-300">{driver.valuationPath}</td>
+                  <td className="px-3 py-3 max-w-sm text-zinc-300">{driver.direction === "context" ? "Sets model structure and routing." : driver.direction === "decreases value" ? "Higher value normally lowers intrinsic value." : driver.direction === "increases value" ? "Higher value normally raises intrinsic value." : "Effect depends on direction and bridge context."}</td>
+                  <td className="px-3 py-3">
+                    <span className="rounded-full bg-zinc-900 px-2 py-1 text-zinc-300">
+                      {editabilityLabel(driver.editability)}
+                    </span>
+                  </td>
+                </tr>
+                <tr key={`${driver.id}-evidence`} className="bg-zinc-950/90">
+                  <td colSpan={6} className="px-3 pb-4">
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Step Result → DCF Parameter → Valuation Effect</p>
+                      <div className="mt-2 grid gap-2">
+                        {driver.evidence.map((item, index) => (
+                          <div key={`${driver.id}-${item.step}-${index}`} className="grid gap-2 rounded-md bg-zinc-950 p-3 lg:grid-cols-[1fr_0.9fr_1fr]">
+                            <div>
+                              <div className="mb-1 flex items-center gap-2">
+                                <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-xs font-medium text-blue-300">
+                                  Step {item.step}
+                                </span>
+                                <span className="text-xs font-medium text-zinc-500">Step Result</span>
+                              </div>
+                              <p className="text-xs leading-5 text-zinc-300">{item.result}</p>
+                            </div>
+                            <div className="rounded border border-zinc-800 bg-zinc-900/70 p-2">
+                              <p className="text-xs font-medium text-zinc-500">DCF Parameter Used</p>
+                              <p className="mt-1 font-mono text-xs text-zinc-100">{driver.label}: {driver.currentValue}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-zinc-500">Valuation Effect</p>
+                              <p className="mt-1 text-xs leading-5 text-emerald-300">{item.effect}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 grid gap-3 text-xs md:grid-cols-3">
+        <div className="rounded-lg bg-zinc-950/70 p-3">
+          <p className="font-semibold text-zinc-200">Operating bridge</p>
+          <p className="mt-1 text-zinc-500">Steps 1-5 define revenue, margins, capital intensity, and explicit cash flows.</p>
+        </div>
+        <div className="rounded-lg bg-zinc-950/70 p-3">
+          <p className="font-semibold text-zinc-200">Discount bridge</p>
+          <p className="mt-1 text-zinc-500">Step 7 turns market data, beta, tax, and liquidity risk into WACC or Ke.</p>
+        </div>
+        <div className="rounded-lg bg-zinc-950/70 p-3">
+          <p className="font-semibold text-zinc-200">Shareholder bridge</p>
+          <p className="mt-1 text-zinc-500">Step 8 converts EV or stream equity values into common equity value per share.</p>
+        </div>
+      </div>
+    </section>
   );
 }
 

@@ -5,6 +5,7 @@ import { Settings } from "lucide-react";
 import { useCFP } from "@/context/CFPContext";
 import { useSettings } from "@/context/SettingsContext";
 import SettingsModal from "@/components/ui/SettingsModal";
+import Step0RefreshGate from "@/components/steps/Step0RefreshGate";
 import Step1Profile from "@/components/steps/Step1Profile";
 import Step2History from "@/components/steps/Step2History";
 import Step3Competition from "@/components/steps/Step3Competition";
@@ -31,6 +32,12 @@ interface StepGroup {
 
 const STEP_GROUPS: StepGroup[] = [
   {
+    title: "Refresh Gate",
+    steps: [
+      { number: 0, label: "Refresh Gate", shortLabel: "Refresh" },
+    ],
+  },
+  {
     title: "Module 1 — Cash Flow Projector",
     steps: [
       { number: 1, label: "Company Profile", shortLabel: "Profile" },
@@ -55,6 +62,7 @@ const STEP_GROUPS: StepGroup[] = [
 // ---------------------------------------------------------------------------
 function ActiveStep({ step }: { step: number }): ReactNode {
   switch (step) {
+    case 0: return <Step0RefreshGate />;
     case 1: return <Step1Profile />;
     case 2: return <Step2History />;
     case 3: return <Step3Competition />;
@@ -125,11 +133,11 @@ function SidebarItem({
 // Top progress bar (mobile-friendly)
 // ---------------------------------------------------------------------------
 function ProgressBar({ current, total }: { current: number; total: number }) {
-  const pct = ((current - 1) / (total - 1)) * 100;
+  const pct = (current / total) * 100;
   return (
     <div className="mb-1">
       <div className="flex items-center justify-between px-1 text-xs text-zinc-500">
-        <span>Step {current} of {total}</span>
+        <span>{current === 0 ? "Step 0" : `Step ${current} of ${total}`}</span>
         <span>{Math.round(pct)}% complete</span>
       </div>
       <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">

@@ -15,7 +15,7 @@ import type { CFPState, CFPAction } from "@/types/cfp";
 const TOTAL_STEPS = 8;
 
 export const initialCFPState: CFPState = {
-  currentStep: 1,
+  currentStep: 0,
   isLoading: false,
   error: null,
 
@@ -112,13 +112,13 @@ export const initialCFPState: CFPState = {
 function cfpReducer(state: CFPState, action: CFPAction): CFPState {
   switch (action.type) {
     case "SET_STEP":
-      return { ...state, currentStep: Math.min(Math.max(action.payload, 1), TOTAL_STEPS) };
+      return { ...state, currentStep: Math.min(Math.max(action.payload, 0), TOTAL_STEPS) };
 
     case "NEXT_STEP":
       return { ...state, currentStep: Math.min(state.currentStep + 1, TOTAL_STEPS) };
 
     case "PREV_STEP":
-      return { ...state, currentStep: Math.max(state.currentStep - 1, 1) };
+      return { ...state, currentStep: Math.max(state.currentStep - 1, 0) };
 
     case "SET_LOADING":
       return { ...state, isLoading: action.payload };

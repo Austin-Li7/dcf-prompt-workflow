@@ -1355,7 +1355,7 @@ export interface AnnualFCFPoint {
 import type { WACCState } from "./wacc";
 
 export interface CFPState {
-  currentStep: number; // 1–8
+  currentStep: number; // 0–8
   isLoading: boolean;
   error: string | null;
 

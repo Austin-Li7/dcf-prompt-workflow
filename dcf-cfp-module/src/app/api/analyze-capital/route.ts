@@ -152,7 +152,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeCapita
         recentNews: newsBlock,
         trendAnalysis: trendAnalysis as TrendAnalysisResult | null,
       }),
-      maxTokens: 12288,
+      maxTokens: 65536,
       responseSchema:
         llmProvider === "gemini" ? GEMINI_STEP4_RESPONSE_SCHEMA : STEP4_RESPONSE_SCHEMA,
       responseToolName: "submit_step4_structured_result",

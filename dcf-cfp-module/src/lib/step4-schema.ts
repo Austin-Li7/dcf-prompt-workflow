@@ -378,6 +378,7 @@ function normalizeStep4StructuredPayload(payload: unknown): unknown {
 
   const record = payload as Record<string, unknown>;
   const normalizedWarnings: z.infer<typeof ValidationWarningSchema>[] = [];
+  const rawSources = Array.isArray(record.sources) ? record.sources : [];
   const synergies = Array.isArray(record.synergy_registry)
     ? record.synergy_registry.map((synergy) => {
         if (!synergy || typeof synergy !== "object" || Array.isArray(synergy)) {
@@ -429,14 +430,83 @@ function normalizeStep4StructuredPayload(payload: unknown): unknown {
         )
       : capitalAllocation;
   const existingWarnings = normalizeValidationWarnings(record.validation_warnings, synergyIds);
+  const sources = normalizeSources(rawSources, record.claims, synergies, normalizedCapitalAllocation);
 
   return {
     ...record,
     schema_version: "v5.5",
+    sources,
     synergy_registry: synergies,
     capital_allocation: normalizedCapitalAllocation,
     validation_warnings: [...existingWarnings, ...normalizedWarnings],
   };
+}
+
+function normalizeSources(
+  rawSources: unknown[],
+  rawClaims: unknown,
+  rawSynergies: unknown,
+  rawCapitalAllocation: unknown,
+): unknown[] {
+  const sources = rawSources.filter(
+    (source) => source && typeof source === "object" && !Array.isArray(source),
+  );
+  const sourceIds = new Set(
+    sources.flatMap((source) => {
+      const sourceId = (source as Record<string, unknown>).source_id;
+      return typeof sourceId === "string" ? [sourceId] : [];
+    }),
+  );
+  const referencedIds = new Set<string>();
+  const addIds = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => {
+        if (typeof entry === "string") referencedIds.add(entry);
+      });
+    }
+  };
+
+  if (Array.isArray(rawClaims)) {
+    rawClaims.forEach((claim) => {
+      if (claim && typeof claim === "object" && !Array.isArray(claim)) {
+        addIds((claim as Record<string, unknown>).source_ids);
+      }
+    });
+  }
+
+  if (Array.isArray(rawSynergies)) {
+    rawSynergies.forEach((synergy) => {
+      if (!synergy || typeof synergy !== "object" || Array.isArray(synergy)) return;
+      const financialSignal = (synergy as Record<string, unknown>).financial_signal;
+      if (financialSignal && typeof financialSignal === "object" && !Array.isArray(financialSignal)) {
+        addIds((financialSignal as Record<string, unknown>).source_ids);
+      }
+    });
+  }
+
+  if (rawCapitalAllocation && typeof rawCapitalAllocation === "object" && !Array.isArray(rawCapitalAllocation)) {
+    const metrics = (rawCapitalAllocation as Record<string, unknown>).capital_metrics;
+    if (Array.isArray(metrics)) {
+      metrics.forEach((metric) => {
+        if (metric && typeof metric === "object" && !Array.isArray(metric)) {
+          addIds((metric as Record<string, unknown>).source_ids);
+        }
+      });
+    }
+  }
+
+  const placeholderSources = Array.from(referencedIds)
+    .filter((sourceId) => !sourceIds.has(sourceId))
+    .map((sourceId) => ({
+      source_id: sourceId,
+      source_type: sourceId === "derived" ? "derived" : "not_available",
+      name: sourceId === "derived" ? "Derived from uploaded workflow inputs" : `Unresolved source: ${sourceId}`,
+      url: null,
+      locator: null,
+      excerpt: null,
+    }));
+
+  return [...sources, ...placeholderSources];
 }
 
 function normalizeCapitalAllocation(

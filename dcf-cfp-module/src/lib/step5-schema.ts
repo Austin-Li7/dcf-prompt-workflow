@@ -5,19 +5,31 @@ import type { HistoricalData, ProductForecast } from "../types/cfp.ts";
 const DriverQualitySchema = z.enum(["DISCLOSED", "STRONG", "WEAK", "ESTIMATED_BASE"]);
 const ForecastModeSchema = z.enum(["SEGMENT_ANNUAL", "SEGMENT_QUARTERLY", "PRODUCT_QUARTERLY"]);
 
+const boundedStr = (maxLen: number, fallback = "No detail provided.") =>
+  z.preprocess((value) => {
+    if (typeof value !== "string" || value.trim() === "") return fallback;
+    return value.slice(0, maxLen);
+  }, z.string().min(1).max(maxLen));
+
+const nullableBoundedStr = (maxLen: number) =>
+  z.preprocess((value) => {
+    if (typeof value !== "string" || value.trim() === "") return null;
+    return value.slice(0, maxLen);
+  }, z.string().max(maxLen).nullable());
+
 const ReviewSummarySchema = z.object({
-  one_line: z.string().min(1).max(260),
-  highlights: z.array(z.string().min(1).max(220)).default([]),
-  warnings: z.array(z.string().min(1).max(220)).default([]),
+  one_line: boundedStr(260),
+  highlights: z.array(boundedStr(220)).default([]),
+  warnings: z.array(boundedStr(220)).default([]),
 });
 
 const Step5AssumptionSchema = z.object({
   id: z.string().min(1),
-  statement: z.string().min(1).max(320),
+  statement: boundedStr(320),
   basis_claim_ids: z.array(z.string().min(1)).default([]),
   driver_quality: DriverQualitySchema,
-  driver_eligibility_source: z.string().min(1).max(260),
-  arithmetic_trace: z.string().min(1).max(420),
+  driver_eligibility_source: boundedStr(260),
+  arithmetic_trace: boundedStr(420),
   management_override_required: z.boolean(),
 });
 
@@ -42,7 +54,7 @@ const Step5ForecastRowSchema = z.object({
   fcfe_usd_m: z.number().nullable().optional(),
   // Strategic override — required when yoy_growth_pct exceeds the backend plateau ceiling.
   // Must name the specific catalyst (new product, competitor exit, major CapEx) breaking the curve.
-  growth_justification: z.string().max(420).nullable().default(null),
+  growth_justification: nullableBoundedStr(420).default(null),
 });
 
 const WeakInferenceSensitivitySchema = z.object({
@@ -50,7 +62,7 @@ const WeakInferenceSensitivitySchema = z.object({
   evidence_level: z.enum(["WEAK_INFERENCE", "WEAK", "ESTIMATED_BASE"]),
   if_removed_revenue_impact_usd_m: z.number(),
   fy5_impact_pct: z.number(),
-  flag: z.string().min(1),
+  flag: boundedStr(220),
 });
 
 const ConfidenceSummarySchema = z.object({

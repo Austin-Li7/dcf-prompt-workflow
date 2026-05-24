@@ -17,8 +17,20 @@ import type { HistoricalExtractionRow } from "@/types/cfp";
 const nullableNum = z.number().nullable();
 const boundedStr = (max: number) =>
   z.preprocess(
-    (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+    (v) => {
+      if (typeof v !== "string") return v;
+      if (v.trim() === "") return null;
+      return v.slice(0, max);
+    },
     z.string().max(max).nullable(),
+  );
+const requiredBoundedStr = (max: number, fallback = "No detail provided.") =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== "string" || v.trim() === "") return fallback;
+      return v.slice(0, max);
+    },
+    z.string().min(1).max(max),
   );
 
 // ---------------------------------------------------------------------------
@@ -49,10 +61,7 @@ export const Step2IndustrialRowSchema = z.object({
     "external_verification_required",
     "unverified",
   ]),
-  review_note: z.preprocess(
-    (v) => (v === "" ? "No review note provided." : v),
-    z.string().max(220),
-  ),
+  review_note: requiredBoundedStr(220, "No review note provided."),
 });
 
 const SourceSchema = z.object({
@@ -65,7 +74,7 @@ const SourceSchema = z.object({
 
 const ExcludedItemSchema = z.object({
   label: z.string().min(1),
-  reason: z.string().min(1),
+  reason: requiredBoundedStr(220),
   source_id: z.string().min(1).nullable(),
   evidence_level: z.enum(["DISCLOSED", "STRONG_INFERENCE", "WEAK_INFERENCE", "UNSUPPORTED"]),
 });
@@ -73,7 +82,7 @@ const ExcludedItemSchema = z.object({
 const ValidationWarningSchema = z.object({
   code: z.string().min(1),
   severity: z.enum(["info", "warn", "high"]),
-  message: z.string().min(1),
+  message: requiredBoundedStr(220),
   row_ids: z.array(z.string()).default([]),
 });
 
@@ -114,9 +123,9 @@ export const Step2IndustrialStructuredSchema = z.object({
   excluded_items: z.array(ExcludedItemSchema).default([]),
   validation_warnings: z.array(ValidationWarningSchema).default([]),
   review_summary: z.object({
-    one_line: z.string().min(1),
-    highlights: z.array(z.string()).default([]),
-    warnings: z.array(z.string()).default([]),
+    one_line: requiredBoundedStr(240),
+    highlights: z.array(requiredBoundedStr(180)).default([]),
+    warnings: z.array(requiredBoundedStr(180)).default([]),
   }),
   /**
    * MD&A management split between maintenance and growth CapEx.

@@ -31,7 +31,7 @@ export default function StepShell({
 }) {
   const { dispatch, totalSteps } = useCFP();
 
-  const isFirst = stepNumber === 1;
+  const isFirst = stepNumber === 0;
   const isLast = stepNumber === totalSteps;
 
   return (
@@ -39,7 +39,7 @@ export default function StepShell({
       {/* Header */}
       <div className="mb-8">
         <p className="text-sm font-semibold uppercase tracking-widest text-blue-400">
-          Step {stepNumber} of {totalSteps}
+          {stepNumber === 0 ? "Step 0" : `Step ${stepNumber} of ${totalSteps}`}
         </p>
         <h1 className="mt-1 text-2xl font-bold tracking-tight text-zinc-100 sm:text-3xl">
           {title}

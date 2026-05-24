@@ -7,6 +7,8 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
+const sourceExcerptSchema = z.string().transform((value) => value.slice(0, 160));
+
 // ---------------------------------------------------------------------------
 // Row extracted from one chunk (covers all fiscal years found in that chunk)
 // ---------------------------------------------------------------------------
@@ -19,7 +21,7 @@ export const ChunkRowSchema = z.object({
   revenue_usd_m: z.number().nullable(),
   operating_income_usd_m: z.number().nullable(),
   /** Short excerpt proving where the number came from (max 160 chars). */
-  source_excerpt: z.string().max(160),
+  source_excerpt: sourceExcerptSchema,
   confidence: z.enum(["high", "medium", "low"]),
 });
 
@@ -122,7 +124,7 @@ export const BankChunkRowSchema = z.object({
   cash_and_hqla_usd_m: z.number().nullable(),
   htm_bonds_usd_m: z.number().nullable(),
   unrealized_losses_htm_usd_m: z.number().nullable(),
-  source_excerpt: z.string().max(160),
+  source_excerpt: sourceExcerptSchema,
   confidence: z.enum(["high", "medium", "low"]),
 });
 
@@ -162,7 +164,7 @@ export const IndustrialChunkRowSchema = z.object({
   /** Headcount as reported (integer, or null if not disclosed). */
   headcount: z.number().int().nullable(),
   /** Short excerpt proving where the number came from (max 160 chars). */
-  source_excerpt: z.string().max(160),
+  source_excerpt: sourceExcerptSchema,
   confidence: z.enum(["high", "medium", "low"]),
 });
 
