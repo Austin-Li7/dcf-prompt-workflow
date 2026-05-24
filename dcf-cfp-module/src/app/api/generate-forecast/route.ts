@@ -9,6 +9,21 @@ import {
   projectStep5StructuredToProducts,
   reanchorStep5ForecastToBaselines,
 } from "@/lib/step5-schema";
+
+/** Belt-and-suspenders: truncate ALL strings in the LLM payload to `maxLen` chars
+ *  before Zod validation so schema max() checks never fire on raw LLM output. */
+function truncateAllStrings(obj: unknown, maxLen = 420): unknown {
+  if (typeof obj === "string") return obj.length > maxLen ? obj.slice(0, maxLen) : obj;
+  if (Array.isArray(obj)) return obj.map((v) => truncateAllStrings(v, maxLen));
+  if (obj && typeof obj === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      out[k] = truncateAllStrings(v, maxLen);
+    }
+    return out;
+  }
+  return obj;
+}
 import type {
   BusinessArchitecture,
   CompetitiveLandscape,
@@ -500,8 +515,11 @@ ${liquidityConstraint}`;
 
     let structuredResult;
     try {
+      // truncateAllStrings pre-clips every string to the smallest cap (220) so Zod's
+      // .max() checks never fire on raw LLM output, regardless of caching state.
+      const primaryPayload = truncateAllStrings(result.structuredData ?? JSON.parse(rawText), 220);
       structuredResult = reanchorStep5ForecastToBaselines(
-        parseStep5StructuredResult(result.structuredData ?? JSON.parse(rawText)),
+        parseStep5StructuredResult(primaryPayload),
         baselineContext,
       );
     } catch (error) {
@@ -515,8 +533,9 @@ ${liquidityConstraint}`;
       }
 
       try {
+        const fallbackPayload = truncateAllStrings(parseJsonObject(rawText), 220);
         structuredResult = reanchorStep5ForecastToBaselines(
-          parseStep5StructuredResult(parseJsonObject(rawText)),
+          parseStep5StructuredResult(fallbackPayload),
           baselineContext,
         );
       } catch (fallbackError) {

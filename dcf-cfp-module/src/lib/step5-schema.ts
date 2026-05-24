@@ -478,7 +478,34 @@ function normalizeStep5StructuredPayload(payload: unknown): unknown {
 }
 
 export function parseStep5StructuredResult(payload: unknown): Step5StructuredResult {
-  return Step5StructuredSchema.parse(normalizeStep5StructuredPayload(payload));
+  const normalized = normalizeStep5StructuredPayload(payload);
+  const result = Step5StructuredSchema.safeParse(normalized);
+  if (result.success) return result.data;
+
+  // If the only failures are too_big string fields (LLM ignored char caps),
+  // patch each offending field and retry once.
+  const tooBigStringIssues = result.error.issues.filter(
+    (issue): issue is z.ZodIssue & { code: "too_big"; maximum: number } =>
+      issue.code === "too_big" && (issue as { type?: string }).type === "string",
+  );
+
+  if (tooBigStringIssues.length === 0) throw result.error;
+
+  // Deep-clone via JSON round-trip then patch each over-long field
+  const patched: Record<string, unknown> = JSON.parse(JSON.stringify(normalized));
+  for (const issue of tooBigStringIssues) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let node: any = patched;
+    for (let i = 0; i < issue.path.length - 1; i++) {
+      node = node?.[issue.path[i]];
+    }
+    const leaf = issue.path[issue.path.length - 1] as string | number;
+    if (node != null && typeof node[leaf] === "string") {
+      node[leaf] = (node[leaf] as string).slice(0, issue.maximum);
+    }
+  }
+
+  return Step5StructuredSchema.parse(patched);
 }
 
 function normalizedName(value: string | undefined | null): string {

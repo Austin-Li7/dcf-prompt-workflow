@@ -5,7 +5,7 @@ import {
   Loader2, AlertTriangle, AlertCircle, CheckCircle2,
   RefreshCw, Save, Percent, Building2, Plus, Trash2,
   Download as ImportIcon, BarChart3, TrendingUp, Shield,
-  SlidersHorizontal, Landmark, Info, GitMerge,
+  SlidersHorizontal, Landmark, Info, GitMerge, ExternalLink,
 } from "lucide-react";
 import StepShell from "./StepShell";
 import StepModeIndicator from "@/components/ui/StepModeIndicator";
@@ -15,7 +15,7 @@ import {
   detectConglomerate, detectFinancialCompany,
 } from "@/lib/wacc-math";
 import { inferTickerFromCompanyName, normalizeTickerInput } from "@/lib/ticker-lookup";
-import { damodaranBetaForWorkflowMode } from "@/lib/damodaran-betas";
+import { damodaranBetaForWorkflowMode, lookupDamodaranBeta, DAMODARAN_BETAS } from "@/lib/damodaran-betas";
 import { buildWaccSegmentsFromCFP } from "@/lib/wacc-handoff";
 import { buildDcfValuation, buildSotpValuation } from "@/lib/dcf-valuation";
 import { aggregateSegmentForecastFy, buildStep5AssumptionRows, buildStep5ReviewWarningRows, getStep5StructuredResults } from "@/lib/aggregate-forecast";
@@ -54,6 +54,19 @@ function fmtUpside(v: number | null): string {
   if (v === null) return "N/A";
   return `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 }
+
+// Quick-select beta presets for bank / financial segments (from DAMODARAN_BETAS)
+const BANK_BETA_PRESETS = [
+  { label: "Money Center", industry: "Banks (Money Center)" },
+  { label: "Regional",     industry: "Banks (Regional)" },
+  { label: "Fin Services", industry: "Financial Services (Non-bank)" },
+  { label: "Fintech",      industry: "Fintech / Payments" },
+].map(({ label, industry }) => ({
+  label,
+  beta: DAMODARAN_BETAS.find((e) => e.industry === industry)!.unleveredBeta,
+}));
+
+const DAMODARAN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/Betas.html";
 
 // =============================================================================
 // Component
@@ -98,6 +111,7 @@ export default function Step7WACC() {
   // ── Hybrid SOTP mode ────────────────────────────────────────────────────────
   const [hybridSegments, setHybridSegments] = useState<WACCSegmentRow[]>(state.wacc.hybridSegments);
   const [hybridBankBeta, setHybridBankBeta] = useState(state.wacc.hybridBankBeta);
+  const [hybridImportNote, setHybridImportNote] = useState<string | null>(null);
   const [bankFcfMargin, setBankFcfMargin] = useState(state.wacc.bankFcfMargin ?? 0.20);
   const [industrialFcfMargin, setIndustrialFcfMargin] = useState(state.wacc.industrialFcfMargin ?? 0.25);
 
@@ -219,7 +233,7 @@ export default function Step7WACC() {
     for (const seg of state.profile.step1StructuredResult?.analysis_view.segments ?? []) {
       if (seg.workflow_mode) workflowModes[seg.canonical_name] = seg.workflow_mode;
     }
-    setSegments(buildWaccSegmentsFromCFP(state.profile.architectureJson, state.forecast, uid, workflowModes));
+    setSegments(buildWaccSegmentsFromCFP(state.profile.architectureJson, state.forecast, uid, workflowModes, fetchedData?.industry));
   };
 
   // ── Hybrid segment import ─────────────────────────────────────────────────
@@ -229,16 +243,18 @@ export default function Step7WACC() {
     for (const seg of state.profile.step1StructuredResult?.analysis_view.segments ?? []) {
       if (seg.workflow_mode) workflowModes[seg.canonical_name] = seg.workflow_mode;
     }
-    const rows = buildWaccSegmentsFromCFP(state.profile.architectureJson, state.forecast, uid, workflowModes);
+    const rows = buildWaccSegmentsFromCFP(state.profile.architectureJson, state.forecast, uid, workflowModes, fetchedData?.industry);
     // Annotate with workflowMode from the map
     const annotated = rows.map((r) => ({
       ...r,
       workflowMode: (workflowModes[r.name] ?? "industrial") as "bank" | "industrial",
     }));
     setHybridSegments(annotated);
-    // Use the Damodaran bank beta (0.37) — the whole-company damodaranBeta
-    // reflects the dominant industry (e.g. Software 0.96) and is wrong here.
-    setHybridBankBeta(damodaranBetaForWorkflowMode("bank"));
+    const bankBeta = damodaranBetaForWorkflowMode("bank", { yfIndustry: fetchedData?.industry });
+    setHybridBankBeta(bankBeta);
+    const matched = fetchedData?.industry ? lookupDamodaranBeta(fetchedData.industry) : null;
+    const category = matched?.damodaranIndustry ?? "Banks (Regional)";
+    setHybridImportNote(`Bank β auto-set to ${bankBeta.toFixed(3)} — Damodaran: ${category}${!matched ? " (default)" : ""}`);
   };
 
   const addHybridSegment = () =>
@@ -716,6 +732,28 @@ export default function Step7WACC() {
               ) : (
                 <p className="text-xs text-zinc-600">Fetch market data to auto-suggest a Damodaran beta.</p>
               )}
+              {/* Financial quick-select presets */}
+              {businessType === "financial" && (
+                <div className="space-y-1.5">
+                  <p className="text-xs text-zinc-500">Quick-select financial category:</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {BANK_BETA_PRESETS.map(({ label, beta }) => (
+                      <button key={label} type="button" onClick={() => setSingleBeta(beta)}
+                        className={`rounded border px-2 py-0.5 text-xs transition-colors ${
+                          Math.abs(singleBeta - beta) < 0.001
+                            ? "border-amber-600/50 bg-amber-950/30 text-amber-300"
+                            : "border-zinc-700 bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                        }`}>
+                        {label} β{beta.toFixed(2)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <a href={DAMODARAN_URL} target="_blank" rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2">
+                <ExternalLink size={10} /> Damodaran Betas by Sector (US)
+              </a>
             </div>
           )}
 
@@ -733,7 +771,7 @@ export default function Step7WACC() {
                   className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">
                   <Plus size={12} /> Add Segment
                 </button>
-                <span className="text-xs text-zinc-600">Import assigns Damodaran betas: bank ≈ 0.37 · industrial ≈ 0.96</span>
+                <span className="text-xs text-zinc-600">Import auto-assigns Damodaran betas by workflow mode and YF industry</span>
               </div>
               {segments.length > 0 && <SegmentTable segments={segments} weighted={weightedBeta}
                 onUpdate={updateSegment} onRemove={removeSegment} />}
@@ -752,9 +790,24 @@ export default function Step7WACC() {
                   <input type="number" step="0.01" value={hybridBankBeta}
                     onChange={(e) => setHybridBankBeta(Number(e.target.value))}
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-amber-500" />
-                  <p className="mt-1 text-xs text-zinc-600">
-                    Applied to all bank-mode segments. Damodaran Banks (Regional) ≈ 0.37 · Fintech ≈ 0.73
-                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    <div className="flex flex-wrap gap-1.5">
+                      {BANK_BETA_PRESETS.map(({ label, beta }) => (
+                        <button key={label} type="button" onClick={() => setHybridBankBeta(beta)}
+                          className={`rounded border px-2 py-0.5 text-xs transition-colors ${
+                            Math.abs(hybridBankBeta - beta) < 0.001
+                              ? "border-amber-600/50 bg-amber-950/30 text-amber-300"
+                              : "border-zinc-700 bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                          }`}>
+                          {label} β{beta.toFixed(2)}
+                        </button>
+                      ))}
+                    </div>
+                    <a href={DAMODARAN_URL} target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2">
+                      <ExternalLink size={10} /> Damodaran Betas by Sector (US)
+                    </a>
+                  </div>
                 </div>
                 <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-400 space-y-1">
                   <p className="font-semibold text-zinc-300">Industrial segments use per-segment betas below.</p>
@@ -766,17 +819,24 @@ export default function Step7WACC() {
               </div>
 
               {/* Segment import + table */}
-              <div className="flex flex-wrap items-center gap-2">
-                {hasArchitecture && (
-                  <button onClick={importHybridFromCFP}
-                    className="flex items-center gap-1.5 rounded-lg border border-teal-600/50 bg-teal-600/10 px-3 py-1.5 text-xs font-medium text-teal-400 hover:bg-teal-600/20">
-                    <ImportIcon size={12} /> Import Segments from CFP
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {hasArchitecture && (
+                    <button onClick={importHybridFromCFP}
+                      className="flex items-center gap-1.5 rounded-lg border border-teal-600/50 bg-teal-600/10 px-3 py-1.5 text-xs font-medium text-teal-400 hover:bg-teal-600/20">
+                      <ImportIcon size={12} /> Import Segments from CFP
+                    </button>
+                  )}
+                  <button onClick={addHybridSegment}
+                    className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">
+                    <Plus size={12} /> Add Segment
                   </button>
+                </div>
+                {hybridImportNote && (
+                  <div className="flex items-center gap-1.5 text-xs text-teal-400">
+                    <CheckCircle2 size={12} className="shrink-0" /> {hybridImportNote}
+                  </div>
                 )}
-                <button onClick={addHybridSegment}
-                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">
-                  <Plus size={12} /> Add Segment
-                </button>
               </div>
 
               {hybridSegments.length > 0 && (

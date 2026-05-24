@@ -9,6 +9,8 @@ export function buildWaccSegmentsFromCFP(
   makeId: (segmentName: string) => string,
   // Per-segment workflow_mode from Step 1 / Step 2 review panel
   segmentWorkflowModes?: Record<string, "bank" | "industrial">,
+  // Company-level Yahoo Finance industry string for context-aware beta selection
+  yfIndustry?: string | null,
 ): WACCSegmentRow[] {
   const segments = architecture?.architecture ?? [];
   return segments.map((segment) => {
@@ -16,8 +18,7 @@ export function buildWaccSegmentsFromCFP(
     return {
       id: makeId(segment.segment),
       name: segment.segment,
-      // Use Damodaran beta for the segment's workflow mode instead of hardcoded 1.0
-      unleveredBeta: damodaranBetaForWorkflowMode(mode),
+      unleveredBeta: damodaranBetaForWorkflowMode(mode, { yfIndustry }),
       estimatedValue: Math.round(
         structuredFy5RevenueForSegment(forecast, segment.segment) ??
         legacyFy5RevenueForSegment(forecast, segment.segment),

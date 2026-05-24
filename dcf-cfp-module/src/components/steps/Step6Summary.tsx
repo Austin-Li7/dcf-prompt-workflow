@@ -372,12 +372,13 @@ export default function Step6Summary() {
               </div>
 
               {/* Top 3 Growth Engines */}
+              {(insights.topEngines ?? []).length > 0 && (
               <div>
                 <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-amber-400">
                   <Flame size={16} /> Strategic Growth Heatmap — Top 3 Engines
                 </h3>
                 <div className="grid gap-3 sm:grid-cols-3">
-                  {insights.topEngines.map((eng, i) => (
+                  {(insights.topEngines ?? []).map((eng, i) => (
                     <div key={i} className="rounded-lg border border-amber-700/30 bg-amber-950/20 p-4">
                       <div className="flex items-start justify-between">
                         <span className="text-sm font-semibold text-amber-300">#{i + 1}</span>
@@ -389,8 +390,10 @@ export default function Step6Summary() {
                   ))}
                 </div>
               </div>
+              )}
 
               {/* Conclusion */}
+              {insights.conclusion && (
               <div>
                 <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-blue-400">
                   <Shield size={16} /> Summary Conclusion
@@ -406,6 +409,7 @@ export default function Step6Summary() {
                   </div>
                 </div>
               </div>
+              )}
             </section>
           )}
 

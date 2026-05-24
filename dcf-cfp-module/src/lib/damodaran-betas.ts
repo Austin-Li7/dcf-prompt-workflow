@@ -305,18 +305,47 @@ export function isFinancialIndustry(yfIndustry: string): boolean {
 }
 
 /**
+ * Financial Damodaran categories where deposits/reserves substitute for traditional
+ * debt — Hamada re-levering is inappropriate for these in industrial WACC calculation.
+ */
+const FINANCIAL_DAM_CATEGORIES = new Set([
+  "Banks (Money Center)",
+  "Banks (Regional)",
+  "Financial Services (Non-bank)",
+  "Insurance (General)",
+  "Insurance (Life)",
+  "Insurance (Property/Casualty)",
+  "Investment Banking / Brokerage",
+  "Investments & Asset Management",
+  "Fintech / Payments",
+]);
+
+/**
  * Return the best Damodaran unlevered beta for a segment based on its
  * workflow_mode tag set during Step 2 review.
  *
- * "bank"       → Banks (Regional) beta (~0.37)
- * "industrial" → Software / Application beta (~0.96) as a sensible tech default;
- *                callers should override with a fetched-industry lookup when available
+ * Optional `context.yfIndustry` refines the result:
+ * - bank mode: matches within financial categories only (e.g. Fintech/Payments 0.73
+ *   instead of Banks Regional 0.37 for a fintech/payments company)
+ * - industrial mode: matches within non-financial categories only (avoids
+ *   contaminating industrial segments with a bank beta in a hybrid company)
+ *
+ * Falls back to Banks (Regional) / Software (Application) when no context match.
  */
 export function damodaranBetaForWorkflowMode(
   workflowMode: "bank" | "industrial" | undefined,
+  context?: { yfIndustry?: string | null },
 ): number {
   if (workflowMode === "bank") {
+    if (context?.yfIndustry) {
+      const match = lookupDamodaranBeta(context.yfIndustry);
+      if (match && FINANCIAL_DAM_CATEGORIES.has(match.damodaranIndustry)) return match.beta;
+    }
     return DAMODARAN_BETAS.find((e) => e.industry === "Banks (Regional)")!.unleveredBeta;
+  }
+  if (context?.yfIndustry) {
+    const match = lookupDamodaranBeta(context.yfIndustry);
+    if (match && !FINANCIAL_DAM_CATEGORIES.has(match.damodaranIndustry)) return match.beta;
   }
   // Industrial default — reasonable for tech/software segments
   return DAMODARAN_BETAS.find((e) => e.industry === "Software (Application)")!.unleveredBeta;

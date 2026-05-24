@@ -126,7 +126,7 @@ export function getStep5StructuredResults(forecastState: ForecastState): Step5St
 
   const seen = new Set<string>();
   return [...direct, ...fromSegments].filter((result) => {
-    const key = `${result.company_name}|${result.machine_artifact.forecast_mode}|${result.machine_artifact.forecast_table
+    const key = `${result.company_name}|${result.machine_artifact.forecast_mode}|${(result.machine_artifact.forecast_table ?? [])
       .map((row) => `${row.segment}:${row.category}:${row.fiscal_year}:${row.quarter ?? ""}`)
       .join("|")}`;
     if (seen.has(key)) return false;
@@ -171,7 +171,7 @@ export function buildStep5ReviewWarningRows(forecastState: ForecastState): Step5
   return getStep5StructuredResults(forecastState).flatMap((result) => {
     const segmentLabel = artifactSegmentLabel(result);
     const artifact = result.machine_artifact;
-    const reviewWarnings = result.review_summary.warnings.map((warning) => ({
+    const reviewWarnings = (result.review_summary?.warnings ?? []).map((warning) => ({
       segment: segmentLabel,
       source: "review_warning" as const,
       warning,
