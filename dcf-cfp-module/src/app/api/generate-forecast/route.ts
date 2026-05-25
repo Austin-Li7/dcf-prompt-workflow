@@ -349,15 +349,37 @@ function formatSegmentTrendCeiling(
 
 /**
  * Detect whether the target segment uses bank/NII-driven revenue.
- * Checks history row workflow_mode and presence of NII data.
+ *
+ * Priority:
+ *  1. Step 1 SegmentArchitectureEntry.workflow_mode — user-reviewed, authoritative.
+ *  2. Step 2 history heuristics (workflow_mode rows, nii_usd_m presence) — fallback
+ *     only when Step 1 has no tag for this segment.
+ *
+ * Relying on Step 2 as the sole source caused false positives: consolidated NII
+ * figures spread to industrial segments (e.g. Technology Platform) during
+ * extraction, triggering bank-mode prompts for non-bank segments and producing
+ * the "Bank FCFE fields incomplete" warning for segments that were never banks.
  */
 function detectBankMode(
+  architecture: BusinessArchitecture | null | undefined,
   history: HistoricalData | null | undefined,
   targetSegment: string,
 ): boolean {
-  const rows = history?.rows ?? [];
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const tgt = norm(targetSegment);
+
+  // 1. Authoritative: Step 1 architecture workflow_mode (set and reviewed by user).
+  const archEntries = architecture?.architecture ?? [];
+  const archMatch = archEntries.find((e) => {
+    const src = norm(e.segment);
+    return src === tgt || (tgt.length >= 5 && (src.includes(tgt) || tgt.includes(src)));
+  });
+  if (archMatch?.workflow_mode != null) {
+    return archMatch.workflow_mode === "bank";
+  }
+
+  // 2. Fallback: Step 2 history heuristics (when Step 1 has no tag for this segment).
+  const rows = history?.rows ?? [];
   const segRows = rows.filter((r) => {
     const src = norm(r.segment);
     return src === tgt || (tgt.length >= 5 && (src.includes(tgt) || tgt.includes(src)));
@@ -409,7 +431,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateForec
     const competitionLean = leanCompetition(step3Competition as CompetitiveLandscape);
     const synergiesLean = leanSynergies(step4Complete as SynergiesAndDrivers);
 
-    const isBankMode = detectBankMode(step2History as HistoricalData, targetSegment);
+    const isBankMode = detectBankMode(step1Architecture as BusinessArchitecture, step2History as HistoricalData, targetSegment);
     const trendCeilingBlock = formatSegmentTrendCeiling(trendAnalysis as TrendAnalysisResult | null, targetSegment);
     // S5-4: Cross-segment consistency anchors from already-approved segments
     const crossSegmentBlock = buildCrossSegmentAnchors(
