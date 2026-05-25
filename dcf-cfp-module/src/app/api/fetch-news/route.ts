@@ -147,7 +147,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<FetchNewsResp
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           tools: [{ google_search: {} }],
-          generationConfig: { maxOutputTokens: 2048 },
+          generationConfig: {
+            // Raised from 2048: with Google Search grounding + dynamic thinking,
+            // the prior ceiling was consumed by thinking tokens, leaving an empty
+            // visible text part (finishReason MAX_TOKENS) → "returned no content".
+            maxOutputTokens: 8192,
+            // -1 = dynamic thinking: the model sizes its own thinking budget and
+            // still reserves room for visible output within maxOutputTokens.
+            thinkingConfig: { thinkingBudget: -1 },
+          },
         }),
       },
     );
