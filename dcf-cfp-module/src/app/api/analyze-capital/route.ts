@@ -67,6 +67,8 @@ const STEP4_CAPITAL_SYSTEM_PROMPT = [
   "Include review_summary and validation_warnings suitable for a human review UI.",
   // S4-3: Hybrid output priority ordering — bank capital first to ensure it's never truncated
   "HYBRID OUTPUT ORDER: For hybrid companies, emit the bank-mode capital_allocation entries FIRST in the output, before industrial CapEx entries. Bank regulatory capital (CET1, RWA, ALM risk) must be complete before industrial CapEx detail appears.",
+  // synergy_link sentinel rule
+  'capital_metrics[].synergy_link MUST be an exact synergy_id string from the synergy_registry (e.g. "synergy:lending:charter"). If no direct synergy exists for a capital metric, set synergy_link to the literal string "NONE". Never write prose or explanation in synergy_link.',
   "No markdown, commentary, or prose outside the structured response.",
 ].join(" ");
 

@@ -104,6 +104,7 @@ const CapitalMetricSchema = z.object({
   objective: boundedStr(320),
   capital_intensity: z.enum(["Low", "Medium", "High", "Unknown"]),
   strategic_leverage: boundedStr(320),
+  // "NONE" is the accepted sentinel when no direct synergy exists for a metric.
   synergy_link: z.string().min(1),
   efficiency_score: z.number().int().min(-5).max(5),
   claim_id: z.string().min(1),
@@ -220,7 +221,8 @@ export const Step4StructuredSchema = z
         metricIndex,
         "source_ids",
       ]);
-      if (!synergyIds.has(metric.synergy_link)) {
+      // "NONE" is the accepted sentinel when a capital metric has no direct synergy.
+      if (metric.synergy_link !== "NONE" && !synergyIds.has(metric.synergy_link)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["capital_allocation", "capital_metrics", metricIndex, "synergy_link"],
@@ -707,11 +709,14 @@ function normalizeCapitalAllocation(
         ) {
           const metricId =
             typeof metricRecord.metric_id === "string" ? metricRecord.metric_id : undefined;
+          const isNone = normalizedLink === "NONE";
           normalizedWarnings.push({
             code: "CAPITAL_SYNERGY_LINK_NORMALIZED",
             severity: "warn",
-            message: `Capital metric ${metricId ?? "unknown"} linked multiple or non-canonical synergies; defaulted to ${normalizedLink} for human review.`,
-            synergy_ids: [normalizedLink],
+            message: isNone
+              ? `Capital metric ${metricId ?? "unknown"} had no matching synergy_id; synergy_link set to "NONE" for human review.`
+              : `Capital metric ${metricId ?? "unknown"} linked multiple or non-canonical synergies; defaulted to ${normalizedLink} for human review.`,
+            synergy_ids: isNone ? [] : [normalizedLink],
             capital_metric_ids: metricId ? [metricId] : [],
           });
         }
@@ -739,6 +744,8 @@ function normalizeCapitalAllocation(
 
 function normalizeSynergyLink(rawLink: unknown, synergyIds: Set<string>): string | unknown {
   if (typeof rawLink !== "string") return rawLink;
+  // "NONE" sentinel — already valid, pass through.
+  if (rawLink === "NONE") return "NONE";
   if (synergyIds.has(rawLink)) return rawLink;
 
   const candidates = rawLink
@@ -751,7 +758,10 @@ function normalizeSynergyLink(rawLink: unknown, synergyIds: Set<string>): string
   const embeddedCandidate = Array.from(synergyIds).find((synergyId) =>
     rawLink.includes(synergyId),
   );
-  return embeddedCandidate ?? rawLink;
+  // No synergy ID found anywhere in the string — use the sentinel so the
+  // superRefine cross-reference check doesn't hard-fail on prose like
+  // "No direct synergy identified due to lack of explicit disclosures."
+  return embeddedCandidate ?? "NONE";
 }
 
 function normalizeValidationWarnings(
