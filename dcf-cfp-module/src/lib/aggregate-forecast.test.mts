@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   aggregateMasterForecast,
+  aggregateSegmentFcfeFy,
+  aggregateSegmentForecastFy,
   buildStep5AssumptionRows,
   buildStep5ReviewWarningRows,
   buildStep5WeakSensitivityRows,
@@ -219,6 +221,53 @@ test("drops an included baseline fiscal year when absolute Step 5 artifacts cont
   assert.equal(total?.fy1, 410);
   assert.equal(total?.fy2, 433);
   assert.equal(total?.fy5, 510);
+});
+
+test("aligns each segment's own five forward years to FY1-FY5 when absolute labels are shifted", () => {
+  // Reproduces the SoFi defect: one bank segment labeled 2025–2029, another
+  // 2026–2030. A single global year window dropped the first segment's terminal
+  // year, collapsing FY5 FCFE (and the terminal value) to a fraction of trend.
+  const bankSegment = (segment: string, years: number[], fcfe: number[]): Step5StructuredResult => ({
+    ...step5Artifact(segment, fcfe),
+    machine_artifact: {
+      ...step5Artifact(segment, fcfe).machine_artifact,
+      forecast_table: years.map((year, index) => ({
+        segment,
+        category: segment,
+        product: null,
+        fiscal_year: String(year),
+        quarter: null,
+        revenue_low_usd_m: fcfe[index] * 0.95,
+        revenue_base_usd_m: fcfe[index] * 4,
+        revenue_high_usd_m: fcfe[index] * 1.05,
+        yoy_growth_pct: 5,
+        assumption_ids: [`${segment}-A1`],
+        driver_quality: "DISCLOSED" as const,
+        flags: [],
+        fcfe_usd_m: fcfe[index],
+      })),
+    },
+  });
+
+  const forecast: ForecastState = {
+    approved: true,
+    segments: [],
+    structuredResults: [
+      bankSegment("Lending", [2025, 2026, 2027, 2028, 2029], [197, 217, 247, 280, 317]),
+      bankSegment("Financial Services", [2026, 2027, 2028, 2029, 2030], [-1, -20, -8, 2, 17]),
+    ],
+  };
+
+  const { fcfeFy, hasCompleteFcfe } = aggregateSegmentFcfeFy(["Lending", "Financial Services"], forecast);
+
+  assert.equal(hasCompleteFcfe, true);
+  // FY1 = Lending(197) + Financial Services(-1); FY5 = Lending(317) + Financial Services(17).
+  assert.equal(fcfeFy[0], 196);
+  assert.equal(fcfeFy[4], 334); // before the fix this collapsed to 17 (FinSvc only)
+
+  // Revenue split must align the same way — Lending's terminal year is retained.
+  const bankRevenue = aggregateSegmentForecastFy(["Lending", "Financial Services"], forecast);
+  assert.equal(bankRevenue[4], 317 * 4 + 17 * 4);
 });
 
 test("builds Step 6 artifact audit rows for assumptions, weak sensitivity, and warnings", () => {

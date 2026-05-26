@@ -211,14 +211,17 @@ export function buildStep5ReviewWarningRows(forecastState: ForecastState): Step5
 
 function aggregateStructuredForecast(results: Step5StructuredResult[]): AggregatedRow[] {
   const map = new Map<string, Map<string, [number, number, number, number, number]>>();
-  const absoluteYearIndex = buildAbsoluteYearIndex(results);
 
-  for (const result of results) {
-    for (const row of result.machine_artifact.forecast_table) {
-      const yearIdx = yearIndexFromForecastRow(row, absoluteYearIndex);
+  // Group every forecast row by segment first, then build each segment's FY1–FY5
+  // year window independently. Doing this per segment (rather than from one global
+  // window) keeps a segment's five forward years aligned to FY1–FY5 even when the
+  // model labels segments with shifted absolute years (e.g. 2025–2029 vs 2026–2030).
+  for (const [segment, rows] of groupForecastRowsBySegment(results)) {
+    const yearIndex = buildAbsoluteYearIndexForRows(rows);
+    for (const row of rows) {
+      const yearIdx = yearIndexFromForecastRow(row, yearIndex);
       if (yearIdx < 0 || yearIdx > 4) continue;
 
-      const segment = row.segment;
       const category = row.category || row.product || "Segment Forecast";
       if (!map.has(segment)) map.set(segment, new Map());
       const catMap = map.get(segment)!;
@@ -229,6 +232,20 @@ function aggregateStructuredForecast(results: Step5StructuredResult[]): Aggregat
   }
 
   return rowsFromSegmentMap(map);
+}
+
+/** Groups every structured-result forecast row by its segment name. */
+function groupForecastRowsBySegment(
+  results: Step5StructuredResult[],
+): Map<string, Step5ForecastRow[]> {
+  const bySegment = new Map<string, Step5ForecastRow[]>();
+  for (const result of results) {
+    for (const row of result.machine_artifact.forecast_table) {
+      if (!bySegment.has(row.segment)) bySegment.set(row.segment, []);
+      bySegment.get(row.segment)!.push(row);
+    }
+  }
+  return bySegment;
 }
 
 function rowsFromSegmentMap(
@@ -302,11 +319,16 @@ function yearIndexFromForecastRow(row: Step5ForecastRow, absoluteYearIndex = new
   return -1;
 }
 
-function buildAbsoluteYearIndex(results: Step5StructuredResult[]): Map<number, number> {
+/**
+ * Maps the most recent five distinct absolute fiscal years found in a single
+ * segment's rows to FY1–FY5 (indices 0–4). An extra base-year anchor row (a sixth
+ * earlier year) is dropped; a segment whose five forward years carry shifted
+ * labels is still mapped onto FY1–FY5 in full, so no terminal year is lost.
+ */
+function buildAbsoluteYearIndexForRows(rows: Step5ForecastRow[]): Map<number, number> {
   const years = Array.from(
     new Set(
-      results
-        .flatMap((result) => result.machine_artifact.forecast_table)
+      rows
         .map((row) => parseAbsoluteFiscalYear(row.fiscal_year))
         .filter((year): year is number => year !== null),
     ),
@@ -345,11 +367,14 @@ export function aggregateSegmentForecastFy(
 
   const structuredResults = getStep5StructuredResults(forecastState);
   if (structuredResults.length > 0) {
-    const absoluteYearIndex = buildAbsoluteYearIndex(structuredResults);
-    for (const result of structuredResults) {
-      for (const row of result.machine_artifact.forecast_table) {
+    // Align each segment to its own FY1–FY5 window before summing, so a segment
+    // labeled with shifted years still contributes all five forward years.
+    for (const [, rows] of groupForecastRowsBySegment(structuredResults)) {
+      if (!rows.some((row) => matches(row.segment))) continue;
+      const yearIndex = buildAbsoluteYearIndexForRows(rows);
+      for (const row of rows) {
         if (!matches(row.segment)) continue;
-        const idx = yearIndexFromForecastRow(row, absoluteYearIndex);
+        const idx = yearIndexFromForecastRow(row, yearIndex);
         if (idx >= 0 && idx < 5) totals[idx] += row.revenue_base_usd_m;
       }
     }
@@ -394,13 +419,18 @@ export function aggregateSegmentFcfeFy(
   const structuredResults = getStep5StructuredResults(forecastState);
   if (structuredResults.length === 0) return { fcfeFy: totals, hasCompleteFcfe: false };
 
-  const absoluteYearIndex = buildAbsoluteYearIndex(structuredResults);
+  // Align each bank segment to its own FY1–FY5 window before summing FCFE. A
+  // global window dropped the terminal year of any segment whose labels were
+  // shifted (e.g. Lending 2025–2029 against Financial Services 2026–2030),
+  // collapsing FY5 FCFE and with it the terminal value.
   let anyMatched = false;
   let anyNull = false;
-  for (const result of structuredResults) {
-    for (const row of result.machine_artifact.forecast_table) {
+  for (const [, rows] of groupForecastRowsBySegment(structuredResults)) {
+    if (!rows.some((row) => matches(row.segment))) continue;
+    const yearIndex = buildAbsoluteYearIndexForRows(rows);
+    for (const row of rows) {
       if (!matches(row.segment)) continue;
-      const idx = yearIndexFromForecastRow(row, absoluteYearIndex);
+      const idx = yearIndexFromForecastRow(row, yearIndex);
       if (idx < 0 || idx >= 5) continue;
       anyMatched = true;
       if (typeof row.fcfe_usd_m === "number") {

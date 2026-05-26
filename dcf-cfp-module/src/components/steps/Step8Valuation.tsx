@@ -23,6 +23,7 @@ import {
   buildStep5ReviewWarningRows,
   getStep5StructuredResults,
 } from "@/lib/aggregate-forecast";
+import { validateForecastBaseline } from "@/lib/forecast-baseline-validation";
 import {
   saveCompanyAnalysis,
   downloadSave,
@@ -116,6 +117,11 @@ export default function Step8Valuation() {
   const step5Artifacts  = useMemo(() => getStep5StructuredResults(state.forecast),  [state.forecast]);
   const assumptionRows  = useMemo(() => buildStep5AssumptionRows(state.forecast),    [state.forecast]);
   const reviewWarnings  = useMemo(() => buildStep5ReviewWarningRows(state.forecast), [state.forecast]);
+  // Cross-check Step 5 forecast baselines against Step 2 history (partial-year anchor defect).
+  const baselineWarnings = useMemo(
+    () => validateForecastBaseline(state.forecast, state.history.rows),
+    [state.forecast, state.history.rows],
+  );
 
   // ── Step 2 historical baseline (last 2 confirmed fiscal years, total revenue) ─
   const historicalBaseline = useMemo(() => {
@@ -435,6 +441,19 @@ export default function Step8Valuation() {
           ) : (
             <div className="mt-5 space-y-5">
 
+              {/* Data-quality gate: forecast baseline anchored to a partial period */}
+              {baselineWarnings.length > 0 && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-700/50 bg-red-950/30 p-3 text-sm text-red-200">
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                  <div className="space-y-1">
+                    <p className="font-semibold">Forecast baseline check failed — valuation likely understated</p>
+                    {baselineWarnings.map((w) => (
+                      <p key={w.segment} className="text-red-300/90">{w.message}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Key metric cards */}
               <div className="grid gap-3 sm:grid-cols-4">
                 <MetricCard label="Intrinsic / Share" value={fmtPrice(valuation.intrinsicValuePerShare)} highlight />
@@ -737,8 +756,11 @@ export default function Step8Valuation() {
           </InfoPanel>
 
           <InfoPanel title="Audit Flags" icon={<AlertTriangle size={15} />}>
-            {reviewWarnings.length > 0 || valuation.warnings.length > 0 ? (
+            {baselineWarnings.length > 0 || reviewWarnings.length > 0 || valuation.warnings.length > 0 ? (
               <ul className="space-y-1.5">
+                {baselineWarnings.map((w) => (
+                  <li key={w.segment}><span className="font-mono text-red-400">DATA_BASELINE</span> {w.message}</li>
+                ))}
                 {valuation.warnings.map((w, i) => (
                   <li key={i}><span className="font-mono text-amber-300">VALUATION</span> {w}</li>
                 ))}
