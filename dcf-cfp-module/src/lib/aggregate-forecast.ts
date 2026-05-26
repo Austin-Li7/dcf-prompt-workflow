@@ -316,9 +316,15 @@ function buildAbsoluteYearIndex(results: Step5StructuredResult[]): Map<number, n
 }
 
 function parseAbsoluteFiscalYear(fiscalYear: string): number | null {
-  const match = fiscalYear.match(/\b(?:FY\s*)?(20\d{2}|2100)\b/i);
-  if (!match) return null;
-  return Number(match[1]);
+  // Four-digit absolute year, e.g. "2026", "FY 2026".
+  const full = fiscalYear.match(/\b(?:FY\s*)?(20\d{2}|2100)\b/i);
+  if (full) return Number(full[1]);
+  // Two-digit fiscal-year shorthand, e.g. "FY25" -> 2025, "FY30" -> 2030.
+  // Single-digit ("FY1") and offset ("FY+1") labels are intentionally NOT matched
+  // here so yearIndexFromForecastRow can treat them as relative offsets.
+  const short = fiscalYear.match(/\bFY\s*(\d{2})\b/i);
+  if (short) return 2000 + Number(short[1]);
+  return null;
 }
 
 /**
@@ -361,6 +367,56 @@ export function aggregateSegmentForecastFy(
     }
   }
   return totals.map((v) => round(v)) as [number, number, number, number, number];
+}
+
+/**
+ * Returns the aggregated [FY1..FY5] modeled FCFE ($M) for a named subset of bank
+ * segments, summing the per-row `fcfe_usd_m` produced in Step 5. The SOTP
+ * valuation discounts this stream directly at Ke (rather than a revenue × margin
+ * proxy), so it reflects each segment's true equity economics.
+ *
+ * `hasCompleteFcfe` is true only when every matched row that lands in the FY1–FY5
+ * window carries a numeric FCFE; otherwise the caller should fall back to the
+ * revenue × bankFcfMargin proxy rather than mixing modeled and proxied years.
+ */
+export function aggregateSegmentFcfeFy(
+  targetSegments: string[],
+  forecastState: ForecastState,
+): { fcfeFy: [number, number, number, number, number]; hasCompleteFcfe: boolean } {
+  const totals: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+  const present: [boolean, boolean, boolean, boolean, boolean] = [false, false, false, false, false];
+  if (targetSegments.length === 0) return { fcfeFy: totals, hasCompleteFcfe: false };
+
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const targets = targetSegments.map(normalize);
+  const matches = (name: string) => targets.some((t) => normalize(name).includes(t) || t.includes(normalize(name)));
+
+  const structuredResults = getStep5StructuredResults(forecastState);
+  if (structuredResults.length === 0) return { fcfeFy: totals, hasCompleteFcfe: false };
+
+  const absoluteYearIndex = buildAbsoluteYearIndex(structuredResults);
+  let anyMatched = false;
+  let anyNull = false;
+  for (const result of structuredResults) {
+    for (const row of result.machine_artifact.forecast_table) {
+      if (!matches(row.segment)) continue;
+      const idx = yearIndexFromForecastRow(row, absoluteYearIndex);
+      if (idx < 0 || idx >= 5) continue;
+      anyMatched = true;
+      if (typeof row.fcfe_usd_m === "number") {
+        totals[idx] += row.fcfe_usd_m;
+        present[idx] = true;
+      } else {
+        anyNull = true;
+      }
+    }
+  }
+
+  const hasCompleteFcfe = anyMatched && !anyNull && present.every((p) => p);
+  return {
+    fcfeFy: totals.map((v) => round(v)) as [number, number, number, number, number],
+    hasCompleteFcfe,
+  };
 }
 
 function artifactSegmentLabel(result: Step5StructuredResult): string {

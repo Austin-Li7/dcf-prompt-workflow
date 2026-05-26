@@ -1,4 +1,4 @@
-import { aggregateMasterForecast, aggregateSegmentForecastFy } from "./aggregate-forecast.ts";
+import { aggregateMasterForecast, aggregateSegmentForecastFy, aggregateSegmentFcfeFy } from "./aggregate-forecast.ts";
 import type { AggregatedRow, ForecastState } from "../types/cfp.ts";
 import type { WACCState } from "../types/wacc.ts";
 
@@ -72,14 +72,14 @@ export interface SotpValuationResult extends DcfValuationResult {
   bankForecastRows: DcfForecastValueRow[];
   bankTerminalValueUsdM: number;
   bankTerminalPvUsdM: number;
-  bankEquityValueUsdM: number;        // equity value directly (no net debt subtraction)
+  bankEquityValueUsdM: number;        // bank stream value less its value-weighted share of net debt
   // Industrial stream
   industrialWacc: number;
   industrialForecastRows: DcfForecastValueRow[];
   industrialTerminalValueUsdM: number;
   industrialTerminalPvUsdM: number;
   industrialEnterpriseValueUsdM: number;
-  industrialEquityValueUsdM: number;  // EV − consolidated net debt
+  industrialEquityValueUsdM: number;  // EV − its value-weighted share of consolidated net debt
 }
 
 // =============================================================================
@@ -126,15 +126,22 @@ export function buildDcfValuation({
       .map((s) => s.name);
     const bankRevenueFy = aggregateSegmentForecastFy(bankSegmentNames, forecast);
     const industrialRevenueFy = aggregateSegmentForecastFy(industrialSegmentNames, forecast);
+    // Modeled bank FCFE (preferred); falls back to revenue × margin inside the SOTP builder when incomplete.
+    const { fcfeFy: bankFcfeFy, hasCompleteFcfe } = aggregateSegmentFcfeFy(bankSegmentNames, forecast);
     const bankKe = wacc.bankKeCalculation?.wacc ?? wacc.hybridBankBeta * wacc.constants.impliedERP + wacc.constants.riskFreeRate;
     const industrialWacc = wacc.industrialWaccCalculation?.wacc ?? 0.10;
     const tg = industrialTerminalGrowth ?? terminalGrowth;
     const bankTg = financialTerminalGrowth ?? terminalGrowth;
 
+    // Single valuation pass with per-stream terminal growth, so both terminal-growth
+    // sliders flow into the headline equity and the two stream cards sum to it.
     const sotp = buildSotpValuation({
       bankRevenueFy, industrialRevenueFy, bankKe, industrialWacc,
       bankFcfMargin, industrialFcfMargin: fcfMargin,
       terminalGrowth: tg,
+      bankTerminalGrowth: bankTg,
+      industrialTerminalGrowth: tg,
+      bankFcfeFy: hasCompleteFcfe ? bankFcfeFy : null,
       fetchedData: wacc.fetchedData,
     });
 
@@ -144,22 +151,13 @@ export function buildDcfValuation({
     const adjustedUpside = marketCapUsdM && marketCapUsdM > 0
       ? round((adjustedEquity / marketCapUsdM - 1) * 100) : null;
 
-    // Re-run bank rows with correct terminalGrowth for the bank stream
-    const bankSotp = buildSotpValuation({
-      bankRevenueFy, industrialRevenueFy: [0,0,0,0,0],
-      bankKe, industrialWacc,
-      bankFcfMargin, industrialFcfMargin: fcfMargin,
-      terminalGrowth: bankTg,
-      fetchedData: wacc.fetchedData,
-    });
-
     const financialStream: HybridStream = {
       label: "Bank / Financial Segments",
       discountLabel: `Ke = ${(bankKe * 100).toFixed(1)}%`,
-      forecastRows: bankSotp.bankForecastRows,
-      terminalValueUsdM: bankSotp.bankTerminalValueUsdM,
-      terminalPresentValueUsdM: bankSotp.bankTerminalPvUsdM,
-      equityValueUsdM: bankSotp.bankEquityValueUsdM,
+      forecastRows: sotp.bankForecastRows,
+      terminalValueUsdM: sotp.bankTerminalValueUsdM,
+      terminalPresentValueUsdM: sotp.bankTerminalPvUsdM,
+      equityValueUsdM: sotp.bankEquityValueUsdM,
     };
     const industrialStream: HybridStream = {
       label: "Industrial / SaaS Segments",
@@ -269,16 +267,15 @@ export function buildDcfValuation({
 // =============================================================================
 // Hybrid / Sum-of-Parts DCF
 //
-// Bank segments  → FCFE discounted at Ke (equity cash flow; no debt bridge)
-// Industrial     → FCFF discounted at WACC → EV; subtract consolidated net debt
+// Bank segments  → modeled FCFE discounted at Ke (equity cash flow)
+//                  (falls back to revenue × bankFcfMargin when FCFE is unmodeled)
+// Industrial     → FCFF discounted at WACC → EV
 //
-// Rationale for debt allocation:
-//   Bank segment "debt" is deposits and short-term funding — it is already
-//   excluded from FCFE by construction (FCFE = net income − reinvestment needs,
-//   not EV − debt).  The consolidated balance-sheet net debt from Yahoo Finance
-//   represents external corporate debt, attributable to the industrial/holding
-//   company structure.  We therefore subtract it entirely from industrial EV,
-//   not from the bank equity value.
+// Equity bridge:
+//   Consolidated balance-sheet net debt/cash is allocated across the two streams
+//   by their pre-debt value weight, then subtracted from each. This is an
+//   attribution choice for the per-segment cards only — the TOTAL equity is
+//   identical to subtracting net debt once from the combined value.
 // =============================================================================
 
 export interface BuildSotpParams {
@@ -286,9 +283,16 @@ export interface BuildSotpParams {
   industrialRevenueFy: [number, number, number, number, number]; // $M FY1-FY5
   bankKe: number;
   industrialWacc: number;
-  bankFcfMargin: number;      // FCFE margin on NII/revenue (default ~0.20)
+  bankFcfMargin: number;      // FCFE margin on NII/revenue — fallback proxy only (default ~0.20)
   industrialFcfMargin: number; // FCFF margin on revenue (default ~0.25)
-  terminalGrowth: number;
+  terminalGrowth: number;      // fallback when a per-stream rate is not supplied
+  bankTerminalGrowth?: number;       // Ke-stream terminal growth; defaults to terminalGrowth
+  industrialTerminalGrowth?: number; // WACC-stream terminal growth; defaults to terminalGrowth
+  /**
+   * Modeled bank FCFE per FY1–FY5 ($M). When supplied, the bank stream discounts
+   * these values directly; when omitted, it falls back to revenue × bankFcfMargin.
+   */
+  bankFcfeFy?: [number, number, number, number, number] | null;
   fetchedData: WACCState["fetchedData"];
 }
 
@@ -299,6 +303,8 @@ export function buildSotpValuation(params: BuildSotpParams): SotpValuationResult
     bankFcfMargin, industrialFcfMargin,
     terminalGrowth, fetchedData,
   } = params;
+  const bankTg = params.bankTerminalGrowth ?? terminalGrowth;
+  const indTg = params.industrialTerminalGrowth ?? terminalGrowth;
 
   const warnings: string[] = [];
   const marketCapUsdM = fetchedData?.marketCap ? fetchedData.marketCap / 1_000_000 : null;
@@ -314,10 +320,10 @@ export function buildSotpValuation(params: BuildSotpParams): SotpValuationResult
     return emptySotpResult({ bankKe, industrialWacc, bankFcfMargin, industrialFcfMargin, terminalGrowth, marketCapUsdM,
       warnings: ["Step 5 approved forecast is required. Run Step 5 before completing WACC."] });
   }
-  if (bankKe <= terminalGrowth) {
+  if (bankKe <= bankTg) {
     warnings.push("Bank Ke must be greater than terminal growth rate.");
   }
-  if (industrialWacc <= terminalGrowth) {
+  if (industrialWacc <= indTg) {
     warnings.push("Industrial WACC must be greater than terminal growth rate.");
   }
   if (!fetchedData?.totalCash) {
@@ -325,39 +331,56 @@ export function buildSotpValuation(params: BuildSotpParams): SotpValuationResult
   }
 
   // ── Bank FCFE stream ──────────────────────────────────────────────────────
+  // Prefer the modeled per-segment FCFE (net income − regulatory capital). Fall
+  // back to a revenue × margin proxy only when the forecast lacks complete FCFE.
+  const bankFcfeFy = params.bankFcfeFy ?? null;
+  const usingModeledFcfe = bankFcfeFy !== null;
+  if (!usingModeledFcfe && hasBankRevenue) {
+    warnings.push("Bank FCFE not modeled in Step 5; bank stream uses a revenue × margin proxy.");
+  }
+  const bankKeSafe = Math.max(bankKe, bankTg + 0.001); // guard
   const bankRows = bankRevenueFy.map((rev, i): DcfForecastValueRow => {
-    const fcfe = rev * bankFcfMargin;
-    const ke = Math.max(bankKe, terminalGrowth + 0.001); // guard
-    const df = 1 / Math.pow(1 + ke, i + 1);
+    const fcfe = usingModeledFcfe ? bankFcfeFy![i] : rev * bankFcfMargin;
+    const df = 1 / Math.pow(1 + bankKeSafe, i + 1);
     return { year: i + 1, revenueUsdM: round(rev), fcffUsdM: round(fcfe), discountFactor: df, presentValueUsdM: round(fcfe * df) };
   });
-  const bankKeSafe = Math.max(bankKe, terminalGrowth + 0.001);
-  const bankTerminalFcfe = (bankRows[4]?.fcffUsdM ?? 0) * (1 + terminalGrowth);
-  const bankTerminalValueUsdM = hasBankRevenue ? bankTerminalFcfe / (bankKeSafe - terminalGrowth) : 0;
+  const bankTerminalFcfeBase = bankRows[4]?.fcffUsdM ?? 0;
+  if (hasBankRevenue && bankTerminalFcfeBase <= 0) {
+    warnings.push("Bank terminal-year FCFE is non-positive; bank terminal value set to zero.");
+  }
+  const bankTerminalFcfe = bankTerminalFcfeBase * (1 + bankTg);
+  const bankTerminalValueUsdM = hasBankRevenue && bankTerminalFcfe > 0 ? bankTerminalFcfe / (bankKeSafe - bankTg) : 0;
   const bankTerminalPvUsdM = bankTerminalValueUsdM / Math.pow(1 + bankKeSafe, 5);
-  const bankEquityValueUsdM = round(
+  // Gross equity value of the bank stream, before any allocation of consolidated net debt.
+  const bankStreamValueUsdM = round(
     bankRows.reduce((s, r) => s + r.presentValueUsdM, 0) + bankTerminalPvUsdM,
   );
 
   // ── Industrial FCFF stream ────────────────────────────────────────────────
+  const indWaccSafe = Math.max(industrialWacc, indTg + 0.001);
   const indRows = industrialRevenueFy.map((rev, i): DcfForecastValueRow => {
     const fcff = rev * industrialFcfMargin;
-    const wacc = Math.max(industrialWacc, terminalGrowth + 0.001);
-    const df = 1 / Math.pow(1 + wacc, i + 1);
+    const df = 1 / Math.pow(1 + indWaccSafe, i + 1);
     return { year: i + 1, revenueUsdM: round(rev), fcffUsdM: round(fcff), discountFactor: df, presentValueUsdM: round(fcff * df) };
   });
-  const indWaccSafe = Math.max(industrialWacc, terminalGrowth + 0.001);
-  const indTerminalFcff = (indRows[4]?.fcffUsdM ?? 0) * (1 + terminalGrowth);
-  const industrialTerminalValueUsdM = hasIndustrialRevenue ? indTerminalFcff / (indWaccSafe - terminalGrowth) : 0;
+  const indTerminalFcff = (indRows[4]?.fcffUsdM ?? 0) * (1 + indTg);
+  const industrialTerminalValueUsdM = hasIndustrialRevenue ? indTerminalFcff / (indWaccSafe - indTg) : 0;
   const industrialTerminalPvUsdM = industrialTerminalValueUsdM / Math.pow(1 + indWaccSafe, 5);
   const industrialEnterpriseValueUsdM = round(
     indRows.reduce((s, r) => s + r.presentValueUsdM, 0) + industrialTerminalPvUsdM,
   );
-  const industrialEquityValueUsdM = round(industrialEnterpriseValueUsdM - netDebtUsdM);
 
-  // ── Sum-of-Parts ──────────────────────────────────────────────────────────
+  // ── Sum-of-Parts equity bridge ────────────────────────────────────────────
+  // Allocate consolidated net debt/cash across the two streams by their pre-debt
+  // value weight, so each segment's reported equity is sensible. This is purely an
+  // attribution choice: the TOTAL equity is identical to subtracting net debt once.
+  const grossTotalUsdM = bankStreamValueUsdM + industrialEnterpriseValueUsdM;
+  const bankWeight = grossTotalUsdM > 0 ? bankStreamValueUsdM / grossTotalUsdM : 0;
+  const bankEquityValueUsdM = round(bankStreamValueUsdM - netDebtUsdM * bankWeight);
+  const industrialEquityValueUsdM = round(industrialEnterpriseValueUsdM - netDebtUsdM * (1 - bankWeight));
+
   const equityValueUsdM = round(bankEquityValueUsdM + industrialEquityValueUsdM);
-  const enterpriseValueUsdM = round(bankEquityValueUsdM + industrialEnterpriseValueUsdM);
+  const enterpriseValueUsdM = round(bankStreamValueUsdM + industrialEnterpriseValueUsdM);
   const impliedUpsidePct = marketCapUsdM && marketCapUsdM > 0
     ? round((equityValueUsdM / marketCapUsdM - 1) * 100) : null;
   const intrinsicValuePerShare = sharesOutstandingM && sharesOutstandingM > 0

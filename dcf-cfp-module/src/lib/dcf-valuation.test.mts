@@ -198,3 +198,164 @@ test("classifies valuation decision from implied upside thresholds", () => {
   assert.equal(result.decision.action, "BUY");
   assert.match(result.decision.summary, /undervalued/i);
 });
+
+// ── Hybrid / SOTP path ───────────────────────────────────────────────────────
+// Builds a segment whose rows use the short "FY26".."FY30" fiscal-year labels —
+// the format that was previously dropped by parseAbsoluteFiscalYear.
+function hybridArtifact(segment: string, baseRevenue: number): Step5StructuredResult {
+  const a = artifact();
+  return {
+    ...a,
+    machine_artifact: {
+      ...a.machine_artifact,
+      forecast_table: [0, 1, 2, 3, 4].map((i) => {
+        const value = baseRevenue * (1 + i * 0.05);
+        return {
+          segment,
+          category: "Segment Forecast",
+          product: null,
+          fiscal_year: `FY${26 + i}`, // "FY26" … "FY30"
+          quarter: null,
+          revenue_low_usd_m: value * 0.95,
+          revenue_base_usd_m: value,
+          revenue_high_usd_m: value * 1.05,
+          yoy_growth_pct: 5,
+          assumption_ids: ["A1"],
+          driver_quality: "DISCLOSED",
+          flags: [],
+        };
+      }),
+    },
+  };
+}
+
+const hybridForecast: ForecastState = {
+  approved: true,
+  segments: [],
+  structuredResults: [hybridArtifact("Bank Unit", 1000), hybridArtifact("Tech Unit", 200)],
+};
+
+const hybridWacc: WACCState = {
+  ...wacc,
+  businessType: "hybrid",
+  // Sensible leverage: net debt ($1,000M) is well below the firm's enterprise value,
+  // so each stream stays solvent after its value-weighted share is subtracted.
+  fetchedData: { ...wacc.fetchedData!, totalDebt: 1_500_000_000, totalCash: 500_000_000 },
+  hybridSegments: [
+    { id: "b", name: "Bank Unit", unleveredBeta: 0.5, estimatedValue: 1000, workflowMode: "bank" },
+    { id: "t", name: "Tech Unit", unleveredBeta: 1.0, estimatedValue: 200, workflowMode: "industrial" },
+  ],
+  bankKeCalculation: { ...wacc.calculation!, wacc: 0.08 },
+  industrialWaccCalculation: { ...wacc.calculation!, wacc: 0.10 },
+};
+
+test("hybrid: bank segment labeled FY26..FY30 is included, not silently dropped", () => {
+  const result = buildDcfValuation({
+    forecast: hybridForecast,
+    wacc: hybridWacc,
+    fcfMargin: 0.25,
+    terminalGrowth: 0.025,
+    bankFcfMargin: 0.20,
+    financialTerminalGrowth: 0.025,
+    industrialTerminalGrowth: 0.025,
+  });
+
+  assert.equal(result.valuationMode, "HYBRID");
+  assert.ok(result.hybridFinancialStream);
+  // FY1 of the bank stream must equal the labeled FY26 revenue (1000). Before the
+  // fix these rows parsed to null, fell through to a relative regex, and were
+  // discarded — leaving a zero bank stream.
+  assert.equal(result.hybridFinancialStream!.forecastRows[0].revenueUsdM, 1000);
+  assert.equal(result.hybridFinancialStream!.equityValueUsdM > 0, true);
+  // This artifact has no modeled FCFE, so the bank stream falls back to revenue × margin
+  // (1000 × 0.20 = 200) and surfaces a proxy warning.
+  assert.equal(result.hybridFinancialStream!.forecastRows[0].fcffUsdM, 200);
+  assert.equal(result.warnings.some((w) => /proxy/.test(w)), true);
+});
+
+test("hybrid: bank terminal-growth flows into headline equity and streams reconcile", () => {
+  const base = buildDcfValuation({
+    forecast: hybridForecast, wacc: hybridWacc,
+    fcfMargin: 0.25, terminalGrowth: 0.025, bankFcfMargin: 0.20,
+    financialTerminalGrowth: 0.025, industrialTerminalGrowth: 0.025,
+  });
+  const higherBankTg = buildDcfValuation({
+    forecast: hybridForecast, wacc: hybridWacc,
+    fcfMargin: 0.25, terminalGrowth: 0.025, bankFcfMargin: 0.20,
+    financialTerminalGrowth: 0.034, industrialTerminalGrowth: 0.025,
+  });
+
+  // Raising ONLY the bank terminal growth must increase the headline equity.
+  // (Before the fix the bank stream used the industrial terminal growth, so this
+  // slider changed only the display card, not intrinsic value.)
+  assert.equal(higherBankTg.equityValueUsdM > base.equityValueUsdM, true);
+
+  // The two displayed streams must sum to the headline equity (within rounding).
+  const sum =
+    base.hybridFinancialStream!.equityValueUsdM + base.hybridIndustrialStream!.equityValueUsdM;
+  assert.equal(Math.abs(sum - base.equityValueUsdM) <= 0.2, true);
+});
+
+// Bank artifact that DOES carry modeled FCFE (here 10% of revenue), distinct from the
+// 20% fallback margin so tests can tell which path the valuation used.
+function hybridArtifactWithFcfe(segment: string, baseRevenue: number): Step5StructuredResult {
+  const a = hybridArtifact(segment, baseRevenue);
+  return {
+    ...a,
+    machine_artifact: {
+      ...a.machine_artifact,
+      forecast_table: a.machine_artifact.forecast_table.map((row) => ({
+        ...row,
+        net_income_usd_m: row.revenue_base_usd_m * 0.12,
+        fcfe_usd_m: row.revenue_base_usd_m * 0.10,
+      })),
+    },
+  };
+}
+
+const hybridForecastWithFcfe: ForecastState = {
+  approved: true,
+  segments: [],
+  structuredResults: [hybridArtifactWithFcfe("Bank Unit", 1000), hybridArtifact("Tech Unit", 200)],
+};
+
+test("hybrid: bank stream discounts modeled FCFE when present, not revenue × margin", () => {
+  const result = buildDcfValuation({
+    forecast: hybridForecastWithFcfe, wacc: hybridWacc,
+    fcfMargin: 0.25, terminalGrowth: 0.025, bankFcfMargin: 0.20, // proxy would yield 200
+    financialTerminalGrowth: 0.025, industrialTerminalGrowth: 0.025,
+  });
+  // FY1 bank cash flow equals modeled FCFE (1000 × 0.10 = 100), NOT revenue × 0.20 (= 200).
+  assert.equal(result.hybridFinancialStream!.forecastRows[0].fcffUsdM, 100);
+  // No proxy fallback warning when FCFE is complete.
+  assert.equal(result.warnings.some((w) => /proxy/.test(w)), false);
+});
+
+test("hybrid: consolidated net debt is shared across both streams, not dumped on industrial", () => {
+  const common = {
+    fcfMargin: 0.25, terminalGrowth: 0.025, bankFcfMargin: 0.20,
+    financialTerminalGrowth: 0.025, industrialTerminalGrowth: 0.025,
+  };
+  const withDebt = buildDcfValuation({ forecast: hybridForecastWithFcfe, wacc: hybridWacc, ...common });
+  const noDebtWacc: WACCState = {
+    ...hybridWacc,
+    fetchedData: { ...hybridWacc.fetchedData!, totalDebt: 0, totalCash: 0 },
+  };
+  const noDebt = buildDcfValuation({ forecast: hybridForecastWithFcfe, wacc: noDebtWacc, ...common });
+
+  // Removing net debt raises headline equity by exactly the net debt amount.
+  assert.equal(
+    Math.abs((noDebt.equityValueUsdM - withDebt.equityValueUsdM) - withDebt.netDebtUsdM) <= 0.5,
+    true,
+  );
+  // BOTH stream equities move when net debt is introduced. Under the old rule (100% to
+  // industrial) the bank stream would have been identical in both runs.
+  assert.notEqual(
+    withDebt.hybridFinancialStream!.equityValueUsdM,
+    noDebt.hybridFinancialStream!.equityValueUsdM,
+  );
+  assert.notEqual(
+    withDebt.hybridIndustrialStream!.equityValueUsdM,
+    noDebt.hybridIndustrialStream!.equityValueUsdM,
+  );
+});
