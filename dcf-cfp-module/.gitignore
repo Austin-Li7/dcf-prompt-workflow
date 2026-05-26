@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local preview/test artifacts for the DCF research assistant (kept out of git)
+/public/dcf-research-assistant.html
+/public/test-*.json
+/public/sofi-*.pdf
