@@ -1,4 +1,5 @@
 import type { CFPState, ValuationSnapshot } from "@/types/cfp";
+import { downloadJsonFile } from "@/lib/download-json";
 
 // =============================================================================
 // Methodology JSON Export
@@ -30,6 +31,29 @@ export interface MethodologyExport {
   };
   steps: StepExport[];
   valuation_summary: Record<string, unknown>;
+  periodic_update_protocol: PeriodicUpdateProtocol;
+}
+
+export interface PeriodicUpdateProtocol {
+  purpose: string;
+  report_based_updates: Array<{
+    update_type: string;
+    trigger: string;
+    default_action: string;
+    affected_steps: number[];
+    report_disclosure: string[];
+  }>;
+  non_report_updates: Array<{
+    update_type: string;
+    trigger: string;
+    default_action: string;
+    affected_steps: number[];
+    quick_sensitivity_drivers: string[];
+    escalation_to_full_rerun: string[];
+    report_disclosure: string[];
+  }>;
+  final_report_rules: string[];
+  current_model_context: Record<string, unknown>;
 }
 
 // -----------------------------------------------------------------------------
@@ -431,6 +455,127 @@ function extractStep8Data(snapshot: ValuationSnapshot): Record<string, unknown> 
   };
 }
 
+function buildPeriodicUpdateProtocol(
+  state: CFPState,
+  snapshot: ValuationSnapshot,
+): PeriodicUpdateProtocol {
+  const hasStructuredForecast = (state.forecast.structuredResults?.length ?? 0) > 0;
+  const hasStep7MarketData = Boolean(state.wacc.fetchedData);
+
+  return {
+    purpose:
+      "Defines how the saved DCF should be refreshed in future cycles without automatically rerunning the full workflow for every new item.",
+    report_based_updates: [
+      {
+        update_type: "New quarterly report / 10-Q data update",
+        trigger:
+          "A new 10-Q, quarterly filing, or actual earnings data released after the saved model timestamp.",
+        default_action:
+          "Refresh the historical run-rate and forecast bridge. Do not treat future earnings calendar dates as updates until actual data is released.",
+        affected_steps: [2, 5, 6, 7, 8],
+        report_disclosure: [
+          "State the filing/report date and which fiscal quarter changed.",
+          "List updated financial lines such as revenue, margin, cash flow, debt, cash, shares, guidance, or segment KPIs.",
+          "Explain whether Step 1 business architecture was reused or rerun because segment/business structure changed.",
+        ],
+      },
+      {
+        update_type: "New annual report / 10-K data update",
+        trigger:
+          "A new annual report or 10-K released after the saved model timestamp.",
+        default_action:
+          "Perform a full refresh because annual filings can alter business structure, historical baselines, capital structure, risk factors, and forecast assumptions.",
+        affected_steps: [1, 2, 3, 4, 5, 6, 7, 8],
+        report_disclosure: [
+          "Identify newly disclosed or renamed reportable segments.",
+          "Show what historical data was replaced or extended.",
+          "Summarize changes to drivers, WACC/Ke inputs, and the final valuation bridge.",
+        ],
+      },
+      {
+        update_type: "Report content update without new period financials",
+        trigger:
+          "A filing amendment, restatement note, new risk-factor disclosure, segment language update, or management discussion update without a new full financial period.",
+        default_action:
+          "Rerun only the content-dependent steps unless the amendment changes reported financial data.",
+        affected_steps: [1, 3, 4, 5, 6, 8],
+        report_disclosure: [
+          "Separate content-only updates from numeric financial updates.",
+          "Name the exact report section that changed.",
+          "Explain which DCF assumptions changed and which cached values were reused.",
+        ],
+      },
+    ],
+    non_report_updates: [
+      {
+        update_type: "Non-report event with long-term or high-certainty impact",
+        trigger:
+          "Official M&A, divestiture, regulation/litigation, major product line, management/capital allocation change, or confirmed competitive shift.",
+        default_action:
+          "Rerun the affected workflow steps selected by the refresh gate. Use cached unaffected steps.",
+        affected_steps: [3, 4, 5, 6, 7, 8],
+        quick_sensitivity_drivers: [],
+        escalation_to_full_rerun: [
+          "The event changes segment structure or creates a new business line.",
+          "The event includes disclosed financials, debt/cash/share count, or guidance.",
+          "The event changes terminal economics rather than only the next quarter.",
+        ],
+        report_disclosure: [
+          "Document source, truth/verification score, impact horizon, and rerun steps.",
+          "Explain why cached steps were reused.",
+        ],
+      },
+      {
+        update_type: "Non-report event with short-term, uncertain, or non-long-term impact",
+        trigger:
+          "Unconfirmed news, reported-but-not-official items, market sentiment, temporary macro noise, product rumors, or events with low/medium materiality and unknown/estimable quantifiability.",
+        default_action:
+          "Do not rerun the full workflow by default. Run quick sensitivity analysis in Step 8 and disclose it as scenario-only, not as a base-case model change.",
+        affected_steps: [8],
+        quick_sensitivity_drivers: [
+          "Revenue growth scenario",
+          "FCF margin scenario",
+          "Terminal growth scenario",
+          "WACC / Ke scenario",
+          "Market price / market cap comparison",
+          "Equity bridge inputs only if debt, cash, buybacks, or share count are implicated",
+        ],
+        escalation_to_full_rerun: [
+          "Truth/verification score becomes high after official confirmation.",
+          "The event produces disclosed financial data or actual market data beyond threshold.",
+          "The effect horizon changes from next quarter to 1-2 years or long-term.",
+          "Sensitivity output would change the investment signal materially.",
+        ],
+        report_disclosure: [
+          "Label as quick sensitivity / scenario analysis.",
+          "Show base-case cached output separately from sensitivity-adjusted output.",
+          "State that base DCF parameters were not overwritten unless the user explicitly applied Step 8 adjustments.",
+        ],
+      },
+    ],
+    final_report_rules: [
+      "Always state whether the report used a full rerun, partial rerun, cached reuse, or quick sensitivity only.",
+      "For new report data, identify the exact report/date and the steps refreshed.",
+      "For report content changes, distinguish narrative/segment/risk-factor updates from numeric financial updates.",
+      "For non-report updates, disclose truth score, materiality, quantifiability, impact horizon, and whether the item changed the base case or only a sensitivity case.",
+      "Never count future earnings dates as updates unless actual earnings data has been released.",
+      "Do not overwrite long-term DCF drivers for uncertain or short-term events; use sensitivity cases unless confirmed evidence supports a base-case change.",
+    ],
+    current_model_context: {
+      company: state.profile.companyName || null,
+      ticker: state.profile.ticker || null,
+      valuation_mode: snapshot.valuationMode,
+      step5_structured_forecast_available: hasStructuredForecast,
+      step5_approved: state.forecast.approved,
+      step7_market_data_available: hasStep7MarketData,
+      saved_wacc_or_ke: snapshot.wacc,
+      saved_terminal_growth: snapshot.terminalGrowth,
+      saved_fcf_margin: snapshot.fcfMargin,
+      final_decision: snapshot.decisionLabel,
+    },
+  };
+}
+
 // -----------------------------------------------------------------------------
 // Main export builder
 // -----------------------------------------------------------------------------
@@ -473,6 +618,7 @@ export function buildMethodologyExport(
     },
     steps,
     valuation_summary: extractStep8Data(snapshot),
+    periodic_update_protocol: buildPeriodicUpdateProtocol(state, snapshot),
   };
 }
 
@@ -482,9 +628,6 @@ export function downloadMethodologyExport(
 ): void {
   const payload = buildMethodologyExport(state, snapshot);
   const json = JSON.stringify(payload, null, 2);
-  const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
 
   const now = new Date();
   const mm = String(now.getMonth() + 1).padStart(2, "0");
@@ -494,10 +637,5 @@ export function downloadMethodologyExport(
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .toLowerCase();
 
-  a.href = url;
-  a.download = `${safeName}-methodology-${mm}-${dd}-${yyyy}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  downloadJsonFile(`${safeName}-methodology-${mm}-${dd}-${yyyy}.json`, json);
 }

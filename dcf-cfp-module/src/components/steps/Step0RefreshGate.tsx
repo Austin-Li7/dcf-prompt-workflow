@@ -35,6 +35,7 @@ import {
 } from "@/lib/refresh-gate";
 import {
   buildEventImpactAdjustments,
+  clearEventImpactAdjustments,
   saveEventImpactAdjustments,
 } from "@/lib/event-impact-adjustments";
 
@@ -354,6 +355,7 @@ export default function Step0RefreshGate() {
 
   const refreshDriverAdjustments = (save: CompanySave | null, events: RefreshEvent[]) => {
     if (!save || events.length === 0) {
+      clearEventImpactAdjustments();
       return;
     }
     const pkg = buildEventImpactAdjustments(save, events);
@@ -431,6 +433,7 @@ export default function Step0RefreshGate() {
     setDetectedEvents([]);
     setReviewEventId(null);
     setCacheApplied(false);
+    clearEventImpactAdjustments();
 
     try {
       const saves = await getAllSaves();

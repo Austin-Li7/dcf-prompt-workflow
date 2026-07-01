@@ -62,7 +62,8 @@ const AnalysisOfferingSchema = z.object({
   category: z.string().min(1),
   raw_name_variants: compactStringList(2).default([]),
   mapped_from_reported_node_ids: z.array(z.string().min(1)).min(1),
-  products: compactStringList(3).default([]),
+  products: compactStringList(5).default([]),
+  revenue_mechanics: compactText(160).default("Not disclosed"),
   // S6: LLM omits this for obvious B2B/B2C companies — default keeps type as string
   customer_type: z.string().min(1).default("unspecified"),
   claim_id: z.string().min(1),
@@ -377,15 +378,14 @@ export const GEMINI_STEP1_RESPONSE_SCHEMA = sanitizeSchemaForGemini(
 
 export type ParsedStep1StructuredResult = z.infer<typeof Step1StructuredSchema>;
 
-export function projectStructuredStep1ToArchitecture(
-  result: ParsedStep1StructuredResult,
-): BusinessArchitecture {
+export function projectStructuredStep1ToArchitecture(result: Step1StructuredResult): BusinessArchitecture {
   return {
     architecture: result.analysis_view.segments.map((segment) => ({
       segment: segment.canonical_name,
       businessLines: segment.offerings.map((offering) => ({
         name: offering.canonical_name,
         products: offering.products,
+        revenueMechanics: offering.revenue_mechanics ?? "Not disclosed",
         customerType: offering.customer_type,
         dataSource: offering.claim_id,
       })),

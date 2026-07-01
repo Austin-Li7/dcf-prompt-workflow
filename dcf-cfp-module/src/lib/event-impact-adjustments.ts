@@ -190,6 +190,10 @@ export function saveEventImpactAdjustments(pkg: EventImpactAdjustmentPackage): v
   localStorage.setItem(EVENT_IMPACT_ADJUSTMENTS_KEY, JSON.stringify(pkg));
 }
 
+export function clearEventImpactAdjustments(): void {
+  localStorage.removeItem(EVENT_IMPACT_ADJUSTMENTS_KEY);
+}
+
 export function loadEventImpactAdjustments(): EventImpactAdjustmentPackage | null {
   try {
     const raw = localStorage.getItem(EVENT_IMPACT_ADJUSTMENTS_KEY);

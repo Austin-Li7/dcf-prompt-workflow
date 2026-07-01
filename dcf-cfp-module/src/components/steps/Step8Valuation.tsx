@@ -32,6 +32,7 @@ import {
   buildValuationLineageDrivers,
   type ValuationDriver,
 } from "@/lib/valuation-lineage";
+import { normalizeCompanyName } from "@/lib/refresh-gate";
 import {
   loadEventImpactAdjustments,
   saveEventImpactAdjustments,
@@ -119,6 +120,17 @@ export default function Step8Valuation() {
     setEventImpactPackage(loadEventImpactAdjustments());
   }, []);
 
+  const activeEventImpactPackage = useMemo(() => {
+    if (!eventImpactPackage || eventImpactPackage.adjustments.length === 0) return null;
+    const currentTicker = state.profile.ticker.trim().toUpperCase();
+    const packageTicker = eventImpactPackage.ticker.trim().toUpperCase();
+    const currentCompany = normalizeCompanyName(state.profile.companyName || state.profile.step1StructuredResult?.company_name || "");
+    const packageCompany = normalizeCompanyName(eventImpactPackage.companyName);
+    const tickerMatches = Boolean(currentTicker && packageTicker && currentTicker === packageTicker);
+    const companyMatches = Boolean(currentCompany && packageCompany && currentCompany === packageCompany);
+    return tickerMatches || companyMatches ? eventImpactPackage : null;
+  }, [eventImpactPackage, state.profile.companyName, state.profile.step1StructuredResult?.company_name, state.profile.ticker]);
+
   const updateEventAdjustment = useCallback((id: string, patch: Partial<DriverAdjustment>) => {
     setEventImpactPackage((pkg) => {
       if (!pkg) return pkg;
@@ -164,6 +176,10 @@ export default function Step8Valuation() {
     [fcfMargin, terminalGrowth, bankFcfMargin, financialTerminalGrowth, industrialTerminalGrowth,
      preferredStockUsdM, minorityInterestUsdM, state.forecast, state.wacc],
   );
+  const canCompleteValuation = valuation.hasInputs;
+  const saveBlockReason = valuation.warnings.length
+    ? valuation.warnings.join(" ")
+    : "Complete Step 5 forecast and Step 7 WACC / Ke before saving the valuation.";
 
   const step5Artifacts  = useMemo(() => getStep5StructuredResults(state.forecast),  [state.forecast]);
   const assumptionRows  = useMemo(() => buildStep5AssumptionRows(state.forecast),    [state.forecast]);
@@ -182,7 +198,7 @@ export default function Step8Valuation() {
         minorityInterestUsdM,
         wacc: valuation.wacc,
         intrinsicValuePerShare: valuation.intrinsicValuePerShare,
-        eventAdjustments: eventImpactPackage?.adjustments,
+        eventAdjustments: activeEventImpactPackage?.adjustments,
       }),
     [
       state,
@@ -196,7 +212,7 @@ export default function Step8Valuation() {
       industrialTerminalGrowth,
       preferredStockUsdM,
       minorityInterestUsdM,
-      eventImpactPackage,
+      activeEventImpactPackage,
     ],
   );
 
@@ -237,6 +253,12 @@ export default function Step8Valuation() {
     setSavedRecord(null);
     setShowCompleteModal(true);
 
+    if (!valuation.hasInputs) {
+      setIsSaving(false);
+      setSaveError(saveBlockReason);
+      return;
+    }
+
     const isHybrid = valuation.valuationMode === "HYBRID";
     const snapshot: ValuationSnapshot = {
       enterpriseValueUsdM:     valuation.enterpriseValueUsdM,
@@ -276,7 +298,7 @@ export default function Step8Valuation() {
     } finally {
       setIsSaving(false);
     }
-  }, [valuation, fcfMargin, terminalGrowth, bankFcfMargin, financialTerminalGrowth, industrialTerminalGrowth, state]);
+  }, [valuation, saveBlockReason, fcfMargin, terminalGrowth, bankFcfMargin, financialTerminalGrowth, industrialTerminalGrowth, state]);
 
   return (
     <StepShell
@@ -285,6 +307,7 @@ export default function Step8Valuation() {
       subtitle="Normalize the forecast package, bridge free cash flow to enterprise value, and expose the audit trail."
       completeLabel="Valuation Complete"
       onComplete={handleComplete}
+      completeDisabled={!canCompleteValuation}
     >
       <div className="space-y-6">
 
@@ -770,7 +793,7 @@ export default function Step8Valuation() {
         </section>
 
         <EventDrivenAdjustmentsPanel
-          pkg={eventImpactPackage}
+          pkg={activeEventImpactPackage}
           onUpdate={updateEventAdjustment}
           onApply={applyEventAdjustment}
         />
@@ -844,6 +867,12 @@ export default function Step8Valuation() {
         {step5Artifacts.length === 0 && (
           <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
             Step 5 structured machine artifact is missing; rerun and approve Step 5 before relying on this output.
+          </div>
+        )}
+
+        {!canCompleteValuation && (
+          <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
+            Valuation cannot be saved yet: {saveBlockReason}
           </div>
         )}
       </div>
@@ -1193,7 +1222,7 @@ function EventDrivenAdjustmentsPanel({
             <SlidersHorizontal size={16} /> Event-Driven Parameter Adjustments
           </h3>
           <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-            Suggestions from Step 0 events for {pkg.companyName} ({pkg.ticker}). Edit them here before relying on the final valuation.
+            Suggestions from Step 0 events for the current company. Edit them here before relying on the final valuation.
           </p>
         </div>
         <span className="rounded-full bg-zinc-950 px-3 py-1 text-xs font-medium text-zinc-400">

@@ -5,6 +5,8 @@
 // ---------------------------------------------------------------------------
 // Global Settings (LLM Provider & API Keys)
 // ---------------------------------------------------------------------------
+import type { Step2IndustrialStructuredResult } from "@/lib/step2-industrial-schema";
+
 export type LLMProvider = "claude" | "gemini" | "deepseek";
 
 // ---------------------------------------------------------------------------
@@ -81,6 +83,7 @@ export interface SegmentArchitectureEntry {
 export interface BusinessLine {
   name: string;
   products: string[];
+  revenueMechanics?: string;
   customerType: string;
   dataSource: string;
 }
@@ -141,6 +144,7 @@ export interface Step1AnalysisOffering {
   raw_name_variants: string[];
   mapped_from_reported_node_ids: string[];
   products: string[];
+  revenue_mechanics?: string;
   customer_type: string;
   claim_id: string;
   evidence_level: Step1EvidenceLevel;
@@ -213,6 +217,7 @@ export interface Step1AnalysisOfferingReviewEntry {
   targetSegment: string;
   productCount: number;
   products: string[];
+  revenueMechanics?: string;
   rawNameVariants: string[];
   mappedReportedNodeIds: string[];
   claimId: string;
@@ -585,7 +590,7 @@ export interface TrendAnalysisResult {
 export interface HistoricalData {
   rows: HistoricalExtractionRow[];
   confirmedYears: number[]; // distinct years already appended (max 5)
-  structuredResults?: (Step2StructuredResult | Step2BankStructuredResult)[]; // approved Step 2 v5.5 artifacts
+  structuredResults?: (Step2StructuredResult | Step2BankStructuredResult | Step2IndustrialStructuredResult)[]; // approved Step 2 v5.5 artifacts
   continuity_bridges?: ContinuityBridge[]; // segment restructuring audit records
   /** Filing structure hints from bank mode PDF extraction — persisted for future year uploads. */
   filingHints?: FilingHints;

@@ -9,7 +9,12 @@ import {
   STEP4_RESPONSE_SCHEMA,
 } from "@/lib/step4-schema";
 import type { LLMProvider, TrendAnalysisResult } from "@/types/cfp";
-import type { AnalyzeSynergiesResponse } from "@/types/cfp";
+import type {
+  AnalyzeSynergiesResponse,
+  BusinessArchitecture,
+  CompetitiveLandscape,
+  HistoricalData,
+} from "@/types/cfp";
 
 // =============================================================================
 // POST /api/analyze-synergies
@@ -62,20 +67,122 @@ function formatTrendCeilings(trendAnalysis: TrendAnalysisResult | null | undefin
   ].join("\n");
 }
 
+function compactText(value: string | null | undefined, max = 180): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > max ? normalized.slice(0, max) : normalized;
+}
+
+function leanArchitecture(architecture: BusinessArchitecture | null | undefined) {
+  if (!architecture) return null;
+  return {
+    architecture: architecture.architecture.map((segment) => ({
+      segment: segment.segment,
+      businessLines: segment.businessLines.map((line) => ({
+        name: line.name,
+        products: line.products.slice(0, 5),
+        customerType: line.customerType || null,
+        revenueMechanics: compactText(line.revenueMechanics, 120),
+        dataSource: compactText(line.dataSource, 120),
+      })),
+    })),
+    sources: architecture.sources.slice(0, 8).map((source) => ({
+      document: source.document,
+      section: source.section,
+      page: source.page ?? null,
+    })),
+  };
+}
+
+function leanHistory(history: HistoricalData | null | undefined) {
+  if (!history) return null;
+  const rows = history.rows ?? [];
+  const years = [...new Set(rows.map((row) => row.fiscalYear))].sort((a, b) => b - a);
+  const keepYears = new Set(years.slice(0, 2));
+  return {
+    confirmedYears: history.confirmedYears ?? [],
+    rows: rows
+      .filter((row) => keepYears.has(row.fiscalYear))
+      .map((row) => ({
+        fiscalYear: row.fiscalYear,
+        quarter: row.quarter,
+        segment: row.segment,
+        productCategory: row.productCategory,
+        productName: row.productName,
+        revenue: row.revenue,
+        operatingIncome: row.operatingIncome,
+        sourceName: compactText(row.sourceName, 80),
+        ...(row.gross_profit_usd_m != null ? { gross_profit_usd_m: row.gross_profit_usd_m } : {}),
+        ...(row.capex_usd_m != null ? { capex_usd_m: row.capex_usd_m } : {}),
+        ...(row.depreciation_amortization_usd_m != null
+          ? { depreciation_amortization_usd_m: row.depreciation_amortization_usd_m }
+          : {}),
+        ...(row.headcount != null ? { headcount: row.headcount } : {}),
+        ...(row.nii_usd_m != null ? { nii_usd_m: row.nii_usd_m } : {}),
+        ...(row.net_income_usd_m != null ? { net_income_usd_m: row.net_income_usd_m } : {}),
+        ...(row.book_value_equity_usd_m != null ? { book_value_equity_usd_m: row.book_value_equity_usd_m } : {}),
+        ...(row.cet1_ratio_pct != null ? { cet1_ratio_pct: row.cet1_ratio_pct } : {}),
+      })),
+  };
+}
+
+function leanCompetition(competition: CompetitiveLandscape | null | undefined) {
+  if (!competition?.categories?.length) return null;
+  return {
+    approved: competition.approved,
+    categories: competition.categories.map((category) => ({
+      category: category.category,
+      primaryCompetitor: category.primaryCompetitor,
+      competitiveStatus: category.competitiveStatus,
+      materiality: category.materiality ?? null,
+      pairingStatus: category.pairingStatus ?? null,
+      sourceQuality: category.sourceQuality ?? null,
+      confidence: category.confidence ?? null,
+      basisForPairing: compactText(category.basisForPairing, 180),
+      forces: {
+        rivalry: {
+          rating: category.forces.rivalry.rating,
+          justification: compactText(category.forces.rivalry.justification, 140),
+        },
+        newEntrants: {
+          rating: category.forces.newEntrants.rating,
+          justification: compactText(category.forces.newEntrants.justification, 140),
+        },
+        suppliers: {
+          rating: category.forces.suppliers.rating,
+          justification: compactText(category.forces.suppliers.justification, 140),
+        },
+        buyers: {
+          rating: category.forces.buyers.rating,
+          justification: compactText(category.forces.buyers.justification, 140),
+        },
+        substitutes: {
+          rating: category.forces.substitutes.rating,
+          justification: compactText(category.forces.substitutes.justification, 140),
+        },
+      },
+    })),
+  };
+}
+
 function buildStep4Prompt(inputs: {
   step1Architecture: unknown;
   step2Financials: unknown;
   step3Competition: unknown;
   trendAnalysis?: TrendAnalysisResult | null;
 }): string {
+  const architecture = leanArchitecture(inputs.step1Architecture as BusinessArchitecture | null);
+  const financials = leanHistory(inputs.step2Financials as HistoricalData | null);
+  const competition = leanCompetition(inputs.step3Competition as CompetitiveLandscape | null);
   return [
     "Task: Produce Step 4 Synergy & Driver Eligibility plus Step 4.5 Capital Allocation.",
-    "Step 1 architecture input:",
-    JSON.stringify(inputs.step1Architecture, null, 2),
-    "Step 2 historical financials input:",
-    JSON.stringify(inputs.step2Financials || {}, null, 2),
-    "Step 3 competitive landscape input:",
-    JSON.stringify(inputs.step3Competition || {}, null, 2),
+    "Compact Step 1 architecture input:",
+    JSON.stringify(architecture),
+    "Compact Step 2 historical financials input (last 2 fiscal years only):",
+    JSON.stringify(financials),
+    "Compact Step 3 competitive landscape input:",
+    JSON.stringify(competition),
     formatTrendCeilings(inputs.trendAnalysis),
     "Review Prompt V2 requirements:",
     "- Apply the but-for test: if the source business disappeared, would the recipient need to change pricing, product, or cost model?",
@@ -92,6 +199,7 @@ function buildStep4Prompt(inputs: {
     "- EFFICIENCY SCORE (INDUSTRIAL): Set efficiency_score=0 as placeholder — the deterministic score (CapEx/D&A zone + Damodaran variance) is finalized in Step 4.5 (analyze-capital).",
     "- EFFICIENCY SCORE (BANK): Compute TCE = book_value_equity_usd_m − goodwill_usd_m − intangible_assets_usd_m − preferred_equity_usd_m (from Step 2 rows). ROATCE = net_income_usd_m / avg(TCE). A bank with ROATCE > cost of equity (~10–15%) earns a positive efficiency_score; below earns negative. Fall back to ROAE only if TCE components are null; flag in review_note.",
     "- REGULATORY MOAT AS SYNERGY: If a bank charter enables a segment to cross-sell under one regulated entity (reducing per-product compliance cost), classify this as a Core Integration synergy and cite the charter in the rationale.",
+    "- SOURCE RULE: Create concise sources and claims from the compact inputs above. Do not reproduce long excerpts.",
   ].join("\n");
 }
 

@@ -1,4 +1,4 @@
-import { aggregateMasterForecast, aggregateSegmentForecastFy } from "./aggregate-forecast.ts";
+import { aggregateMasterForecast, aggregateSegmentForecastFy, getStep5StructuredResults } from "./aggregate-forecast.ts";
 import type { AggregatedRow, ForecastState } from "../types/cfp.ts";
 import type { WACCState } from "../types/wacc.ts";
 
@@ -192,8 +192,14 @@ export function buildDcfValuation({
   const discountRate = wacc.calculation?.wacc ?? null;
   const isFinancial = wacc.businessType === "financial";
   const valuationMode: "FCFF" | "FCFE" = isFinancial ? "FCFE" : "FCFF";
-  const totalRow = forecast.approved ? aggregateMasterForecast(forecast).find((row) => row.isTotal) : null;
+  const hasStructuredForecast = getStep5StructuredResults(forecast).length > 0;
+  const totalRow = (forecast.approved || hasStructuredForecast)
+    ? aggregateMasterForecast(forecast).find((row) => row.isTotal)
+    : null;
   const warnings: string[] = [];
+  if (hasStructuredForecast && !forecast.approved) {
+    warnings.push("Step 5 forecast exists but is marked NEEDS_REVIEW; review forecast warnings before relying on valuation.");
+  }
 
   if (!totalRow || !discountRate || discountRate <= terminalGrowth) {
     return emptyResult({
@@ -201,7 +207,7 @@ export function buildDcfValuation({
       totalDebtUsdM, totalCashUsdM, sharesOutstandingM,
       preferredStockUsdM, minorityInterestUsdM, valuationMode,
       warnings: [
-        !totalRow ? "Step 5/6 approved annual forecast is required." : "",
+        !totalRow ? "Step 5 structured forecast is required." : "",
         !discountRate ? "Step 7 WACC / Ke calculation is required." : "",
         discountRate && discountRate <= terminalGrowth
           ? "Discount rate must be greater than terminal growth rate."
@@ -312,7 +318,7 @@ export function buildSotpValuation(params: BuildSotpParams): SotpValuationResult
 
   if (!hasBankRevenue && !hasIndustrialRevenue) {
     return emptySotpResult({ bankKe, industrialWacc, bankFcfMargin, industrialFcfMargin, terminalGrowth, marketCapUsdM,
-      warnings: ["Step 5 approved forecast is required. Run Step 5 before completing WACC."] });
+      warnings: ["Step 5 structured forecast is required before saving the valuation."] });
   }
   if (bankKe <= terminalGrowth) {
     warnings.push("Bank Ke must be greater than terminal growth rate.");

@@ -76,8 +76,8 @@ function sourceReferenceForClaim(claim: Step1Claim | undefined): string {
   return claim?.source_location?.trim() || "Not available";
 }
 
-function validationTypeForItem(itemKind: "segment" | "offering"): Step1ValidationType {
-  return itemKind === "segment" ? "Data" : "Information";
+function validationTypeForItem(_itemKind: "segment" | "offering"): Step1ValidationType {
+  return "Data";
 }
 
 function sourceTierForEvidence(
@@ -193,6 +193,7 @@ export function buildStep1ReviewState(result: Step1StructuredResult): Step1Revie
       targetSegment: segment.canonical_name,
       productCount: offering.products.length,
       products: offering.products,
+      revenueMechanics: offering.revenue_mechanics,
       rawNameVariants: offering.raw_name_variants,
       mappedReportedNodeIds: offering.mapped_from_reported_node_ids,
       claimId: offering.claim_id,
@@ -233,7 +234,7 @@ export function buildStep1ReviewState(result: Step1StructuredResult): Step1Revie
 
   analysisSegments.forEach((segment) => {
     if (segment.offeringCount === 0) {
-      warnings.push(`Analysis segment "${segment.originalName}" has no offerings mapped.`);
+      warnings.push(`Analysis segment "${segment.originalName}" has no product/business lines mapped.`);
     }
   });
 
@@ -255,11 +256,11 @@ export function buildStep1ReviewState(result: Step1StructuredResult): Step1Revie
     approvedAt: null,
     canonicalNameRegistry,
     summary: {
-      oneLine: `${result.company_name}: ${analysisSegments.length} analysis segment(s), ${offeringCount} offering(s), ${countReportedNodes(result.reported_view.nodes)} reported node(s), ${result.claims.length} claim(s).`,
+      oneLine: `${result.company_name}: ${analysisSegments.length} analysis segment(s), ${offeringCount} analysis/product revenue line(s), ${countReportedNodes(result.reported_view.nodes)} reported node(s), ${result.claims.length} claim(s).`,
       highlights: [
         `Reported view type: ${result.reported_view.view_type}.`,
         `${analysisSegments.length} canonical analysis segment(s) are ready for review.`,
-        `${offeringCount} offering mapping(s) are available for downstream projection.`,
+        `${offeringCount} analysis/product revenue line mapping(s) are available for downstream projection.`,
         `${result.sources.length} source reference(s) and ${result.claims.length} traced claim(s) were validated.`,
       ],
       warnings: dedupe(warnings),

@@ -435,7 +435,7 @@ export default function Step1Profile() {
                           <p className="text-xs uppercase tracking-wide text-zinc-500">Analysis segment</p>
                           <p className="mt-1 text-sm text-zinc-200">{segment.originalName}</p>
                           <p className="mt-1 text-xs text-zinc-500">
-                            Offerings: {segment.offeringCount} · Evidence: {segment.evidenceLevel}
+                            Product/business lines: {segment.offeringCount} · Evidence: {segment.evidenceLevel}
                           </p>
                         </div>
                         <label className="text-sm text-zinc-300">
@@ -549,9 +549,9 @@ export default function Step1Profile() {
 
                   <div className="space-y-3">
                     <div>
-                      <p className="text-sm font-semibold text-zinc-200">Offering naming and placement</p>
+                      <p className="text-sm font-semibold text-zinc-200">Business / product lines</p>
                       <p className="mt-1 text-xs text-zinc-500">
-                        Rename ambiguous offerings and reassign them if the current analysis mapping looks wrong.
+                        Rename disclosed business lines, product families, platforms, services, or revenue categories and reassign them if the current analysis mapping looks wrong.
                       </p>
                     </div>
                     {review.analysisView.segments.flatMap((segment) =>
@@ -561,11 +561,21 @@ export default function Step1Profile() {
                         className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)]"
                       >
                         <div>
-                          <p className="text-xs uppercase tracking-wide text-zinc-500">Analysis offering</p>
+                          <p className="text-xs uppercase tracking-wide text-zinc-500">Business / product line</p>
                           <p className="mt-1 text-sm text-zinc-200">{line.originalName}</p>
                           <p className="mt-1 text-xs text-zinc-500">
                             Current segment: {line.parentSegment} · Products: {line.productCount} · Evidence: {line.evidenceLevel}
                           </p>
+                          {line.products.length > 0 && (
+                            <p className="mt-1 text-xs text-zinc-400">
+                              Offerings: {line.products.join(", ")}
+                            </p>
+                          )}
+                          {line.revenueMechanics && (
+                            <p className="mt-1 text-xs text-zinc-500">
+                              Revenue: {line.revenueMechanics}
+                            </p>
+                          )}
                         </div>
                         <label className="text-sm text-zinc-300">
                           Canonical name

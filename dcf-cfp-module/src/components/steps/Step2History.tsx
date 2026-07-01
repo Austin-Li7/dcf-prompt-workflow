@@ -56,10 +56,11 @@ import {
 import { projectStep2StructuredToRows } from "@/lib/step2-schema";
 import { projectStep2BankStructuredToRows } from "@/lib/step2-bank-schema";
 import { projectStep2IndustrialStructuredToRows } from "@/lib/step2-industrial-schema";
+import { fetchXbrlHistory, type XbrlSegmentCoverage, type XbrlTargetLine } from "@/lib/sec-xbrl-history";
 import type { Step2BankStructuredResult } from "@/lib/step2-bank-schema";
 import type { Step2StructuredResult } from "@/lib/step2-schema";
 import type { Step2IndustrialStructuredResult } from "@/lib/step2-industrial-schema";
-import type { HistoricalExtractionRow, ExtractHistoryResponse, WorkflowMode, TrendAnalysisResult } from "@/types/cfp";
+import type { HistoricalExtractionRow, WorkflowMode, TrendAnalysisResult } from "@/types/cfp";
 import { LineagePanel, LineageCard } from "@/components/ui/LineagePanel";
 
 // =============================================================================
@@ -105,7 +106,10 @@ function parseNullableMetric(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-type Step2StructuredResultForReview = NonNullable<ExtractHistoryResponse["structuredResult"]>;
+type Step2StructuredResultForReview =
+  | Step2StructuredResult
+  | Step2BankStructuredResult
+  | Step2IndustrialStructuredResult;
 
 async function detectFiscalYearsFromFile(file: File): Promise<number[]> {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
@@ -199,6 +203,11 @@ export default function Step2History() {
   const [stagingRows, setStagingRows] = useState<HistoricalExtractionRow[]>([]);
   const [stagingYears, setStagingYears] = useState<number[]>([]);
   const [structuredResults, setStructuredResults] = useState<Step2StructuredResultForReview[]>([]);
+  const [isXbrlLoading, setIsXbrlLoading] = useState(false);
+  const [xbrlError, setXbrlError] = useState<string | null>(null);
+  const [xbrlCoverage, setXbrlCoverage] = useState<XbrlSegmentCoverage | null>(null);
+  const [xbrlWarnings, setXbrlWarnings] = useState<string[]>([]);
+  const [xbrlQuery, setXbrlQuery] = useState("");
 
   // ── Company type detection for upload mode ───────────────────────────────────
   const companyTypeForPdf = state.profile.step1StructuredResult?.company_type;
@@ -218,10 +227,66 @@ export default function Step2History() {
     setShowPdfUploader(true);
   }, [companyTypeForPdf]);
 
+  useEffect(() => {
+    const defaultQuery = state.profile.ticker || state.profile.companyName;
+    setXbrlQuery((current) => current || defaultQuery || "");
+  }, [state.profile.companyName, state.profile.ticker]);
+
   // ── Master history from context ──────────────────────────────────────────────
   const masterRows = state.history.rows;
   const confirmedYears = state.history.confirmedYears;
   const canAddMoreYears = confirmedYears.length < MAX_YEARS;
+  const xbrlTargetLines = useMemo<XbrlTargetLine[]>(
+    () => {
+      const dedupe = (lines: XbrlTargetLine[]) =>
+        Array.from(
+          new Map(
+            lines.map((line) => [
+              `${line.parentSegment.toLowerCase()}|${line.name.toLowerCase()}`,
+              line,
+            ]),
+          ).values(),
+        );
+      const structuredSegments = state.profile.step1StructuredResult?.analysis_view.segments;
+      if (structuredSegments) {
+        const lines = structuredSegments.flatMap((segment) => [
+          {
+            name: segment.canonical_name,
+            parentSegment: segment.canonical_name,
+            category: "Segment total",
+            isOffering: false,
+          },
+          ...segment.offerings.map((offering) => ({
+            name: offering.canonical_name,
+            parentSegment: segment.canonical_name,
+            category: offering.category || "Business / product line",
+            isOffering: true,
+          })),
+        ]);
+        return dedupe(lines);
+      }
+      const architecture = state.profile.architectureJson?.architecture;
+      if (architecture) {
+        const lines = architecture.flatMap((entry) => [
+          {
+            name: entry.segment,
+            parentSegment: entry.segment,
+            category: "Segment total",
+            isOffering: false,
+          },
+          ...entry.businessLines.map((line) => ({
+            name: line.name,
+            parentSegment: entry.segment,
+            category: "Business / product line",
+            isOffering: true,
+          })),
+        ]);
+        return dedupe(lines);
+      }
+      return [];
+    },
+    [state.profile.architectureJson, state.profile.step1StructuredResult],
+  );
 
   const hasStagingData = stagingRows.length > 0;
   const yearsToExtract = useMemo(() => {
@@ -500,6 +565,52 @@ export default function Step2History() {
     [dispatch],
   );
 
+  const handleXbrlImport = useCallback(async () => {
+    const query = xbrlQuery.trim();
+    if (!query) {
+      setXbrlError("Ticker or company name is required before importing SEC XBRL.");
+      return;
+    }
+    if (!canAddMoreYears) {
+      setXbrlError(`Maximum of ${MAX_YEARS} distinct years reached. Remove history to add more.`);
+      return;
+    }
+
+    setIsXbrlLoading(true);
+    setXbrlError(null);
+    setXbrlCoverage(null);
+    setXbrlWarnings([]);
+    try {
+      const remainingYears = MAX_YEARS - confirmedYears.length;
+      const result = await fetchXbrlHistory(query, xbrlTargetLines, MAX_YEARS);
+      const freshYears = result.years.filter((year) => !confirmedYears.includes(year)).slice(-remainingYears);
+      const freshRows = result.rows.filter((row) => freshYears.includes(row.fiscalYear));
+      const freshStructuredResults = result.structuredResults.filter((sr) =>
+        freshYears.includes(sr.target_year),
+      );
+
+      if (freshRows.length === 0) {
+        setXbrlError("SEC XBRL import found data, but all detected fiscal years are already confirmed.");
+        setXbrlCoverage(result.segmentCoverage);
+        setXbrlWarnings(result.warnings);
+        return;
+      }
+
+      setStagingRows(freshRows);
+      setStagingYears(freshYears);
+      setStructuredResults(freshStructuredResults as Step2StructuredResultForReview[]);
+      setXbrlCoverage(result.segmentCoverage);
+      setXbrlWarnings(result.warnings);
+      setTimeout(() => {
+        document.getElementById("step2-staging")?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+    } catch (err) {
+      setXbrlError(err instanceof Error ? err.message : "SEC XBRL import failed.");
+    } finally {
+      setIsXbrlLoading(false);
+    }
+  }, [canAddMoreYears, confirmedYears, xbrlTargetLines, xbrlQuery]);
+
   // ── Trend analysis API call ──────────────────────────────────────────────────
   const runTrendAnalysis = useCallback(
     async (rows: HistoricalExtractionRow[], steadyYear?: number | null) => {
@@ -661,6 +772,19 @@ export default function Step2History() {
                 )}
               </span>
             </div>
+
+            <XbrlImportPanel
+              query={xbrlQuery}
+              onQueryChange={setXbrlQuery}
+              isLoading={isXbrlLoading}
+              error={xbrlError}
+              coverage={xbrlCoverage}
+              warnings={xbrlWarnings}
+              confirmedYears={confirmedYears}
+              segmentCount={xbrlTargetLines.length}
+              disabled={!canAddMoreYears || isExtracting}
+              onImport={() => void handleXbrlImport()}
+            />
 
             {/* ── Industrial PDF Uploader ─────────────────────────────────── */}
             {(isIndustrial || isHybrid) && showPdfUploader && (
@@ -949,6 +1073,106 @@ export default function Step2History() {
         </div>
       )}
     </StepShell>
+  );
+}
+
+// =============================================================================
+// XbrlImportPanel
+// =============================================================================
+interface XbrlImportPanelProps {
+  query: string;
+  onQueryChange: (value: string) => void;
+  isLoading: boolean;
+  error: string | null;
+  coverage: XbrlSegmentCoverage | null;
+  warnings: string[];
+  confirmedYears: number[];
+  segmentCount: number;
+  disabled: boolean;
+  onImport: () => void;
+}
+
+function XbrlImportPanel({
+  query,
+  onQueryChange,
+  isLoading,
+  error,
+  coverage,
+  warnings,
+  confirmedYears,
+  segmentCount,
+  disabled,
+  onImport,
+}: XbrlImportPanelProps) {
+  const safeQuery = query ?? "";
+  return (
+    <div className="rounded-lg border border-blue-500/25 bg-blue-500/5 p-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0 space-y-2">
+          <div className="flex items-center gap-2">
+            <Database size={17} className="text-blue-300" />
+            <h4 className="text-sm font-semibold text-zinc-100">SEC XBRL Segment Revenue Import</h4>
+            <span className="rounded bg-blue-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-blue-300">
+              XBRL members
+            </span>
+          </div>
+          <p className="text-xs leading-5 text-zinc-400">
+            Enter a ticker or company name. The system pulls recent 10-K and 10-Q filings, matches Step 1 segments
+            to inline XBRL dimension members, discovers filing-level revenue/product lines, imports Q1-Q3 directly,
+            and derives Q4 from annual less Q1-Q3.
+          </p>
+          <input
+            value={safeQuery}
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Ticker or company name, e.g. TSLA or Tesla"
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-blue-500"
+          />
+          <div className="flex flex-wrap gap-2 text-[11px] text-zinc-500">
+            <span className="rounded bg-zinc-900 px-2 py-1">Query: {safeQuery || "not set"}</span>
+            <span className="rounded bg-zinc-900 px-2 py-1">{confirmedYears.length}/5 years confirmed</span>
+            <span className="rounded bg-zinc-900 px-2 py-1">{segmentCount} Step 1/XBRL seed line(s)</span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          disabled={disabled || isLoading || !safeQuery.trim()}
+          onClick={onImport}
+          className="flex shrink-0 items-center justify-center gap-2 rounded-lg border border-blue-500/50 bg-blue-600/15 px-4 py-2 text-sm font-medium text-blue-200 transition-colors hover:bg-blue-600/25 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isLoading ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+          Find Quarterly Segment XBRL
+        </button>
+      </div>
+
+      {coverage && (
+        <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/60 p-3 text-xs text-zinc-400">
+          <p className="font-medium text-zinc-300">Segment coverage</p>
+          <p className="mt-1 leading-5">{coverage.note}</p>
+          {coverage.missingSegments.length > 0 && (
+            <p className="mt-1 text-amber-300/85">
+              Segment rows still need filing/PDF extraction: {coverage.missingSegments.join(", ")}
+            </p>
+          )}
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="mt-3 space-y-1 rounded border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-300">
+          {warnings.slice(0, 4).map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+          {warnings.length > 4 && <p>{warnings.length - 4} more warning(s).</p>}
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-3 flex items-start gap-2 rounded border border-red-500/25 bg-red-500/10 p-3 text-xs text-red-300">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1543,6 +1767,17 @@ function SegmentGroup({
   rows: HistoricalExtractionRow[];
 }) {
   const [open, setOpen] = useState(true);
+  const showProductColumns = rows.some((row) => {
+    const category = row.productCategory?.trim();
+    const product = row.productName?.trim();
+    return Boolean(
+      category &&
+        product &&
+        category !== "Segment total" &&
+        product !== "Segment total" &&
+        (category !== row.segment || product !== row.segment),
+    );
+  });
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950">
@@ -1569,8 +1804,12 @@ function SegmentGroup({
               <tr>
                 <th className="px-3 py-1.5 font-medium">Year</th>
                 <th className="px-3 py-1.5 font-medium">Qtr</th>
-                <th className="px-3 py-1.5 font-medium">Category</th>
-                <th className="px-3 py-1.5 font-medium">Product</th>
+                {showProductColumns && (
+                  <>
+                    <th className="px-3 py-1.5 font-medium">Category</th>
+                    <th className="px-3 py-1.5 font-medium">Product</th>
+                  </>
+                )}
                 <th className="px-3 py-1.5 font-medium text-right">Revenue ($M)</th>
                 <th className="px-3 py-1.5 font-medium text-right">Op. Income ($M)</th>
                 <th className="px-3 py-1.5 font-medium">Review</th>
@@ -1583,8 +1822,12 @@ function SegmentGroup({
                 <tr key={row.id} className="hover:bg-zinc-900/50">
                   <td className="px-3 py-1.5 text-zinc-300">{row.fiscalYear}</td>
                   <td className="px-3 py-1.5 text-zinc-300">{row.quarter}</td>
-                  <td className="px-3 py-1.5 text-zinc-400">{row.productCategory}</td>
-                  <td className="px-3 py-1.5 text-zinc-400">{row.productName}</td>
+                  {showProductColumns && (
+                    <>
+                      <td className="px-3 py-1.5 text-zinc-400">{row.productCategory}</td>
+                      <td className="px-3 py-1.5 text-zinc-400">{row.productName}</td>
+                    </>
+                  )}
                   <td className="px-3 py-1.5 text-right font-mono text-zinc-200">
                     {formatNullableMetric(row.revenue)}
                   </td>

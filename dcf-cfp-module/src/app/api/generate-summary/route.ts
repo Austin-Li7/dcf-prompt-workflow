@@ -204,6 +204,107 @@ function detectSummaryMode(artifacts: unknown[]): "INDUSTRIAL" | "BANK" | "HYBRI
 
 const EMPTY_INDUSTRIAL: SummaryInsights = { topEngines: [], conclusion: { revenueShift: "", ecosystemResilience: "" } };
 
+function compactText(value: unknown, max = 180): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > max ? normalized.slice(0, max) : normalized;
+}
+
+function leanForecastArtifacts(artifacts: unknown[]) {
+  if (!Array.isArray(artifacts)) return [];
+  return artifacts.map((artifact) => {
+    const rec = artifact as Record<string, unknown>;
+    const machine = (rec.machine_artifact as Record<string, unknown> | undefined) ?? {};
+    const assumptions = Array.isArray(machine.assumptions)
+      ? (machine.assumptions as Record<string, unknown>[]).slice(0, 6).map((assumption) => ({
+          id: assumption.id,
+          statement: compactText(assumption.statement, 180),
+          driver_quality: assumption.driver_quality,
+        }))
+      : [];
+    const forecastTable = Array.isArray(machine.forecast_table)
+      ? (machine.forecast_table as Record<string, unknown>[]).map((row) => ({
+          segment: row.segment,
+          category: row.category,
+          fiscal_year: row.fiscal_year,
+          revenue_base_usd_m: row.revenue_base_usd_m,
+          yoy_growth_pct: row.yoy_growth_pct,
+          driver_quality: row.driver_quality,
+          flags: row.flags,
+          fcfe_usd_m: row.fcfe_usd_m,
+          nim_pct: row.nim_pct,
+        }))
+      : [];
+    return {
+      company_name: rec.company_name,
+      valuation_method: rec.valuation_method,
+      assumptions,
+      forecast_table: forecastTable,
+      warnings: (rec.review_summary as Record<string, unknown> | undefined)?.warnings ?? [],
+      workflow_status: machine.workflow_status,
+    };
+  });
+}
+
+function leanWarnings(warnings: unknown[]) {
+  if (!Array.isArray(warnings)) return [];
+  return warnings.slice(0, 12).map((warning) => {
+    const rec = warning as Record<string, unknown>;
+    return {
+      segment: rec.segment,
+      severity: rec.severity,
+      message: compactText(rec.message, 180) ?? compactText(String(warning), 180),
+    };
+  });
+}
+
+function leanCompetition(competition: unknown) {
+  const rec = competition as { categories?: unknown[] } | null | undefined;
+  if (!rec?.categories?.length) return null;
+  return {
+    categories: rec.categories.map((category) => {
+      const c = category as Record<string, unknown>;
+      const forces = (c.forces as Record<string, { rating?: string }> | undefined) ?? {};
+      return {
+        category: c.category,
+        primaryCompetitor: c.primaryCompetitor,
+        competitiveStatus: c.competitiveStatus,
+        materiality: c.materiality,
+        forces: {
+          rivalry: forces.rivalry?.rating,
+          newEntrants: forces.newEntrants?.rating,
+          suppliers: forces.suppliers?.rating,
+          buyers: forces.buyers?.rating,
+          substitutes: forces.substitutes?.rating,
+        },
+      };
+    }),
+  };
+}
+
+function leanSynergies(synergies: unknown) {
+  const rec = synergies as Record<string, unknown> | null | undefined;
+  if (!rec) return null;
+  const paths = Array.isArray(rec.paths)
+    ? (rec.paths as Record<string, unknown>[]).map((path) => ({
+        sourceBusiness: path.sourceBusiness,
+        recipientBusiness: path.recipientBusiness,
+        mechanism: compactText(path.mechanism, 160),
+        impactScore: path.impactScore,
+        driverEligibility: path.driverEligibility,
+      }))
+    : [];
+  const structured = rec.structuredResult as Record<string, unknown> | undefined;
+  const capital = structured?.capital_allocation as Record<string, unknown> | undefined;
+  const ceiling = capital?.step5_revenue_ceiling as Record<string, unknown> | undefined;
+  return {
+    paths,
+    capitalCeilingUsdM: ceiling?.applies ? ceiling.ceiling_revenue_usd_m : null,
+    workflowStatus: (rec.step4Review as Record<string, unknown> | undefined)?.workflowStatus ?? null,
+  };
+}
+
 const INDUSTRIAL_PROMPT_TASKS = [
   "You are an elite Chief Investment Officer reviewing a completed 5-year financial model.",
   "Task 1: Identify the Top 3 Growth Engines (Categories) based strictly on the highest 5-year revenue CAGR in the aggregated forecast data. Provide a 1-sentence explanation referencing competition and synergy data.",
@@ -274,10 +375,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<GenerateSumma
 
     const dataBlock = [
       `Aggregated forecast (NII/revenue + FCFE where available): ${JSON.stringify(aggregatedTableData)}`,
-      `Step 5 v5.5 forecast artifacts: ${JSON.stringify(step5ForecastArtifacts || [])}`,
-      `Step 5 review warnings: ${JSON.stringify(step5ReviewWarnings || [])}`,
-      `Competition: ${JSON.stringify(step3Competition || {})}`,
-      `Synergies & Capital: ${JSON.stringify(step4Complete || {})}`,
+      `Compact Step 5 v5.5 forecast artifacts: ${JSON.stringify(leanForecastArtifacts(step5ForecastArtifacts || []))}`,
+      `Compact Step 5 review warnings: ${JSON.stringify(leanWarnings(step5ReviewWarnings || []))}`,
+      `Compact competition: ${JSON.stringify(leanCompetition(step3Competition))}`,
+      `Compact synergies & capital: ${JSON.stringify(leanSynergies(step4Complete))}`,
       historicalMarginBlock,
       liquidityRatingBlock,
     ].join("\n");

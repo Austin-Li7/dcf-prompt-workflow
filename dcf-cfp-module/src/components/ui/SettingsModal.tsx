@@ -11,6 +11,8 @@ import {
   FolderOpen,
   Upload,
   Download,
+  Copy,
+  FileText,
   Trash2,
   RotateCcw,
   ChevronDown,
@@ -25,6 +27,7 @@ import {
   deleteSave,
   clearAllCompanySaves,
   downloadSave,
+  buildSaveSummary,
   parseSaveFile,
 } from "@/lib/company-saves";
 
@@ -53,11 +56,15 @@ function SaveRow({
   save,
   onLoad,
   onDownload,
+  onCopy,
+  onCopySummary,
   onDelete,
 }: {
   save: CompanySave;
   onLoad: (s: CompanySave) => void;
   onDownload: (s: CompanySave) => void;
+  onCopy: (s: CompanySave) => void;
+  onCopySummary: (s: CompanySave) => void;
   onDelete: (saveId: string) => void;
 }) {
   const decisionColor: Record<string, string> = {
@@ -104,10 +111,26 @@ function SaveRow({
         {/* Download */}
         <button
           onClick={() => onDownload(save)}
-          title="Download as JSON"
+          title="Download full backup JSON"
           className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
         >
           <Download size={13} />
+        </button>
+        {/* Copy */}
+        <button
+          onClick={() => onCopy(save)}
+          title="Copy full backup JSON"
+          className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+        >
+          <Copy size={13} />
+        </button>
+        {/* Copy summary */}
+        <button
+          onClick={() => onCopySummary(save)}
+          title="Copy compact valuation summary"
+          className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+        >
+          <FileText size={13} />
         </button>
         {/* Delete */}
         <button
@@ -132,6 +155,7 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [saves, setSaves] = useState<CompanySave[]>([]);
   const [savesOpen, setSavesOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [clearConfirm, setClearConfirm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -145,6 +169,7 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   useEffect(() => {
     if (!open) {
       setLoadError(null);
+      setCopyStatus(null);
       setClearConfirm(false);
     }
   }, [open]);
@@ -179,6 +204,52 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   async function handleDeleteSave(saveId: string) {
     await deleteSave(saveId);
     setSaves((prev) => prev.filter((s) => s.saveId !== saveId));
+  }
+
+  function handleDownloadSave(save: CompanySave) {
+    downloadSave(save);
+    setCopyStatus(`Download requested for ${save.ticker} v${save.version}. If no file appears, use Copy full backup JSON.`);
+    window.setTimeout(() => setCopyStatus(null), 5000);
+  }
+
+  async function handleCopySave(save: CompanySave) {
+    const json = JSON.stringify(save, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      setCopyStatus(`Copied full ${save.ticker} v${save.version} backup JSON to clipboard.`);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = json;
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      setCopyStatus(copied ? `Copied full ${save.ticker} v${save.version} backup JSON to clipboard.` : "Copy failed. Browser blocked clipboard access.");
+    }
+    window.setTimeout(() => setCopyStatus(null), 3500);
+  }
+
+  async function handleCopySummary(save: CompanySave) {
+    const json = JSON.stringify(buildSaveSummary(save), null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      setCopyStatus(`Copied compact ${save.ticker} v${save.version} valuation summary.`);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = json;
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      setCopyStatus(copied ? `Copied compact ${save.ticker} v${save.version} valuation summary.` : "Copy failed. Browser blocked clipboard access.");
+    }
+    window.setTimeout(() => setCopyStatus(null), 3500);
   }
 
   async function handleClearAll() {
@@ -349,6 +420,12 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                         {loadError}
                       </p>
                     )}
+                    {copyStatus && (
+                      <p className="mt-1.5 flex items-center gap-1.5 text-xs text-emerald-400">
+                        <Check size={11} />
+                        {copyStatus}
+                      </p>
+                    )}
                   </div>
 
                   {/* Saves list */}
@@ -370,7 +447,9 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                               key={save.saveId}
                               save={save}
                               onLoad={handleLoadSave}
-                              onDownload={downloadSave}
+                              onDownload={handleDownloadSave}
+                              onCopy={handleCopySave}
+                              onCopySummary={handleCopySummary}
                               onDelete={handleDeleteSave}
                             />
                           ))}

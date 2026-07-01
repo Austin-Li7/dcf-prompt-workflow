@@ -13,6 +13,7 @@
  */
 
 import type { CFPState, CompanySave, ValuationSnapshot } from "@/types/cfp";
+import { downloadJsonFile } from "@/lib/download-json";
 
 // =============================================================================
 // Constants
@@ -173,16 +174,64 @@ export function saveFilename(save: CompanySave): string {
 /** Trigger a browser download of the save as JSON. */
 export function downloadSave(save: CompanySave): void {
   const json = JSON.stringify(save, null, 2);
-  const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-  const url  = URL.createObjectURL(blob);
-  const a    = Object.assign(document.createElement("a"), {
-    href:     url,
-    download: saveFilename(save),
-  });
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  downloadJsonFile(saveFilename(save), json);
+}
+
+/** Build a compact JSON summary for review/sharing without the full workflow state. */
+export function buildSaveSummary(save: CompanySave): Record<string, unknown> {
+  const profile = save.cfpState.profile;
+  return {
+    saveId: save.saveId,
+    companyName: save.companyName,
+    ticker: save.ticker,
+    savedAt: save.savedAt,
+    version: save.version,
+    companyProfile: {
+      companyName: profile.companyName,
+      ticker: profile.ticker,
+      sector: profile.sector,
+      industry: profile.industry,
+      currency: profile.currency,
+      lastUpdated: profile.lastUpdated,
+    },
+    valuationSnapshot: save.snapshot,
+    completedState: {
+      currentStep: save.cfpState.currentStep,
+      step1Approved: Boolean(save.cfpState.profile.step1Review?.approved),
+      historyYears: save.cfpState.history.confirmedYears,
+      step3Approved: save.cfpState.competition.approved,
+      synergiesApproved: save.cfpState.synergies.synergiesApproved,
+      capitalApproved: save.cfpState.synergies.capitalApproved,
+      forecastApproved: save.cfpState.forecast.approved,
+      waccSaved: save.cfpState.wacc.saved,
+    },
+    keyAssumptions: {
+      fcfMargin: save.snapshot.fcfMargin,
+      terminalGrowth: save.snapshot.terminalGrowth,
+      wacc: save.snapshot.wacc,
+      valuationMode: save.snapshot.valuationMode,
+      bankFcfMargin: save.snapshot.bankFcfMargin,
+      industrialFcfMargin: save.snapshot.industrialFcfMargin,
+      bankKe: save.snapshot.bankKe,
+      industrialWacc: save.snapshot.industrialWacc,
+    },
+    marketData: save.cfpState.wacc.fetchedData
+      ? {
+          marketCap: save.cfpState.wacc.fetchedData.marketCap,
+          currentPrice: save.cfpState.wacc.fetchedData.currentPrice,
+          sharesOutstanding: save.cfpState.wacc.fetchedData.sharesOutstanding,
+          totalCash: save.cfpState.wacc.fetchedData.totalCash,
+          totalDebt: save.cfpState.wacc.fetchedData.totalDebt,
+          riskFreeRate: save.cfpState.wacc.fetchedData.riskFreeRate,
+          damodaranBeta: save.cfpState.wacc.fetchedData.damodaranBeta,
+          damodaranIndustry: save.cfpState.wacc.fetchedData.damodaranIndustry,
+        }
+      : null,
+  };
+}
+
+export function saveSummaryFilename(save: CompanySave): string {
+  return saveFilename(save).replace(/\.json$/, "-summary.json");
 }
 
 /**

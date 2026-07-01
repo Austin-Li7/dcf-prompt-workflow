@@ -344,6 +344,6 @@ test("compacts verbose product lists, variants, and source snippets at the schem
     "Products",
     "Product Revenue",
   ]);
-  assert.deepEqual(parsed.analysis_view.segments[0].offerings[0].products, ["A", "B", "C"]);
+  assert.deepEqual(parsed.analysis_view.segments[0].offerings[0].products, ["A", "B", "C", "D", "E"]);
   assert.equal(parsed.claims[0].source_snippet?.length, 180);
 });
